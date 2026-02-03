@@ -1,10 +1,3 @@
-import type { Metadata } from "next";
-
-export const metadata: Metadata = {
-  title: "YPLabs",
-  description: "Council Platform",
-};
-
 export default function RootLayout({
   children,
 }: {
@@ -12,9 +5,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="th">
-      <body className="bg-neutral-950 text-white">
-        {children}
-      </body>
+      <body>{children}</body>
     </html>
   );
 }
