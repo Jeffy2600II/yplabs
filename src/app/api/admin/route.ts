@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 
 /**
  * POST /api/admin
@@ -15,6 +15,9 @@ import { supabaseAdmin } from "@/lib/supabaseAdmin";
  */
 export async function POST(req: Request) {
   try {
+    // สร้าง client แบบ lazy (จะ throw ถ้า env ขาด)
+    const supabaseAdmin = getSupabaseAdmin();
+
     const authHeader = req.headers.get("authorization") ?? "";
     const token = authHeader.replace(/^Bearer\s+/i, "");
     if (!token) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
