@@ -2,15 +2,17 @@
 
 import { useState } from "react";
 
+type Toast = { type: "success" | "error" | "info";title: string;message ? : string };
+
 export default function SubmitPage() {
   const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState("");
   const [fileName, setFileName] = useState("");
+  const [toast, setToast] = useState < Toast | null > (null);
   
   async function handleSubmit(e: any) {
     e.preventDefault();
     setLoading(true);
-    setMsg("");
+    setToast(null);
     
     const formData = new FormData(e.target);
     
@@ -20,19 +22,27 @@ export default function SubmitPage() {
         body: formData,
       });
       
-      const data = await res.json();
+      const status = res.status;
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        // non-json response
+      }
+      
       setLoading(false);
       
-      if (data.success) {
-        setMsg("ส่งข้อมูลเรียบร้อยแล้ว ✅");
+      if (res.ok && data?.success) {
+        setToast({ type: "success", title: "ส่งสำเร็จ", message: "ส่งข้อมูลเรียบร้อยแล้ว ✅" });
         e.target.reset();
         setFileName("");
       } else {
-        setMsg(data.error || "เกิดข้อผิดพลาด");
+        const errMsg = data?.error ?? `เกิดข้อผิดพลาด (status ${status})`;
+        setToast({ type: "error", title: "เกิดข้อผิดพลาด", message: errMsg });
       }
     } catch (error: any) {
       setLoading(false);
-      setMsg(error?.message || "ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์");
+      setToast({ type: "error", title: "ไม่สามารถเชื่อมต่อ", message: error?.message ?? "" });
     }
   }
   
@@ -114,7 +124,7 @@ export default function SubmitPage() {
             onClick={(e) => {
               (e.target as HTMLButtonElement).closest("form")?.reset();
               setFileName("");
-              setMsg("");
+              setToast(null);
             }}
             style={{
               padding: "10px 16px",
@@ -130,7 +140,45 @@ export default function SubmitPage() {
         </div>
       </form>
 
-      {msg && <p style={{ marginTop: 16 }}>{msg}</p>}
+      {/* Toast / Popup */}
+      {toast && (
+        <div
+          role="dialog"
+          aria-live="assertive"
+          style={{
+            position: "fixed",
+            left: "50%",
+            transform: "translateX(-50%)",
+            bottom: 32,
+            minWidth: 280,
+            maxWidth: "90%",
+            background: toast.type === "success" ? "#0b6623" : "#7a1f1f",
+            color: "#fff",
+            padding: "12px 16px",
+            borderRadius: 8,
+            boxShadow: "0 6px 24px rgba(0,0,0,0.5)",
+            zIndex: 9999,
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>{toast.title}</div>
+          {toast.message && <div style={{ opacity: 0.95 }}>{toast.message}</div>}
+          <div style={{ marginTop: 8, textAlign: "right" }}>
+            <button
+              onClick={() => setToast(null)}
+              style={{
+                border: "none",
+                background: "transparent",
+                color: "#fff",
+                opacity: 0.9,
+                cursor: "pointer",
+                fontSize: 14,
+              }}
+            >
+              ปิด
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
