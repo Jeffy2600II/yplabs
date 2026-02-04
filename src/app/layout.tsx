@@ -1,3 +1,10 @@
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "YPLabs",
+  description: "Council Platform",
+};
+
 export default function RootLayout({
   children,
 }: {
@@ -5,7 +12,16 @@ export default function RootLayout({
 }) {
   return (
     <html lang="th">
-      <body>{children}</body>
+      <body
+        style={{
+          margin: 0,
+          backgroundColor: "#0a0a0a",
+          color: "#ffffff",
+          fontFamily: "system-ui, sans-serif",
+        }}
+      >
+        {children}
+      </body>
     </html>
   );
 }
