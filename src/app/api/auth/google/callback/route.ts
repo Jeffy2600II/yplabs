@@ -6,13 +6,18 @@ import { google } from "googleapis";
  * Exchanges code for tokens and returns a simple HTML page that shows the refresh_token.
  * After you copy the refresh_token to your Vercel env (GOOGLE_OAUTH_REFRESH_TOKEN), remove the token from this page.
  */
+
+export const dynamic = "force-dynamic"; // required because we use request.url
+
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
     const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
-    const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || `${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/auth/google/callback`;
+    const redirectUri =
+      process.env.GOOGLE_OAUTH_REDIRECT_URI ||
+      `${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/auth/google/callback`;
     
     if (!code) {
       return NextResponse.json({ error: "Missing code in query" }, { status: 400 });
