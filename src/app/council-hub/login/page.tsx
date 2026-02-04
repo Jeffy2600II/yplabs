@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
+import { getBrowserSupabase } from "@/lib/supabaseClient";
 import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
@@ -17,6 +17,8 @@ export default function LoginPage() {
     setError(null);
     
     try {
+      const supabase = getBrowserSupabase();
+      
       const { data, error: signError } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -94,7 +96,6 @@ export default function LoginPage() {
 
         {error && <div style={{ color: "salmon" }}>{error}</div>}
       </form>
-
       <p style={{ marginTop: 18, opacity: 0.8 }}>
         หากยังไม่มีบัญชี กรุณา <a href="/council-hub/register">ส่งคำขอสมัคร</a> หรือ ติดต่อผู้ดูแล
       </p>
