@@ -7,18 +7,18 @@ import { validate } from "@/lib/validate";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function POST(req: Request) {
+export function POST(req: Request): Promise<Response> {
   const form = formidable({ keepExtensions: true });
 
-  return new Promise((resolve) => {
+  return new Promise<Response>((resolve) => {
     form.parse(req as any, async (err, fields, files) => {
       try {
         if (err) throw err;
 
-        validate(fields, files.file);
+        validate(fields, files?.file);
 
         let fileId = "";
-        if (files.file) {
+        if (files?.file) {
           fileId = await uploadFile(files.file);
         }
 
@@ -33,7 +33,7 @@ export async function POST(req: Request) {
       } catch (e: any) {
         resolve(
           NextResponse.json(
-            { error: e.message },
+            { error: e?.message ?? "เกิดข้อผิดพลาดไม่ทราบสาเหตุ" },
             { status: 400 }
           )
         );
