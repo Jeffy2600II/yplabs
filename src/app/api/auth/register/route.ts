@@ -3,23 +3,39 @@ import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 
 /**
  * POST /api/auth/register
- * Body: { full_name, student_id, year, email }
+ * Body: { full_name, student_id, year }
  * บันทึกเป็นคำขอสมัครใน council_user_requests (ต้องรอแอดมินอนุมัติ)
- * ใช้ service client แบบ lazy (getSupabaseAdmin) เพื่อไม่ให้ build ผิดพลาด
  */
 export async function POST(req: Request) {
   try {
     const supabaseAdmin = getSupabaseAdmin();
     
     const body = await req.json();
-    const { full_name, student_id, year, email } = body;
+    const { full_name, student_id, year } = body;
     
-    if (!full_name || !student_id || !year || !email) {
+    if (!full_name || !student_id || !year) {
       return NextResponse.json({ error: "ข้อมูลไม่ครบ" }, { status: 400 });
     }
     
+    // prevent duplicate requests for same student_id
+    const { data: existing, error: existingErr } = await supabaseAdmin
+      .from("council_user_requests")
+      .select("id")
+      .eq("student_id", student_id)
+      .limit(1)
+      .maybeSingle();
+    
+    if (existingErr) {
+      console.error("check existing request error:", existingErr);
+      return NextResponse.json({ error: "Server error" }, { status: 500 });
+    }
+    
+    if (existing) {
+      return NextResponse.json({ error: "มีคำขอสำหรับรหัสนักเรียนนี้แล้ว" }, { status: 400 });
+    }
+    
     const { error } = await supabaseAdmin.from("council_user_requests").insert([
-      { full_name, student_id, year, email, created_at: new Date().toISOString() },
+      { full_name, student_id, year, created_at: new Date().toISOString() },
     ]);
     
     if (error) {

@@ -6,7 +6,6 @@ export default function RegisterRequestPage() {
   const [fullName, setFullName] = useState("");
   const [studentId, setStudentId] = useState("");
   const [year, setYear] = useState("");
-  const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -19,12 +18,12 @@ export default function RegisterRequestPage() {
       const res = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ full_name: fullName, student_id: studentId, year: Number(year), email }),
+        body: JSON.stringify({ full_name: fullName, student_id: studentId, year: Number(year) }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Request failed");
       setMsg("ส่งคำขอเรียบร้อยแล้ว ผู้ดูแลจะติดต่อกลับเมื่อตรวจสอบ");
-      setFullName(""); setStudentId(""); setYear(""); setEmail("");
+      setFullName(""); setStudentId(""); setYear("");
     } catch (err: any) {
       setMsg(err?.message ?? "เกิดข้อผิดพลาด");
     } finally {
@@ -47,10 +46,6 @@ export default function RegisterRequestPage() {
         <label>
           ปีสภา (เช่น 69)
           <input value={year} onChange={(e) => setYear(e.target.value)} required />
-        </label>
-        <label>
-          อีเมล (จำเป็นสำหรับสร้างบัญชี)
-          <input value={email} onChange={(e) => setEmail(e.target.value)} required type="email" />
         </label>
 
         <div>

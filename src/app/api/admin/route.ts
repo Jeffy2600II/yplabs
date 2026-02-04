@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { synthesizeEmail } from "@/lib/auth";
 
 /**
  * POST /api/admin
@@ -15,7 +16,6 @@ import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
  */
 export async function POST(req: Request) {
   try {
-    // สร้าง client แบบ lazy (จะ throw ถ้า env ขาด)
     const supabaseAdmin = getSupabaseAdmin();
 
     const authHeader = req.headers.get("authorization") ?? "";
@@ -63,11 +63,14 @@ export async function POST(req: Request) {
     }
     if (!reqRow) return NextResponse.json({ error: "Request not found" }, { status: 404 });
 
+    // If request row has no email, synthesize one for internal auth use
+    const emailToUse = reqRow.email ? reqRow.email : synthesizeEmail(reqRow.student_id);
+
     // Create user in Supabase Auth (using student_id as temporary password here)
     const password = String(reqRow.student_id);
 
     const createRes = await supabaseAdmin.auth.admin.createUser({
-      email: reqRow.email,
+      email: emailToUse,
       password,
       email_confirm: true,
       user_metadata: { student_id: reqRow.student_id, full_name: reqRow.full_name },
@@ -103,7 +106,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: insertErr.message }, { status: 500 });
     }
 
-    // remove request (or keep for audit if you prefer)
+    // remove request
     const { error: deleteErr } = await supabaseAdmin
       .from("council_user_requests")
       .delete()
@@ -111,7 +114,7 @@ export async function POST(req: Request) {
 
     if (deleteErr) {
       console.error("failed to delete request:", deleteErr);
-      // not fatal — still respond success but log error
+      // not fatal
     }
 
     return NextResponse.json({ success: true, created_user_id: newUser.id });
