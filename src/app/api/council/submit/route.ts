@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
 import { appendToSheet } from "@/lib/sheets";
 import { uploadFile } from "@/lib/drive";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { validate } from "@/lib/validate";
+import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 async function requireApprovedUser(req: Request) {
+  const supabaseAdmin = getSupabaseAdmin();
+  
   const authHeader = req.headers.get("authorization") ?? "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
   if (!token) throw { status: 401, message: "Unauthorized" };
