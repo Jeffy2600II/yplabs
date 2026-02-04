@@ -1,77 +1,78 @@
 import { google } from "googleapis";
 import fs from "fs";
 import { Readable } from "stream";
-import { getAuth } from "./google";
-
-/** Helper: promise with timeout */
-function withTimeout < T > (p: Promise < T > , ms: number, errMsg = "Operation timed out") {
-  return Promise.race([
-    p,
-    new Promise < T > ((_, rej) =>
-      setTimeout(() => rej(new Error(errMsg)), ms)
-    ),
-  ]);
-}
+import { getAuthClient } from "./google";
 
 /**
- * uploadFile accepts:
- * - Web File / Blob (has arrayBuffer method)
- * - formidable file object (has filepath)
- * - object with buffer
+ * Upload file to Google Drive.
+ * Accepts:
+ * - Web File / Blob (has arrayBuffer())
+ * - formidable file object with .filepath
+ * - object with .buffer
+ *
+ * For Shared drive uploads, ensure:
+ * - DRIVE_FOLDER_ID is the folder ID inside the Shared drive
+ * - The service account (GOOGLE_CLIENT_EMAIL) is added to the Shared drive with Content manager/Manager role
  */
 export async function uploadFile(file: any) {
   if (!process.env.DRIVE_FOLDER_ID) {
     throw new Error("DRIVE_FOLDER_ID is not set in environment.");
   }
   
-  const auth = getAuth();
+  const auth = getAuthClient();
   const drive = google.drive({ version: "v3", auth });
   
-  const name = file?.name ?? file?.originalFilename ?? file?.newFilename ?? "upload";
+  const name = file?.name ?? file?.originalFilename ?? file?.newFilename ?? `upload-${Date.now()}`;
   const mimeType = file?.type ?? file?.mimetype ?? undefined;
   
   let bodyStream: Readable;
   
+  // Web File / Blob (from Request.formData())
   if (typeof file?.arrayBuffer === "function") {
-    // Web File / Blob
     const ab = await file.arrayBuffer();
     const buf = Buffer.from(ab);
     bodyStream = Readable.from(buf);
-  } else if (file?.filepath || file?.path) {
+  }
+  // formidable / files on disk
+  else if (file?.filepath || file?.path) {
     const filepath = file.filepath ?? file.path;
     if (!fs.existsSync(filepath)) {
       throw new Error("ไฟล์ชั่วคราวไม่พบ (upload failed)");
     }
     bodyStream = fs.createReadStream(filepath);
-  } else if (file?.buffer) {
+  }
+  // buffer present
+  else if (file?.buffer) {
     bodyStream = Readable.from(file.buffer);
   } else {
     throw new Error("Unsupported file object for upload");
   }
   
   try {
-    // Add supportsAllDrives: true if you use shared drives
-    // Use fields:'id' to minimize response size
-    const uploadPromise = drive.files.create({
+    const res = await drive.files.create({
       requestBody: {
         name,
         parents: [process.env.DRIVE_FOLDER_ID],
       },
-      media: {
-        mimeType,
-        body: bodyStream,
-      },
+      media: { mimeType, body: bodyStream },
       fields: "id",
-      supportsAllDrives: true,
+      supportsAllDrives: true, // สำคัญสำหรับ Shared drives
     });
     
-    // Set an upper timeout for the upload (e.g., 60s). Adjust if needed.
-    const TIMEOUT_MS = 60_000;
-    const res = await withTimeout(uploadPromise, TIMEOUT_MS, "Drive upload timed out");
     return res.data.id ?? "";
   } catch (err: any) {
-    // Log detailed err if available (for Vercel logs)
-    console.error("drive.upload error:", JSON.stringify(err?.response?.data ?? err, null, 2));
-    throw new Error(err?.message ?? "Drive upload failed");
+    const details = err?.response?.data ?? err;
+    console.error("drive.upload error:", JSON.stringify(details, null, 2));
+    
+    const msg = String(details?.error?.message ?? details?.message ?? details);
+    
+    if (msg.includes("Service Accounts do not have storage quota")) {
+      throw new Error(
+        "อัปโหลดล้มเหลว: Service account ไม่มีพื้นที่บน My Drive — ให้ใช้ Shared drive แทน โดยเพิ่ม service account เป็นสมาชิกของ Shared drive (role: Content manager/Manager) แล้วตั้งค่า DRIVE_FOLDER_ID เป็น ID ของโฟลเดอร์ใน Shared drive"
+      );
+    }
+    
+    // friendly fallback
+    throw new Error(msg);
   }
 }

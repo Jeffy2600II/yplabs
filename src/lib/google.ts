@@ -1,30 +1,28 @@
 import { google } from "googleapis";
+import type { OAuth2Client } from "google-auth-library";
 
 /**
- * Lazily build and validate Google JWT auth.
- * Throws a descriptive error if required envs are missing.
+ * Return a Google auth client (JWT service account).
+ * Throws descriptive error if required env vars are missing.
+ *
+ * Note: For the Shared Drive approach (วิธี A) we expect to use a service
+ * account and that service account must be added as a member of the Shared drive.
  */
-function getGoogleEnvOrThrow() {
+export function getAuthClient(): OAuth2Client {
   const email = process.env.GOOGLE_CLIENT_EMAIL;
-  const key = process.env.GOOGLE_PRIVATE_KEY;
-  if (!email || !key) {
+  const rawKey = process.env.GOOGLE_PRIVATE_KEY;
+  
+  if (!email || !rawKey) {
     throw new Error(
-      "Google credentials missing. Set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY in env."
+      "Google service account credentials are missing. Set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY in environment."
     );
   }
-  return { email, key };
-}
-
-/**
- * Export a function that returns auth. Avoid constructing at import-time
- * if environment variables may be missing during build.
- */
-export function getAuth() {
-  const { email, key } = getGoogleEnvOrThrow();
+  
+  const key = rawKey.replace(/\\n/g, "\n");
   
   return new google.auth.JWT({
     email,
-    key: key.replace(/\\n/g, "\n"),
+    key,
     scopes: [
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
