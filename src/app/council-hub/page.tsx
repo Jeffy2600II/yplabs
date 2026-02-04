@@ -44,3 +44,49 @@ export default function CouncilHubPage() {
     </>
   );
 }
+
+function HubCard({
+  title,
+  description,
+  href,
+}: {
+  title: string;
+  description: string;
+  href ? : string;
+}) {
+  const card = (
+    <div
+      style={{
+        border: "1px solid #333",
+        borderRadius: 12,
+        padding: 16,
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        transition: "transform 0.12s ease, box-shadow 0.12s ease",
+      }}
+      className="hub-card"
+    >
+      <div>
+        <h2 style={{ marginBottom: 8 }}>{title}</h2>
+        <p style={{ opacity: 0.6 }}>{description}</p>
+      </div>
+      {href && (
+        <div style={{ marginTop: 12, opacity: 0.8, fontSize: 13 }}>
+          แตะเพื่อไปยังหน้าที่เกี่ยวข้อง →
+        </div>
+      )}
+    </div>
+  );
+  
+  if (href) {
+    return (
+      <Link href={href} style={{ color: "inherit", textDecoration: "none", display: "block" }}>
+        {card}
+      </Link>
+    );
+  }
+  
+  return card;
+}
