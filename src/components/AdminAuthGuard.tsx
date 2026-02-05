@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabaseClient";
 
 /**
- * AdminAuthGuard - redirect ถ้าไม่ใช่ admin
+ * AdminAuthGuard - จะเปลี่ยนเส้นทางถ้าไม่ใช่ admin
  */
 export default function AdminAuthGuard({ children }: { children ? : React.ReactNode }) {
   const router = useRouter();
@@ -40,6 +40,18 @@ export default function AdminAuthGuard({ children }: { children ? : React.ReactN
     return () => { mounted = false; };
   }, [router]);
   
-  if (checking) return null;
+  // ขณะกำลังตรวจสอบสิทธิ์ ให้แสดงข้อความเล็ก ๆ เป็นภาษาไทย
+  if (checking) {
+    return (
+      <div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:120}}>
+        <div style={{textAlign:'center',color:'#374151'}}>
+          <div style={{width:36,height:36,margin:'0 auto 10px',borderRadius:18,border:'4px solid #e6e9ef',borderTopColor:'#2563eb',animation:'spin 1s linear infinite'}} />
+          <div>กำลังตรวจสอบสิทธิ์ผู้ดูแลระบบ...</div>
+        </div>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      </div>
+    );
+  }
+  
   return <>{children}</>;
 }
