@@ -1,5 +1,53 @@
-/* Minimal globals placeholder */
-html,body,#__next{height:100%;margin:0;padding:0}
-a{color:inherit}
+:root{
+  /* Design tokens - โทนสีสบายตา */
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --muted: #6b7280;
+  --text: #0f172a;
+  --accent: #2563eb; /* ปุ่มหลัก */
+  --accent-600: #1e40af;
+  --danger: #dc2626;
+  --card-radius: 12px;
+  --card-shadow: 0 6px 18px rgba(12, 14, 20, 0.06);
+  --gap-xs: 6px;
+  --gap-sm: 12px;
+  --gap-md: 20px;
+  --gap-lg: 32px;
+  --container-max: 1100px;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  --base-font-size: 16px;
+  --line-height: 1.6;
+}
+
+/* base */
+*{box-sizing:border-box}
+html,body,#root,#__next{height:100%;margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--font-sans);font-size:var(--base-font-size);line-height:var(--line-height)}
+a{color:var(--accent);text-decoration:none}
 button{font:inherit}
-input,textarea{font:inherit}
+input,textarea{font:inherit;border:1px solid #e6e9ef;padding:8px;border-radius:8px;background:#fff}
+
+/* layout helpers */
+.container{max-width:var(--container-max);margin:0 auto;padding:0 var(--gap-md)}
+
+/* cards */
+.hub-card{
+  background:var(--surface);
+  border-radius:var(--card-radius);
+  box-shadow:var(--card-shadow);
+  padding:var(--gap-md);
+  transition:transform .12s ease,box-shadow .12s ease;
+}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;border:0;cursor:pointer}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-600)}
+.btn-ghost{background:transparent;color:var(--text);border:1px solid #e6e9ef}
+
+/* typography */
+.h1{font-size:1.375rem;font-weight:600;margin:0 0 8px}
+.h2{font-size:1.125rem;font-weight:600;margin:0 0 8px}
+.lead{color:var(--muted)}
+
+/* accessible utilities */
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
