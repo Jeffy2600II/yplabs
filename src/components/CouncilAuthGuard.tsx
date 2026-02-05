@@ -6,10 +6,10 @@ import { getBrowserSupabase } from "@/lib/supabaseClient";
 
 /**
  * CouncilAuthGuard
- * - Redirects to /council-hub/login if not authenticated or not approved.
- * - Use at top of Council pages (e.g., in /council-hub/page.tsx).
+ * - เปลี่ยนให้รับ children และแสดงหน้าเมื่อผ่านการตรวจสอบ
+ * - หากยังไม่ผ่านหรือไม่อนุญาต จะเปลี่ยนเส้นทางไป /council-hub/login
  */
-export default function CouncilAuthGuard() {
+export default function CouncilAuthGuard({ children }: { children ? : React.ReactNode }) {
   const router = useRouter();
   const [checking, setChecking] = useState(true);
   
@@ -36,7 +36,7 @@ export default function CouncilAuthGuard() {
           return;
         }
         
-        // OK: user approved
+        // ผ่านการอนุมัติ — สามารถแสดง children ได้
       } catch {
         if (mounted) router.replace("/council-hub/login");
       } finally {
@@ -47,7 +47,18 @@ export default function CouncilAuthGuard() {
     return () => { mounted = false; };
   }, [router]);
   
-  // while checking, render nothing (or a loader)
-  if (checking) return null;
-  return null;
+  // ขณะตรวจสอบ แสดงข้อความภาษาไทย
+  if (checking) {
+    return (
+      <div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:120}}>
+        <div style={{textAlign:'center',color:'#374151'}}>
+          <div style={{width:36,height:36,margin:'0 auto 10px',borderRadius:18,border:'4px solid #e6e9ef',borderTopColor:'#2563eb',animation:'spin 1s linear infinite'}} />
+          <div>กำลังตรวจสอบสิทธิ์สมาชิกสภานักเรียน...</div>
+        </div>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      </div>
+    );
+  }
+  
+  return <>{children}</>;
 }
