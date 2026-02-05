@@ -1,88 +1,102 @@
-"use client";
+'use client';
 
 import { useState } from "react";
 import { getBrowserSupabase } from "@/lib/supabaseClient";
-import { useRouter } from "next/navigation";
 import { synthesizeEmail } from "@/lib/auth";
+import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
   const router = useRouter();
+  const [mode, setMode] = useState < 'student' | 'other' > ('student');
   const [fullName, setFullName] = useState("");
   const [studentId, setStudentId] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState < string | null > (null);
   
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleStudentLogin(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
     setError(null);
-    
+    if (!fullName.trim()) return setError("กรุณากรอกชื่อ-นามสกุล");
+    if (!/^\d{5}$/.test(studentId)) return setError("รหัสนักเรียนต้องเป็นตัวเลข 5 หลัก");
+    setLoading(true);
     try {
       const supabase = getBrowserSupabase();
-      
-      // derive email from studentId
-      const email = synthesizeEmail(studentId);
-      
+      const emailSynth = synthesizeEmail(studentId);
       const { data, error: signError } = await supabase.auth.signInWithPassword({
-        email,
+        email: emailSynth,
         password: studentId,
       });
-      
-      if (signError) {
-        setError(signError.message);
-        setLoading(false);
-        return;
-      }
-      
+      if (signError) throw signError;
       const user = data.user;
-      if (!user) {
-        setError("ไม่พบผู้ใช้");
-        setLoading(false);
-        return;
-      }
+      if (!user) throw new Error("ไม่พบผู้ใช้");
       
-      // ตรวจสอบว่า user นี้เชื่อมกับ council_users และ approved
-      const { data: row, error: fetchErr } = await supabase
+      // verify council users row
+      const { data: row, error: qerr } = await supabase
         .from("council_users")
         .select("*")
         .eq("auth_uid", user.id)
         .limit(1)
         .maybeSingle();
       
-      if (fetchErr) {
-        setError(fetchErr.message);
-        setLoading(false);
-        return;
-      }
-      
-      if (!row) {
-        setError("บัญชีของคุณยังไม่ได้ลงทะเบียนกับระบบ Council กรุณาติดต่อผู้ดูแลหรือส่งคำขอสมัคร");
-        setLoading(false);
-        return;
-      }
-      if (!row.approved) {
-        setError("บัญชีของคุณยังไม่ได้รับการอนุมัติจากแอดมิน");
-        setLoading(false);
-        return;
-      }
-      if (row.disabled) {
-        setError("บัญชีถูกปิดใช้งาน");
-        setLoading(false);
-        return;
-      }
-      
-      // Verify full name matches (basic safeguard)
+      if (qerr) throw qerr;
+      if (!row) throw new Error("บัญชีนี้ยังไม่ได้รับการลงทะเบียนกับสภา กรุณารอการอนุมัติ");
+      if (!row.approved) throw new Error("บัญชียังไม่ได้รับการอนุมัติจากแอดมิน");
+      if (row.disabled) throw new Error("บัญชีถูกปิดใช้งาน");
+      if ((row.account_type ?? "student") !== "student") throw new Error("บัญชีนี้ไม่ใช่ประเภทนักเรียน");
       if (row.full_name.trim().toLowerCase() !== fullName.trim().toLowerCase()) {
-        // optional: sign out for safety
+        // optional sign out
         await supabase.auth.signOut();
-        setError("ชื่อผู้ใช้ไม่ตรงกับข้อมูลในระบบ");
-        setLoading(false);
-        return;
+        throw new Error("ชื่อ-นามสกุลไม่ตรงกับข้อมูลในระบบ");
+      }
+      
+      // success
+      router.push("/council-hub");
+    } catch (err: any) {
+      setError(err?.message ?? "เกิดข้อผิดพลาด");
+    } finally {
+      setLoading(false);
+    }
+  }
+  
+  async function handleOtherLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (!email.trim() || !password) return setError("กรุณากรอก email และรหัสผ่าน");
+    setLoading(true);
+    try {
+      const supabase = getBrowserSupabase();
+      const { data, error: signError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (signError) throw signError;
+      const user = data.user;
+      if (!user) throw new Error("ไม่พบผู้ใช้");
+      
+      // verify council_users row exists and type not student
+      const { data: row, error: qerr } = await supabase
+        .from("council_users")
+        .select("*")
+        .eq("auth_uid", user.id)
+        .limit(1)
+        .maybeSingle();
+      
+      if (qerr) throw qerr;
+      if (!row) throw new Error("บัญชีนี้ยังไม่ได้รับการลงทะเบียนกับระบบ");
+      if (!row.approved) throw new Error("บัญชียังไม่ได้รับการอนุมัติจากแอดมิน");
+      if (row.disabled) throw new Error("บัญชีถูกปิดใช้งาน");
+      
+      // allow teacher/other
+      if ((row.account_type ?? "student") === "student") {
+        await supabase.auth.signOut();
+        throw new Error("บัญชีนี้เป็นประเภทนักเรียน กรุณาเข้าสู่ระบบด้วยรูปแบบนักเรียน");
       }
       
       router.push("/council-hub");
     } catch (err: any) {
-      setError(err?.message ?? "เกิดข้อผิดพลาดไม่ทราบสาเหตุ");
+      setError(err?.message ?? "เกิดข้อผิดพลาด");
     } finally {
       setLoading(false);
     }
@@ -91,27 +105,57 @@ export default function LoginPage() {
   return (
     <main style={{ padding: 24, maxWidth: 560 }}>
       <h1>เข้าสู่ระบบ Council</h1>
-      <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12 }}>
-        <label>
-          ชื่อ-นามสกุล (ตรงกับข้อมูลที่สมัคร)
-          <input value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ marginRight: 12 }}>
+          <input type="radio" checked={mode === 'student'} onChange={() => setMode('student')} /> นักเรียน
         </label>
-
         <label>
-          รหัสประจำตัวนักเรียน (5 ตัว)
-          <input value={studentId} type="password" onChange={(e) => setStudentId(e.target.value)} required maxLength={10} />
+          <input type="radio" checked={mode === 'other'} onChange={() => setMode('other')} /> ครู / อื่น ๆ
         </label>
+      </div>
 
-        <div style={{ display: "flex", gap: 8 }}>
-          <button disabled={loading} type="submit">{loading ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}</button>
-          <button type="button" onClick={() => { setFullName(""); setStudentId(""); setError(null); }}>รีเซ็ต</button>
-        </div>
+      {mode === 'student' ? (
+        <form onSubmit={handleStudentLogin} style={{ display: "grid", gap: 12 }}>
+          <label>
+            ชื่อ-นามสกุล (ตามที่สมัคร)
+            <input value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+          </label>
+          <label>
+            รหัสประจำตัวนักเรียน (5 ตัว)
+            <input value={studentId} onChange={(e) => setStudentId(e.target.value)} required maxLength={5} inputMode="numeric" />
+          </label>
 
-        {error && <div style={{ color: "salmon" }}>{error}</div>}
-      </form>
-      <p style={{ marginTop: 18, opacity: 0.8 }}>
-        หากยังไม่มีบัญชี กรุณา <a href="/council-hub/register">ส่งคำขอสมัคร</a> หรือ ติดต่อผู้ดูแล
-      </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={loading}>{loading ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}</button>
+          </div>
+
+          {error && <div style={{ color: "salmon" }}>{error}</div>}
+          <p style={{ marginTop: 8 }}>
+            หากยังไม่มีบัญชี กรุณา <a href="/council-hub/register">ส่งคำขอสมัคร</a>
+          </p>
+        </form>
+      ) : (
+        <form onSubmit={handleOtherLogin} style={{ display: "grid", gap: 12 }}>
+          <label>
+            Email
+            <input value={email} onChange={(e) => setEmail(e.target.value)} required />
+          </label>
+          <label>
+            รหัสผ่าน
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+          </label>
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={loading}>{loading ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}</button>
+          </div>
+
+          {error && <div style={{ color: "salmon" }}>{error}</div>}
+          <p style={{ marginTop: 8 }}>
+            หากยังไม่มีบัญชี กรุณา <a href="/council-hub/register">ส่งคำขอสมัคร</a>
+          </p>
+        </form>
+      )}
     </main>
   );
 }
