@@ -1,172 +1,196 @@
 'use client';
 
-import { useEffect, useState } from "react";
+import { useState, useRef } from "react";
 import { getBrowserSupabase } from "@/lib/supabaseClient";
-import { validate } from "@/lib/validate";
-import CouncilAuthGuard from "@/components/CouncilAuthGuard";
+import { usePopup } from "@/components/PopupProvider";
 
-/**
- * Faster submit flow:
- * - parallel file uploads to /api/council/upload
- * - then single JSON POST to /api/council/submit with attachments metadata
- */
+type Toast = { type: "success" | "error" | "info";title: string;message ? : string;details ? : any };
 
 export default function SubmitPage() {
-  const [title, setTitle] = useState("");
-  const [detail, setDetail] = useState("");
-  const [files, setFiles] = useState < File[] > ([]);
+  const { notify } = usePopup(); // ใช้ระบบแจ้งเตือนแบบเดิม 100%
   const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState < string | null > (null);
+  const [progress, setProgress] = useState < number | null > (null);
+  const [fileName, setFileName] = useState("");
+  const xhrRef = useRef < XMLHttpRequest | null > (null);
   
-  function handleFileChange(e: React.ChangeEvent < HTMLInputElement > ) {
-    const f = e.target.files;
-    if (!f) {
-      setFiles([]);
-      return;
+  function handleFileChange(e: any) {
+    const f = e.target.files?.[0];
+    setFileName(f ? f.name : "");
+    // Client-side file size guard (5MB)
+    if (f && f.size > 5 * 1024 * 1024) {
+      notify("ไฟล์ใหญ่เกินไป — ขนาดต้องไม่เกิน 5MB");
+      (e.target as HTMLInputElement).value = "";
+      setFileName("");
     }
-    setFiles(Array.from(f));
   }
   
-  async function getToken(): Promise < string | null > {
+  function sendWithXHR(formData: FormData, token ? : string) {
+    return new Promise < any > ((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhrRef.current = xhr;
+      xhr.open("POST", "/api/council/submit");
+      
+      // Set Authorization header if token provided
+      if (token) {
+        try {
+          xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        } catch {
+          // ignore setting header failures (shouldn't happen same-origin)
+        }
+      }
+      
+      // Accept JSON
+      try {
+        xhr.setRequestHeader("Accept", "application/json");
+      } catch {}
+      
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable) {
+          const pct = Math.round((ev.loaded / ev.total) * 100);
+          setProgress(pct);
+        }
+      };
+      
+      xhr.timeout = 120_000; // 120s
+      xhr.ontimeout = () => {
+        reject(new Error("การอัปโหลดใช้เวลานานเกินไป (timeout)"));
+      };
+      
+      xhr.onerror = () => reject(new Error("การเชื่อมต่อเกิดข้อผิดพลาด"));
+      
+      xhr.onload = () => {
+        try {
+          const text = xhr.responseText || "{}";
+          let json: any = {};
+          try {
+            json = xhr.response && typeof xhr.response === "object" ? xhr.response : JSON.parse(text);
+          } catch {
+            json = { raw: text };
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve({ status: xhr.status, data: json });
+          } else {
+            reject({ status: xhr.status, data: json });
+          }
+        } catch (e) {
+          reject(new Error("Response parsing error"));
+        }
+      };
+      
+      xhr.send(formData);
+    });
+  }
+  
+  async function handleSubmit(e: any) {
+    e.preventDefault();
+    setLoading(true);
+    setProgress(null);
+    
+    const form = e.target as HTMLFormElement;
+    const formData = new FormData(form);
+    
+    // client-side validation
+    const title = formData.get("title");
+    const detail = formData.get("detail");
+    
+    if (!title || String(title).trim() === "") {
+      notify("กรุณากรอกหัวข้อ");
+      setLoading(false);
+      return;
+    }
+    if (!detail || String(detail).trim() === "") {
+      notify("กรุณากรอกรายละเอียด");
+      setLoading(false);
+      return;
+    }
+    
+    // get supabase access token - required by server route
+    let token: string | null = null;
     try {
       const supabase = getBrowserSupabase();
-      const { data } = await supabase.auth.getSession();
-      return data?.session?.access_token ?? null;
-    } catch {
-      return null;
-    }
-  }
-  
-  // upload a single file to /api/council/upload
-  async function uploadSingleFile(token: string, file: File) {
-    const formData = new FormData();
-    formData.append("file", file, file.name);
-    
-    const res = await fetch("/api/council/upload", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-      body: formData,
-    });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(json?.error ?? `Upload failed (${res.status})`);
-    return json?.file ?? null;
-  }
-  
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setMsg(null);
-    
-    const trimmedTitle = title?.trim() ?? "";
-    const trimmedDetail = detail?.trim() ?? "";
-    
-    try {
-      validate({ title: trimmedTitle, detail: trimmedDetail }, files[0] ?? undefined);
-    } catch (vErr: any) {
-      setMsg(vErr?.message ?? "ข้อมูลไม่ถูกต้อง");
-      return;
-    }
-    
-    setLoading(true);
-    
-    const token = await getToken();
-    if (!token) {
-      setMsg("ยังไม่เข้าสู่ระบบหรือ session หมดอายุ — กรุณาเข้าสู่ระบบอีกครั้ง");
+      const sessionRes = await supabase.auth.getSession();
+      token = sessionRes?.data?.session?.access_token ?? null;
+      if (!token) {
+        notify("กรุณาเข้าสู่ระบบก่อนส่งข้อมูล");
+        setLoading(false);
+        return;
+      }
+    } catch (err) {
+      console.error("getSession error:", err);
+      notify("ไม่สามารถดึงข้อมูลการเข้าสู่ระบบได้");
       setLoading(false);
       return;
     }
     
     try {
-      let attachments: any[] = [];
-      
-      if (files.length > 0) {
-        // Parallel upload all files
-        const uploads = files.map((f) => uploadSingleFile(token, f));
-        const results = await Promise.allSettled(uploads);
-        
-        // If any failed, abort and present error
-        const failed = results.find(r => r.status === "rejected") as PromiseRejectedResult | undefined;
-        if (failed) {
-          throw new Error((failed as any).reason?.message ?? "มีข้อผิดพลาดในการอัปโหลดไฟล์");
-        }
-        
-        attachments = results.map((r: any) => r.status === "fulfilled" ? r.value : null).filter(Boolean);
-      }
-      
-      // Send final submission as JSON (fast)
-      const submitRes = await fetch("/api/council/submit", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          title: trimmedTitle,
-          detail: trimmedDetail,
-          attachments,
-        }),
+      const result = await sendWithXHR(formData, token);
+      notify("ส่งข้อมูลเรียบร้อยแล้ว");
+      // reset form inputs (except radio/checkbox)
+      (form.querySelectorAll("input")).forEach((i) => {
+        const inp = i as HTMLInputElement;
+        if (inp.type !== "radio" && inp.type !== "checkbox") inp.value = "";
       });
-      
-      const submitJson = await submitRes.json().catch(() => null);
-      if (!submitRes.ok) {
-        throw new Error(submitJson?.error ?? submitJson?.message ?? `Submit failed (${submitRes.status})`);
-      }
-      
-      setMsg("ส่งข้อมูลเรียบร้อยแล้ว");
-      setTitle("");
-      setDetail("");
-      setFiles([]);
+      (form.querySelectorAll("textarea")).forEach((t) => (t as HTMLTextAreaElement).value = "");
+      setFileName("");
+      setProgress(null);
     } catch (err: any) {
       console.error("submit error:", err);
-      setMsg(err?.message ?? "การส่งข้อมูลล้มเหลว");
+      // if structured server error
+      if (err && typeof err === "object" && ("status" in err || err?.data)) {
+        const status = err.status;
+        const data = err.data;
+        const msg = data?.error ?? data?.message ?? JSON.stringify(data);
+        notify(`ส่งล้มเหลว${status ? ` (${status})` : ""}: ${String(msg)}`);
+      } else {
+        notify(`ส่งล้มเหลว: ${err?.message ?? String(err)}`);
+      }
     } finally {
       setLoading(false);
     }
   }
   
   return (
-    <>
-      <CouncilAuthGuard />
-      <main style={{ padding: 24, maxWidth: 720 }}>
-        <h1>ส่งข้อมูล / แนบไฟล์</h1>
+    <main style={{ padding: 24, maxWidth: 720 }}>
+      <h1>ส่งข้อมูล</h1>
+      <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12 }}>
+        <label>
+          หัวข้อ
+          <input name="title" required maxLength={100} />
+        </label>
+        <label>
+          รายละเอียด
+          <textarea name="detail" rows={6} required />
+        </label>
 
-        <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12 }}>
-          <label>
-            หัวข้อ
-            <input value={title} onChange={(e) => setTitle(e.target.value)} required maxLength={100} />
-          </label>
+        <label>
+          แนบไฟล์ (ถ้ามี) — ขนาดสูงสุด 5MB
+          <input type="file" name="file" onChange={handleFileChange} />
+        </label>
+        {fileName && <div>เลือกไฟล์: {fileName}</div>}
 
-          <label>
-            รายละเอียด
-            <textarea value={detail} onChange={(e) => setDetail(e.target.value)} rows={6} required />
-          </label>
-
-          <label>
-            แนบไฟล์ (อนุญาตหลายไฟล์) — ขนาดต่อไฟล์ไม่เกิน 5MB
-            <input type="file" onChange={handleFileChange} multiple />
-            {files.length > 0 && (
-              <div style={{ marginTop: 8 }}>
-                <strong>ไฟล์ที่จะส่ง:</strong>
-                <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
-                  {files.map((f) => (
-                    <li key={f.name + f.size}>
-                      {f.name} — {(f.size / 1024).toFixed(0)} KB
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </label>
-
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="submit" disabled={loading}>{loading ? "กำลังส่ง..." : "ส่งข้อมูล"}</button>
-            <button type="button" onClick={() => { setTitle(""); setDetail(""); setFiles([]); setMsg(null); }} disabled={loading}>ยกเ���ิก</button>
+        {progress !== null && (
+          <div>
+            กำลังอัปโหลด: {progress}% <progress value={progress} max={100} />
           </div>
+        )}
 
-          {msg && <div style={{ marginTop: 8, color: msg.includes("เรียบร้อย") ? "green" : "salmon" }}>{msg}</div>}
-        </form>
-      </main>
-    </>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="submit" disabled={loading}>{loading ? "กำลังส่ง..." : "ส่ง"}</button>
+          <button
+            type="button"
+            onClick={() => {
+              if (xhrRef.current) {
+                xhrRef.current.abort();
+                notify("ยกเลิกการอัปโหลด");
+                setLoading(false);
+                setProgress(null);
+              }
+            }}
+          >
+            ยกเลิก
+          </button>
+        </div>
+      </form>
+    </main>
   );
 }
