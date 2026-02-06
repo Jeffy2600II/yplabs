@@ -7,11 +7,6 @@ import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * Ensure requester is an approved (and not disabled) council user.
- * Expects Authorization: Bearer <access_token> header.
- * Returns { userId, councilRow } on success or throws with { status }.
- */
 async function requireApprovedUser(req: Request) {
   const supabaseAdmin = getSupabaseAdmin();
   const authHeader = req.headers.get("authorization") ?? "";
@@ -58,7 +53,7 @@ async function requireApprovedUser(req: Request) {
     throw e;
   }
   
-  return { userId, councilRow: row };
+  return { userId, councilRow: row, supabaseAdmin };
 }
 
 function makeErrorResponse(userMessage: string, err: any, status = 500) {
@@ -77,8 +72,57 @@ function makeErrorResponse(userMessage: string, err: any, status = 500) {
 
 export async function POST(req: Request): Promise < Response > {
   try {
-    const { userId, councilRow } = await requireApprovedUser(req);
+    const { userId, councilRow, supabaseAdmin } = await requireApprovedUser(req);
     
+    const contentType = req.headers.get("content-type") ?? "";
+    
+    // Fast path: accept JSON payload with attachments metadata (recommended)
+    if (contentType.includes("application/json")) {
+      const body = await req.json();
+      const title = String(body.title ?? "").trim();
+      const detail = String(body.detail ?? "").trim();
+      const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+      
+      // validate basic fields (no heavy file ops here)
+      validate({ title, detail }, attachments[0] ?? undefined);
+      
+      // Insert into a fast DB table 'council_submissions' (create this table in Supabase)
+      // Structure: user_id, student_id, title, detail, attachments (json), created_at
+      const insertObj: any = {
+        user_id: userId,
+        student_id: councilRow?.student_id ?? null,
+        title,
+        detail,
+        attachments,
+        created_at: new Date().toISOString(),
+      };
+      
+      const { error: insertErr } = await supabaseAdmin.from("council_submissions").insert([insertObj]);
+      if (insertErr) {
+        console.error("failed to insert submission:", insertErr);
+        return makeErrorResponse("Server error (DB insert failed)", insertErr, 500);
+      }
+      
+      // fire-and-forget: attempt to append to Sheets for backwards compatibility, don't block client
+      (async () => {
+        try {
+          await appendSubmission({
+            timestamp: insertObj.created_at,
+            userId,
+            studentId: insertObj.student_id ?? "",
+            title,
+            detail,
+            attachments,
+          });
+        } catch (sheetErr) {
+          console.error("background appendSubmission failed:", sheetErr);
+        }
+      })();
+      
+      return NextResponse.json({ success: true });
+    }
+    
+    // Backwards-compatible path: if client sent FormData (older clients), handle upload here.
     const formData = await req.formData();
     const titleRaw = formData.get("title");
     const detailRaw = formData.get("detail");
@@ -86,20 +130,16 @@ export async function POST(req: Request): Promise < Response > {
     const title = String(titleRaw ?? "").trim();
     const detail = String(detailRaw ?? "").trim();
     
-    // Validate fields and optional files (validate will throw on error)
-    // For validation compatibility, pass the fields object and the first file if exists.
     const firstFile = (formData.getAll("file") ?? [])[0] as File | undefined;
     validate({ title, detail }, firstFile ?? undefined);
     
-    // Collect files (support multiple attachments)
+    // Collect files and upload sequentially (or switch to parallel if desired)
     const files = formData.getAll("file").filter((f) => f != null) as File[];
-    
     const attachments: any[] = [];
     
     for (const file of files) {
       try {
-        // makePublicLink=true if you want webViewLink saved to sheet (consider privacy)
-        const meta = await uploadFile(file, true);
+        const meta = await uploadFile(file, false); // do not create permission for speed
         attachments.push({
           id: meta.id,
           name: meta.name,
@@ -113,20 +153,37 @@ export async function POST(req: Request): Promise < Response > {
       }
     }
     
-    // Save a single, well-structured row to Sheets
-    try {
-      await appendSubmission({
-        timestamp: new Date().toISOString(),
-        userId,
-        studentId: councilRow?.student_id ?? "",
-        title,
-        detail,
-        attachments,
-      });
-    } catch (sheetErr: any) {
-      console.error("appendSubmission error:", sheetErr);
-      return makeErrorResponse("บันทึกข้อมูลลงสเปรดชีตล้มเหลว", sheetErr, 500);
+    // Insert into DB quickly
+    const createdAt = new Date().toISOString();
+    const { error: insertErr2 } = await supabaseAdmin.from("council_submissions").insert([{
+      user_id: userId,
+      student_id: councilRow?.student_id ?? null,
+      title,
+      detail,
+      attachments,
+      created_at: createdAt,
+    }]);
+    
+    if (insertErr2) {
+      console.error("failed to insert submission (formdata path):", insertErr2);
+      return makeErrorResponse("Server error (DB insert failed)", insertErr2, 500);
     }
+    
+    // background append to Sheets
+    (async () => {
+      try {
+        await appendSubmission({
+          timestamp: createdAt,
+          userId,
+          studentId: councilRow?.student_id ?? "",
+          title,
+          detail,
+          attachments,
+        });
+      } catch (sheetErr) {
+        console.error("background appendSubmission failed:", sheetErr);
+      }
+    })();
     
     return NextResponse.json({ success: true });
   } catch (e: any) {
