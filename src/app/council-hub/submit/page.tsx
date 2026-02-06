@@ -7,9 +7,9 @@ import CouncilAuthGuard from "@/components/CouncilAuthGuard";
 
 /**
  * SubmitPage
- * - รับทั้งข้อความและไฟล์แนบ (หลายไฟล์)
- * - ส่ง Authorization: Bearer <access_token> ไปยัง API ทั้งแบบ fetch และ XHR
- * - แสดงความคืบหน้าเมื่ออัปโหลดไฟล์ด้วย XHR
+ * - รองรับการส่งข้อความเฉย ๆ และการแนบไฟล์หลายไฟล์
+ * - ส่ง Authorization: Bearer <access_token> เสมอ (ผ่าน fetch หรือ XHR)
+ * - แสดงข้อความข้อผิดพลาดจากเซิร์ฟเวอร์ให้ชัดเจนขึ้น
  */
 
 export default function SubmitPage() {
@@ -41,7 +41,12 @@ export default function SubmitPage() {
       xhr.open("POST", "/api/council/submit", true);
       
       // Set Authorization header so server can verify the user
-      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      try {
+        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      } catch (e) {
+        // some environments disallow setRequestHeader for certain requests; handle gracefully
+        console.warn("Could not set Authorization header on XHR:", e);
+      }
       
       xhr.upload.onprogress = (ev) => {
         if (ev.lengthComputable) {
@@ -53,19 +58,24 @@ export default function SubmitPage() {
       xhr.ontimeout = () => reject(new Error("การอัปโหลดใช้เวลานานเกินไป (timeout)"));
       xhr.onerror = () => reject(new Error("การเชื่อมต่อเกิดข้อผิดพลาด"));
       xhr.onload = () => {
+        const text = xhr.responseText ?? "";
+        let json: any = null;
         try {
-          const text = xhr.responseText || "{}";
-          const json = JSON.parse(text);
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve(json);
-          } else {
-            const err = new Error(json?.error ?? `HTTP ${xhr.status}`);
-            // @ts-ignore
-            err.details = json;
-            reject(err);
-          }
-        } catch (e) {
-          reject(new Error("ไม่สามารถอ่านผลลัพธ์จากเซิร์ฟเวอร์ได้"));
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          // non-json response
+          json = null;
+        }
+        
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(json ?? { success: true });
+        } else {
+          // Prefer structured messages from server
+          const serverMsg = json?.error ?? json?.message ?? xhr.statusText ?? `HTTP ${xhr.status}`;
+          const err: any = new Error(serverMsg);
+          err.status = xhr.status;
+          err.details = json ?? text;
+          reject(err);
         }
       };
       
@@ -77,8 +87,10 @@ export default function SubmitPage() {
     try {
       const supabase = getBrowserSupabase();
       const { data } = await supabase.auth.getSession();
+      // v2 returns session.access_token
       return data?.session?.access_token ?? null;
-    } catch {
+    } catch (e) {
+      console.warn("getToken error:", e);
       return null;
     }
   }
@@ -125,7 +137,6 @@ export default function SubmitPage() {
       if (files.length > 0) {
         resJson = await sendWithXHR(token, formData);
       } else {
-        // plain fetch with Authorization header (FormData body)
         const res = await fetch("/api/council/submit", {
           method: "POST",
           headers: {
@@ -133,10 +144,22 @@ export default function SubmitPage() {
           },
           body: formData,
         });
-        resJson = await res.json().catch(() => ({ error: "ไม่สามารถอ่านผลลัพธ์ได้" }));
-        if (!res.ok) {
-          throw new Error(resJson?.error ?? `HTTP ${res.status}`);
+        
+        const text = await res.text().catch(() => "");
+        let json: any = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch {
+          json = null;
         }
+        
+        if (!res.ok) {
+          const serverMsg = json?.error ?? json?.message ?? res.statusText ?? `HTTP ${res.status}`;
+          const err: any = new Error(serverMsg);
+          err.details = json ?? text;
+          throw err;
+        }
+        resJson = json ?? { success: true };
       }
       
       // success
@@ -147,9 +170,19 @@ export default function SubmitPage() {
       setProgress(null);
     } catch (err: any) {
       console.error("submit error:", err);
-      // prefer server-provided message
-      const serverMsg = err?.message ?? (err?.details?.error ?? null);
-      setMsg(serverMsg ?? "การส่งข้อมูลล้มเหลว");
+      // extract server-provided structured message when possible
+      const serverBody = err?.details ?? (err?.details?.body ?? null);
+      const serverMsg = err?.message ?? (serverBody?.error ?? serverBody?.message) ?? null;
+      
+      // Prefer explicit server-side "error" or "message" fields
+      if (serverMsg) {
+        setMsg(String(serverMsg));
+      } else {
+        setMsg(err?.message ?? "การส่งข้อมูลล้มเหลว");
+      }
+      
+      // If you want more debugging info while developing, uncomment:
+      // console.debug("server body / details:", serverBody);
     } finally {
       setLoading(false);
     }
