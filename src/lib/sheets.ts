@@ -36,3 +36,65 @@ export async function appendToSheet(values: string[]) {
     throw buildDetailedError("Sheets append failed", err);
   }
 }
+
+/**
+ * New helper: appendSubmission
+ * - submission: object with basic fields + attachments array
+ * - attachments: [{ id, name, mimeType, webViewLink?, thumbnailLink? }]
+ *
+ * Schema proposed (columns):
+ * 1) timestamp (ISO)
+ * 2) userId (auth uid or email)
+ * 3) studentId or reference (optional)
+ * 4) title
+ * 5) detail (text)
+ * 6) attachments_json (stringified JSON array)  <-- for programmatic use
+ * 7) attachment_ids (comma separated)           <-- for quick filter/search by ID
+ * 8) attachment_names (comma separated)         <-- human readable
+ * 9) attachment_links (comma separated)         <-- webViewLink(s) if available
+ *
+ * This keeps human-friendly columns and a canonical JSON column for later import.
+ */
+export type AttachmentMeta = {
+  id: string;
+  name ? : string;
+  mimeType ? : string;
+  webViewLink ? : string | null;
+  thumbnailLink ? : string | null;
+};
+
+export async function appendSubmission(submission: {
+  timestamp ? : string;
+  userId ? : string;
+  studentId ? : string;
+  title: string;
+  detail: string;
+  attachments ? : AttachmentMeta[];
+}) {
+  const ts = submission.timestamp ?? new Date().toISOString();
+  const userId = submission.userId ?? "";
+  const studentId = submission.studentId ?? "";
+  const title = submission.title ?? "";
+  const detail = submission.detail ?? "";
+  
+  const attachments = submission.attachments ?? [];
+  const attachmentsJson = JSON.stringify(attachments);
+  const attachmentIds = attachments.map(a => a.id).filter(Boolean).join(",");
+  const attachmentNames = attachments.map(a => a.name ?? "").filter(Boolean).join(", ");
+  const attachmentLinks = attachments.map(a => a.webViewLink ?? "").filter(Boolean).join(", ");
+  
+  const row = [
+    ts,
+    userId,
+    studentId,
+    title,
+    detail,
+    attachmentsJson,
+    attachmentIds,
+    attachmentNames,
+    attachmentLinks,
+  ];
+  
+  // call existing appendToSheet (you may want to adjust range in appendToSheet for wider columns)
+  await appendToSheet(row);
+}

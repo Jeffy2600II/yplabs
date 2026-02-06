@@ -13,11 +13,19 @@ function buildDetailedError(prefix: string, err: any) {
   return e;
 }
 
+export type DriveUploadResult = {
+  id: string;
+  name: string;
+  mimeType ? : string;
+  webViewLink ? : string | null;
+  thumbnailLink ? : string | null;
+};
+
 /**
- * Upload file to Google Drive.
- * ...
+ * Upload file to Google Drive and optionally create a shareable link.
+ * Returns an object with id, name, mimeType and (if available) webViewLink/thumbnailLink.
  */
-export async function uploadFile(file: any) {
+export async function uploadFile(file: any, makePublicLink = false): Promise < DriveUploadResult > {
   if (!process.env.DRIVE_FOLDER_ID) {
     const e: any = new Error("DRIVE_FOLDER_ID is not set in environment.");
     e.code = "NO_DRIVE_FOLDER_ID";
@@ -53,26 +61,65 @@ export async function uploadFile(file: any) {
   }
   
   try {
-    const res = await drive.files.create({
+    const createRes = await drive.files.create({
       requestBody: {
         name,
         parents: [process.env.DRIVE_FOLDER_ID],
       },
       media: { mimeType, body: bodyStream },
-      fields: "id",
+      fields: "id,name,mimeType,thumbnailLink",
       supportsAllDrives: true,
     });
     
-    return res.data.id ?? "";
+    const id = createRes.data.id ?? "";
+    const createdName = createRes.data.name ?? name;
+    const createdMime = createRes.data.mimeType ?? mimeType;
+    const thumbnailLink = (createRes.data as any).thumbnailLink ?? null;
+    
+    let webViewLink: string | null = null;
+    
+    // If caller wants a public shareable link, create a permission and then fetch webViewLink.
+    if (makePublicLink) {
+      try {
+        // create permission: anyoneWithLink can read
+        await drive.permissions.create({
+          fileId: id,
+          requestBody: {
+            role: "reader",
+            type: "anyone",
+          },
+          supportsAllDrives: true,
+        }).catch(() => null);
+      } catch {
+        // ignore permission errors
+      }
+      try {
+        const getRes = await drive.files.get({
+          fileId: id,
+          fields: "webViewLink",
+          supportsAllDrives: true,
+        }).catch(() => null);
+        webViewLink = getRes?.data?.webViewLink ?? null;
+      } catch {
+        webViewLink = null;
+      }
+    }
+    
+    return {
+      id,
+      name: createdName,
+      mimeType: createdMime,
+      webViewLink,
+      thumbnailLink,
+    };
   } catch (err: any) {
     const details = err?.response?.data ?? err;
     console.error("drive.upload error:", JSON.stringify(details, null, 2));
     
-    // friendly special-case remains
     const msg = String(details?.error?.message ?? details?.message ?? details);
     if (msg.includes("Service Accounts do not have storage quota")) {
       const e: any = new Error(
-        "อัปโหลดล้มเหลว: Service account ไม่มีพื้นที่บน My Drive — ให้ใช้ Shared drive แทน โดยเพิ่ม service account เป็นสมาชิกของ Shared drive (role: Content manager/Manager) แล้วตั้งค่า DRIVE_FOLDER_ID เป็น ID ของโฟลเดอร์ใน Shared drive"
+        "อัปโหลดล้มเหลว: Service account ไม่มีพื้นที่บน My Drive — ให้ใช้ Shared drive แทน โดยเพิ่ม service account ไปยัง Shared drive และตั้งค่า DRIVE_FOLDER_ID ไปยัง Shared drive folder"
       );
       e.code = "SERVICE_ACCOUNT_QUOTA";
       e.details = details;
