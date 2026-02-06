@@ -1,15 +1,16 @@
-"use client";
+'use client';
 
 import { useState, useRef } from "react";
+import { getBrowserSupabase } from "@/lib/supabaseClient";
+import { usePopup } from "@/components/PopupProvider";
 
 type Toast = { type: "success" | "error" | "info";title: string;message ? : string;details ? : any };
 
 export default function SubmitPage() {
+  const { notify } = usePopup(); // ใช้ระบบแจ้งเตือนแบบเดิม 100%
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState < number | null > (null);
   const [fileName, setFileName] = useState("");
-  const [toast, setToast] = useState < Toast | null > (null);
-  const [showDetails, setShowDetails] = useState(false);
   const xhrRef = useRef < XMLHttpRequest | null > (null);
   
   function handleFileChange(e: any) {
@@ -17,17 +18,31 @@ export default function SubmitPage() {
     setFileName(f ? f.name : "");
     // Client-side file size guard (5MB)
     if (f && f.size > 5 * 1024 * 1024) {
-      setToast({ type: "error", title: "ไฟล์ใหญ่เกินไป", message: "ขนาดไฟล์ต้องไม่เกิน 5MB" });
+      notify("ไฟล์ใหญ่เกินไป — ขนาดต้องไม่เกิน 5MB");
       (e.target as HTMLInputElement).value = "";
       setFileName("");
     }
   }
   
-  function sendWithXHR(formData: FormData) {
+  function sendWithXHR(formData: FormData, token ? : string) {
     return new Promise < any > ((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhrRef.current = xhr;
       xhr.open("POST", "/api/council/submit");
+      
+      // Set Authorization header if token provided
+      if (token) {
+        try {
+          xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        } catch {
+          // ignore setting header failures (shouldn't happen same-origin)
+        }
+      }
+      
+      // Accept JSON
+      try {
+        xhr.setRequestHeader("Accept", "application/json");
+      } catch {}
       
       xhr.upload.onprogress = (ev) => {
         if (ev.lengthComputable) {
@@ -36,7 +51,7 @@ export default function SubmitPage() {
         }
       };
       
-      xhr.timeout = 120_000; // 120s timeout for large uploads
+      xhr.timeout = 120_000; // 120s
       xhr.ontimeout = () => {
         reject(new Error("การอัปโหลดใช้เวลานานเกินไป (timeout)"));
       };
@@ -45,11 +60,16 @@ export default function SubmitPage() {
       
       xhr.onload = () => {
         try {
-          const json = xhr.response && typeof xhr.response === "object" ? xhr.response : JSON.parse(xhr.responseText || "{}");
+          const text = xhr.responseText || "{}";
+          let json: any = {};
+          try {
+            json = xhr.response && typeof xhr.response === "object" ? xhr.response : JSON.parse(text);
+          } catch {
+            json = { raw: text };
+          }
           if (xhr.status >= 200 && xhr.status < 300) {
             resolve({ status: xhr.status, data: json });
           } else {
-            // reject with structured info so caller can inspect details
             reject({ status: xhr.status, data: json });
           }
         } catch (e) {
@@ -65,196 +85,112 @@ export default function SubmitPage() {
     e.preventDefault();
     setLoading(true);
     setProgress(null);
-    setToast(null);
-    setShowDetails(false);
     
     const form = e.target as HTMLFormElement;
     const formData = new FormData(form);
     
-    // client-side ensure title/detail exist
+    // client-side validation
     const title = formData.get("title");
     const detail = formData.get("detail");
     
     if (!title || String(title).trim() === "") {
-      setToast({ type: "error", title: "ข้อมูลไม่ครบ", message: "กรุณากรอกหัวข้อ" });
+      notify("กรุณากรอกหัวข้อ");
       setLoading(false);
       return;
     }
     if (!detail || String(detail).trim() === "") {
-      setToast({ type: "error", title: "ข้อมูลไม่ครบ", message: "กรุณากรอกรายละเอียด" });
+      notify("กรุณากรอกรายละเอียด");
       setLoading(false);
       return;
     }
     
-    const file = formData.get("file") as File | null;
-    if (file && file.size > 5 * 1024 * 1024) {
-      setToast({ type: "error", title: "ไฟล์ใหญ่เกินไป", message: "ขนาดไฟล์ต้องไม่เกิน 5MB" });
+    // get supabase access token - required by server route
+    let token: string | null = null;
+    try {
+      const supabase = getBrowserSupabase();
+      const sessionRes = await supabase.auth.getSession();
+      token = sessionRes?.data?.session?.access_token ?? null;
+      if (!token) {
+        notify("กรุณาเข้าสู่ระบบก่อนส่งข้อมูล");
+        setLoading(false);
+        return;
+      }
+    } catch (err) {
+      console.error("getSession error:", err);
+      notify("ไม่สามารถดึงข้อมูลการเข้าสู่ระบบได้");
       setLoading(false);
       return;
     }
     
     try {
-      const res = await sendWithXHR(formData);
-      setLoading(false);
+      const result = await sendWithXHR(formData, token);
+      notify("ส่งข้อมูลเรียบร้อยแล้ว");
+      // reset form inputs (except radio/checkbox)
+      (form.querySelectorAll("input")).forEach((i) => {
+        const inp = i as HTMLInputElement;
+        if (inp.type !== "radio" && inp.type !== "checkbox") inp.value = "";
+      });
+      (form.querySelectorAll("textarea")).forEach((t) => (t as HTMLTextAreaElement).value = "");
+      setFileName("");
       setProgress(null);
-      
-      if (res?.data?.success) {
-        setToast({ type: "success", title: "ส่งสำเร็จ", message: "ส่งข้อมูลเรียบร้อยแล้ว ✅" });
-        form.reset();
-        setFileName("");
-      } else {
-        // Non-200 success path (rare)
-        setToast({
-          type: "error",
-          title: "เกิดข้อผิดพลาด",
-          message: res?.data?.error ?? "ไม่ทราบสาเหตุ",
-          details: res?.data,
-        });
-      }
     } catch (err: any) {
-      setLoading(false);
-      setProgress(null);
-      
-      // If we rejected with structured {status, data}
-      if (err?.data) {
-        setToast({
-          type: "error",
-          title: err.data.error ?? "อัปโหลดล้มเหลว",
-          message: err.data.message ?? undefined,
-          details: err.data.details ?? err.data,
-        });
+      console.error("submit error:", err);
+      // if structured server error
+      if (err && typeof err === "object" && ("status" in err || err?.data)) {
+        const status = err.status;
+        const data = err.data;
+        const msg = data?.error ?? data?.message ?? JSON.stringify(data);
+        notify(`ส่งล้มเหลว${status ? ` (${status})` : ""}: ${String(msg)}`);
       } else {
-        setToast({ type: "error", title: "อัปโหลดล้มเหลว", message: err?.message ?? "ไม่ทราบสาเหตุ" });
+        notify(`ส่งล้มเหลว: ${err?.message ?? String(err)}`);
       }
     } finally {
-      xhrRef.current = null;
+      setLoading(false);
     }
   }
   
   return (
-    <main style={{ padding: 24, maxWidth: 700 }}>
-      <h1 style={{ fontSize: 24, marginBottom: 16 }}>ส่งเรื่องถึงสภา</h1>
-
-      <form onSubmit={handleSubmit}>
-        <label style={{ display: "block", marginBottom: 8 }}>
+    <main style={{ padding: 24, maxWidth: 720 }}>
+      <h1>ส่งข้อมูล</h1>
+      <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12 }}>
+        <label>
           หัวข้อ
-          <input
-            name="title"
-            placeholder="หัวข้อ"
-            required
-            style={{ width: "100%", marginTop: 8, padding: 10, borderRadius: 8, border: "1px solid #333", background: "#0a0a0a", color: "#fff" }}
-          />
+          <input name="title" required maxLength={100} />
         </label>
-
-        <label style={{ display: "block", marginTop: 12 }}>
+        <label>
           รายละเอียด
-          <textarea
-            name="detail"
-            placeholder="รายละเอียด"
-            required
-            rows={6}
-            style={{ width: "100%", marginTop: 8, padding: 10, borderRadius: 8, border: "1px solid #333", background: "#0a0a0a", color: "#fff" }}
-          />
+          <textarea name="detail" rows={6} required />
         </label>
 
-        <label style={{ display: "block", marginTop: 12 }}>
-          แนบไฟล์ (ไม่เกิน 5MB)
-          <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center" }}>
-            <input type="file" name="file" onChange={handleFileChange} />
-            <div style={{ opacity: 0.7, fontSize: 14 }}>{fileName ? `ไฟล์: ${fileName}` : "ยังไม่ได้เลือกไฟล์"}</div>
-          </div>
+        <label>
+          แนบไฟล์ (ถ้ามี) — ขนาดสูงสุด 5MB
+          <input type="file" name="file" onChange={handleFileChange} />
         </label>
+        {fileName && <div>เลือกไฟล์: {fileName}</div>}
 
         {progress !== null && (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ height: 8, background: "#222", borderRadius: 6, overflow: "hidden" }}>
-              <div style={{ width: `${progress}%`, height: "100%", background: "#4caf50" }} />
-            </div>
-            <div style={{ marginTop: 6, fontSize: 13 }}>{progress}%</div>
+          <div>
+            กำลังอัปโหลด: {progress}% <progress value={progress} max={100} />
           </div>
         )}
 
-        <div style={{ marginTop: 16, display: "flex", gap: 12 }}>
-          <button
-            disabled={loading}
-            style={{
-              padding: "10px 16px",
-              borderRadius: 8,
-              border: "none",
-              background: loading ? "#666" : "#fff",
-              color: loading ? "#ccc" : "#000",
-              fontWeight: 600,
-              cursor: loading ? "default" : "pointer",
-            }}
-          >
-            {loading ? "กำลังส่ง..." : "ส่งข้อมูล"}
-          </button>
-
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="submit" disabled={loading}>{loading ? "กำลังส่ง..." : "ส่ง"}</button>
           <button
             type="button"
             onClick={() => {
-              (document.querySelector("form") as HTMLFormElement)?.reset();
-              setFileName("");
-              setToast(null);
-              setProgress(null);
               if (xhrRef.current) {
                 xhrRef.current.abort();
-                xhrRef.current = null;
+                notify("ยกเลิกการอัปโหลด");
+                setLoading(false);
+                setProgress(null);
               }
             }}
-            style={{ padding: "10px 16px", borderRadius: 8, border: "1px solid #333", background: "transparent", color: "#fff", cursor: "pointer" }}
           >
-            ยกเลิก / รีเซ็ต
+            ยกเลิก
           </button>
         </div>
       </form>
-
-      {toast && (
-        <div
-          role="dialog"
-          aria-live="assertive"
-          style={{
-            position: "fixed",
-            left: "50%",
-            transform: "translateX(-50%)",
-            bottom: 32,
-            minWidth: 280,
-            maxWidth: "90%",
-            background: toast.type === "success" ? "#0b6623" : "#7a1f1f",
-            color: "#fff",
-            padding: "12px 16px",
-            borderRadius: 8,
-            boxShadow: "0 6px 24px rgba(0,0,0,0.5)",
-            zIndex: 9999,
-          }}
-        >
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>{toast.title}</div>
-          {toast.message && <div style={{ opacity: 0.95 }}>{toast.message}</div>}
-
-          {toast.details && (
-            <div style={{ marginTop: 8 }}>
-              <button
-                onClick={() => setShowDetails((s) => !s)}
-                style={{ border: "none", background: "transparent", color: "#fff", textDecoration: "underline", cursor: "pointer" }}
-              >
-                {showDetails ? "ซ่อนรายละเอียดข้อผิดพลาด" : "ดูรายละเอียดข้อผิดพลาด (สำหรับนักพัฒนา)"}
-              </button>
-
-              {showDetails && (
-                <pre style={{ maxHeight: 240, overflow: "auto", background: "#111", color: "#eee", padding: 8, borderRadius: 6, marginTop: 8 }}>
-                  {typeof toast.details === "string" ? toast.details : JSON.stringify(toast.details, null, 2)}
-                </pre>
-              )}
-            </div>
-          )}
-
-          <div style={{ marginTop: 8, textAlign: "right" }}>
-            <button onClick={() => setToast(null)} style={{ border: "none", background: "transparent", color: "#fff", opacity: 0.9, cursor: "pointer", fontSize: 14 }}>
-              ปิด
-            </button>
-          </div>
-        </div>
-      )}
     </main>
   );
 }
