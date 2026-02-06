@@ -1,3 +1,5 @@
+'use strict';
+
 import { google } from "googleapis";
 import { getAuthClient } from "./google";
 
@@ -12,6 +14,10 @@ function buildDetailedError(prefix: string, err: any) {
   return e;
 }
 
+/**
+ * appendToSheet: appends a row (array of strings) into the target sheet.
+ * Note: range set wide enough for our columns (A:I). Append will add rows as needed.
+ */
 export async function appendToSheet(values: string[]) {
   if (!process.env.SHEET_ID) {
     const e: any = new Error("SHEET_ID is not set in environment.");
@@ -25,7 +31,7 @@ export async function appendToSheet(values: string[]) {
   try {
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.SHEET_ID,
-      range: "A:D",
+      range: "A:I",
       valueInputOption: "USER_ENTERED",
       requestBody: {
         values: [values],
@@ -38,31 +44,31 @@ export async function appendToSheet(values: string[]) {
 }
 
 /**
- * New helper: appendSubmission
- * - submission: object with basic fields + attachments array
- * - attachments: [{ id, name, mimeType, webViewLink?, thumbnailLink? }]
- *
- * Schema proposed (columns):
- * 1) timestamp (ISO)
- * 2) userId (auth uid or email)
- * 3) studentId or reference (optional)
- * 4) title
- * 5) detail (text)
- * 6) attachments_json (stringified JSON array)  <-- for programmatic use
- * 7) attachment_ids (comma separated)           <-- for quick filter/search by ID
- * 8) attachment_names (comma separated)         <-- human readable
- * 9) attachment_links (comma separated)         <-- webViewLink(s) if available
- *
- * This keeps human-friendly columns and a canonical JSON column for later import.
+ * Attachment metadata saved with each submission row
  */
 export type AttachmentMeta = {
   id: string;
-  name ? : string;
-  mimeType ? : string;
+  name ? : string | null;
+  mimeType ? : string | null;
   webViewLink ? : string | null;
   thumbnailLink ? : string | null;
 };
 
+/**
+ * appendSubmission
+ * - submission: object with basic fields + attachments array
+ *
+ * Schema proposed (columns):
+ * A: timestamp (ISO)
+ * B: userId
+ * C: studentId / reference
+ * D: title
+ * E: detail (text)
+ * F: attachments_json (stringified JSON array)  <-- machine-friendly
+ * G: attachment_ids (CSV)
+ * H: attachment_names (CSV)
+ * I: attachment_links (CSV)
+ */
 export async function appendSubmission(submission: {
   timestamp ? : string;
   userId ? : string;
@@ -95,6 +101,5 @@ export async function appendSubmission(submission: {
     attachmentLinks,
   ];
   
-  // call existing appendToSheet (you may want to adjust range in appendToSheet for wider columns)
   await appendToSheet(row);
 }

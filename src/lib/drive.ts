@@ -1,3 +1,5 @@
+'use strict';
+
 import { google } from "googleapis";
 import fs from "fs";
 import { Readable } from "stream";
@@ -16,7 +18,7 @@ function buildDetailedError(prefix: string, err: any) {
 export type DriveUploadResult = {
   id: string;
   name: string;
-  mimeType ? : string;
+  mimeType ? : string | null;
   webViewLink ? : string | null;
   thumbnailLink ? : string | null;
 };
@@ -36,7 +38,7 @@ export async function uploadFile(file: any, makePublicLink = false): Promise < D
   const drive = google.drive({ version: "v3", auth });
   
   const name = file?.name ?? file?.originalFilename ?? file?.newFilename ?? `upload-${Date.now()}`;
-  const mimeType = file?.type ?? file?.mimetype ?? undefined;
+  const mimeType = file?.type ?? file?.mimetype ?? null;
   
   let bodyStream: Readable;
   
@@ -66,7 +68,7 @@ export async function uploadFile(file: any, makePublicLink = false): Promise < D
         name,
         parents: [process.env.DRIVE_FOLDER_ID],
       },
-      media: { mimeType, body: bodyStream },
+      media: { mimeType: mimeType ?? undefined, body: bodyStream },
       fields: "id,name,mimeType,thumbnailLink",
       supportsAllDrives: true,
     });
@@ -78,10 +80,10 @@ export async function uploadFile(file: any, makePublicLink = false): Promise < D
     
     let webViewLink: string | null = null;
     
-    // If caller wants a public shareable link, create a permission and then fetch webViewLink.
+    // If caller requested a public link, attempt to create a permission and fetch webViewLink.
     if (makePublicLink) {
       try {
-        // create permission: anyoneWithLink can read
+        // create permission: anyone with link can read
         await drive.permissions.create({
           fileId: id,
           requestBody: {
@@ -108,7 +110,7 @@ export async function uploadFile(file: any, makePublicLink = false): Promise < D
     return {
       id,
       name: createdName,
-      mimeType: createdMime,
+      mimeType: createdMime ?? null,
       webViewLink,
       thumbnailLink,
     };
