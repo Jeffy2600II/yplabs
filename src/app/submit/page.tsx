@@ -1,19 +1,36 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { getBrowserSupabase } from '@/lib/supabaseClient';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 
+/**
+ * หน้า "ส่งเรื่อง" (Submit)
+ * - เก็บ UI แบบเต็มตามต้นฉบับ
+ * - ใช้ XMLHttpRequest เพื่อแสดง progress (เหมาะกับไฟล์อัพโหลด)
+ * - ก่อนส่ง จะพยายามดึง access_token จาก Supabase session
+ *   หากไม่มี token ในครั้งแรก จะรอการเปลี่ยนแปลง auth state สั้น ๆ (2 วินาที) เป็น fallback
+ */
+
 export default function SubmitPage() {
   const { isMember, loading: authLoading } = useAuth();
   const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState<number|null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
   const [fileName, setFileName] = useState('');
   const [done, setDone] = useState(false);
-  const [error, setError] = useState<string|null>(null);
-  const xhrRef = useRef<XMLHttpRequest|null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const xhrRef = useRef<XMLHttpRequest | null>(null);
+
+  // หากมีกรณีที่ผู้ใช้ออกจากระบบขณะหน้าเปิดไว้ ให้เคลียร์สถานะที่เกี่ยวข้อง
+  useEffect(() => {
+    if (!isMember) {
+      setFileName('');
+      setDone(false);
+      setProgress(null);
+    }
+  }, [isMember]);
 
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -29,12 +46,14 @@ export default function SubmitPage() {
       const xhr = new XMLHttpRequest();
       xhrRef.current = xhr;
       xhr.open('POST', '/api/council/submit');
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      // แนบ token เป็น Bearer
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
       xhr.setRequestHeader('Accept', 'application/json');
       xhr.upload.onprogress = ev => { if (ev.lengthComputable) setProgress(Math.round(ev.loaded / ev.total * 100)); };
       xhr.timeout = 120_000;
       xhr.ontimeout = () => rej(new Error('หมดเวลา'));
       xhr.onerror = () => rej(new Error('เชื่อมต่อล้มเหลว'));
+      xhr.onabort = () => rej(new Error('ยกเลิกการอัปโหลด'));
       xhr.onload = () => {
         try {
           const json = JSON.parse(xhr.responseText || '{}');
@@ -46,6 +65,17 @@ export default function SubmitPage() {
     });
   }
 
+  // ยกเลิกการอัปโหลดที่กำลังทำงานอยู่
+  function cancelUpload() {
+    try {
+      xhrRef.current?.abort();
+    } catch {}
+    xhrRef.current = null;
+    setLoading(false);
+    setProgress(null);
+    setError('ยกเลิกการอัปโหลด');
+  }
+
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setLoading(true); setProgress(null); setError(null);
@@ -55,88 +85,107 @@ export default function SubmitPage() {
     const detail = String(fd.get('detail') ?? '').trim();
     if (!title) { setError('กรุณากรอกหัวข้อ'); setLoading(false); return; }
     if (!detail) { setError('กรุณากรอกรายละเอียด'); setLoading(false); return; }
+
     try {
       const supabase = getBrowserSupabase();
-      const { data: sess } = await supabase.auth.getSession();
-      const token = sess?.session?.access_token;
+      // ดึง session ครั้งแรก
+      let { data } = await supabase.auth.getSession();
+      let token = data?.session?.access_token ?? null;
+
+      // ถ้ายังไม่มี token ลอง subscribe รอสั้น ๆ เผื่อ session ถูกตั้งขึ้นมาทัน
+      if (!token) {
+        token = await new Promise<string | null>(resolve => {
+          let resolved = false;
+          // ตั้ง listener ชั่วคราว
+          const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+            if (session?.access_token && !resolved) {
+              resolved = true;
+              try { (sub as any)?.subscription?.unsubscribe?.(); } catch {}
+              resolve(session.access_token);
+            }
+          });
+          // timeout หลัง 2 วินาที
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              try { (sub as any)?.subscription?.unsubscribe?.(); } catch {}
+              resolve(null);
+            }
+          }, 2000);
+        });
+      }
+
       if (!token) { setError('กรุณาเข้าสู่ระบบก่อน'); setLoading(false); return; }
+
       await sendXHR(fd, token);
       setDone(true); setFileName(''); setProgress(null);
     } catch (err: any) {
-      setError(err?.data?.error ?? err?.message ?? 'เกิดข้อผิดพลาด');
+      // กรณีที่ API ตอบกลับเป็น object error
+      if (err?.data?.error) setError(err.data.error);
+      else setError(err?.message ?? 'เกิดข้อผิดพลาด');
     } finally {
       setLoading(false);
+      xhrRef.current = null;
     }
   }
 
   if (!authLoading && !isMember) {
     return (
-      <AppShell pageTitle="ส่งข้อมูล">
-        <div className="card" style={{ textAlign: 'center', padding: '48px 24px' }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>🔒</div>
-          <h2 style={{ marginBottom: 8 }}>ต้องเข้าสู่ระบบก่อน</h2>
-          <p style={{ color: 'var(--text-3)', marginBottom: 20 }}>เฉพาะสมาชิกสภาเท่านั้นที่สามารถส่งข้อมูลได้</p>
-          <Link href="/login" className="btn btn-primary">เข้าสู่ระบบ</Link>
+      <AppShell pageTitle="ส่งเรื่อง">
+        <div className="card">
+          <p>คุณต้องเข้าสู่ระบบเพื่อส่งเรื่อง</p>
+          <Link href="/login">ไปที่หน้าเข้าสู่ระบบ</Link>
         </div>
       </AppShell>
     );
   }
 
   return (
-    <AppShell pageTitle="ส่งข้อมูล">
-      <div className="page-header">
-        <div className="page-title">ส่งข้อมูลและเอกสาร</div>
-        <div className="page-subtitle">บันทึกลง Google Sheets และ Drive อัตโนมัติ</div>
-      </div>
+    <AppShell pageTitle="ส่งเรื่อง">
+      <div className="card">
+        <h2>ส่งเรื่องร้องเรียน / แจ้งปัญหา</h2>
+        <p className="muted">กรุณากรอกข้อมูลรายละเอียดให้ชัดเจน หากต้องการแนบรูป โปรดแน่ใจว่าไฟล์ไม่เกิน 5MB</p>
 
-      <div className="card" style={{ maxWidth: 640 }}>
-        {done ? (
-          <div style={{ textAlign: 'center', padding: '32px 0' }}>
-            <div style={{ fontSize: 52, marginBottom: 12 }}>✅</div>
-            <h2 style={{ color: 'var(--green)', marginBottom: 8 }}>ส่งเรียบร้อยแล้ว!</h2>
-            <p style={{ color: 'var(--text-3)' }}>ข้อมูลถูกบันทึกเรียบร้อยแล้ว</p>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 20 }}>
-              <button onClick={() => setDone(false)} className="btn btn-primary">ส่งอีกครั้ง</button>
-              <Link href="/" className="btn btn-ghost">กลับหน้าหลัก</Link>
-            </div>
+        <form onSubmit={handleSubmit} className="submit-form" style={{ display: 'grid', gap: 12 }}>
+          <div>
+            <label htmlFor="title">หัวข้อ</label>
+            <input id="title" name="title" className="input" placeholder="หัวข้อเรื่อง" />
           </div>
-        ) : (
-          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div className="form-group">
-              <label className="form-label">หัวข้อ <span className="form-req">*</span></label>
-              <input name="title" required maxLength={100} placeholder="ระบุหัวข้อของข้อมูล" />
-            </div>
-            <div className="form-group">
-              <label className="form-label">รายละเอียด <span className="form-req">*</span></label>
-              <textarea name="detail" rows={6} required placeholder="อธิบายรายละเอียด..." />
-            </div>
-            <div className="form-group">
-              <label className="form-label">แนบไฟล์ (ไม่บังคับ, สูงสุด 5MB)</label>
-              <div style={{ border: '2px dashed var(--border)', borderRadius: 'var(--r)', padding: '16px', background: 'var(--surface-2)', textAlign: 'center' }}>
-                <input type="file" name="file" onChange={handleFile} accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.zip" style={{ cursor: 'pointer' }} />
-                {fileName && <div style={{ marginTop: 8, fontSize: 13, color: 'var(--brand)', fontWeight: 600 }}>📎 {fileName}</div>}
-                {!fileName && <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-3)' }}>PDF, Word, Excel, รูปภาพ</div>}
-              </div>
-            </div>
-            {progress !== null && (
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-3)', marginBottom: 5 }}>
-                  <span>กำลังอัปโหลด...</span><span>{progress}%</span>
+
+          <div>
+            <label htmlFor="detail">รายละเอียด</label>
+            <textarea id="detail" name="detail" className="textarea" rows={6} placeholder="พิมพ์รายละเอียดที่นี่..." />
+          </div>
+
+          <div>
+            <label htmlFor="file">ไฟล์แนบ (ถ้ามี)</label>
+            <input id="file" type="file" name="file" onChange={handleFile} />
+            {fileName ? <div className="muted">ไฟล์: {fileName}</div> : null}
+          </div>
+
+          {progress !== null ? (
+            <div>
+              <label>สถานะการอัปโหลด</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{ flexGrow: 1, background: '#f3f4f6', height: 10, borderRadius: 6, overflow: 'hidden' }}>
+                  <div style={{ width: `${progress}%`, background: '#10b981', height: '100%' }} />
                 </div>
-                <div className="progress-track"><div className="progress-fill" style={{ width: `${progress}%` }} /></div>
+                <div style={{ minWidth: 48 }}>{progress}%</div>
+                <button type="button" className="btn btn-ghost" onClick={cancelUpload}>ยกเลิก</button>
               </div>
-            )}
-            {error && <div className="alert alert-error">{error}</div>}
-            <div style={{ display: 'flex', gap: 10 }}>
-              <button type="submit" disabled={loading} className="btn btn-primary" style={{ flex: 1, padding: '12px' }}>
-                {loading ? '🔄 กำลังส่ง...' : '📤 ส่งข้อมูล'}
-              </button>
-              <button type="button" className="btn btn-ghost" onClick={() => { xhrRef.current?.abort(); setLoading(false); setProgress(null); }}>
-                ยกเลิก
-              </button>
             </div>
-          </form>
-        )}
+          ) : null}
+
+          {error ? <div className="error">{error}</div> : null}
+          {done ? <div className="success">ส่งเรียบร้อย ขอบคุณ</div> : null}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="submit" className="btn btn-primary" disabled={loading}>
+              {loading ? 'กำลังส่ง...' : 'ส่ง'}
+            </button>
+            <Link href="/" className="btn btn-ghost">ยกเลิก</Link>
+          </div>
+        </form>
       </div>
     </AppShell>
   );
