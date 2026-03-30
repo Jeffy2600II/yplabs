@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useState, useEffect } from 'react';
+import { subscribeTable } from '@/lib/realtime';
 
 type NavItem = {
   href: string;
@@ -34,6 +35,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   const router = useRouter();
   const { user, isAdmin, isMember, loading, signOut } = useAuth();
   const [today, setToday] = useState('');
+  const [pendingCountLocal, setPendingCountLocal] = useState<number>(0);
 
   useEffect(() => {
     setToday(new Date().toLocaleDateString('th-TH', {
@@ -41,19 +43,79 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
     }));
   }, []);
 
-  // While auth is undecided (loading === true), do not decide nav by isMember
+  // realtime: subscribe to council_requests (or the admin request table) to update badge count
+  useEffect(() => {
+    if (loading || !isAdmin) return;
+    let unsub: (() => Promise<void> | void) | null = null;
+
+    // initial fetch (best-effort) to seed count — optional; pages may pass pendingCount prop
+    (async () => {
+      try {
+        const res = await fetch('/api/admin/requests'); // reuse API for initial value
+        if (res.ok) {
+          const arr = await res.json();
+          setPendingCountLocal(Array.isArray(arr) ? arr.length : 0);
+        }
+      } catch {}
+    })();
+
+    unsub = subscribeTable('council_requests', (p) => {
+      // Postgres changes payload has eventType and record
+      // payload.record may be the new row or old, depending on event
+      // Simpler: increment/decrement based on event
+      const ev = p.eventType ?? p.type ?? (p?.commit ? 'UPDATE' : null);
+      if (!ev) {
+        // fallback: refetch list size
+        (async () => {
+          try {
+            const res = await fetch('/api/admin/requests');
+            if (res.ok) {
+              const arr = await res.json();
+              setPendingCountLocal(Array.isArray(arr) ? arr.length : 0);
+            }
+          } catch {}
+        })();
+        return;
+      }
+      if (ev === 'INSERT') setPendingCountLocal(c => c + 1);
+      else if (ev === 'DELETE') setPendingCountLocal(c => Math.max(0, c - 1));
+      else {
+        // UPDATE -> best to refetch
+        (async () => {
+          try {
+            const res = await fetch('/api/admin/requests');
+            if (res.ok) {
+              const arr = await res.json();
+              setPendingCountLocal(Array.isArray(arr) ? arr.length : 0);
+            }
+          } catch {}
+        })();
+      }
+    }, { events: ['INSERT','UPDATE','DELETE'] });
+
+    return () => {
+      if (unsub) unsub();
+    };
+  }, [loading, isAdmin]);
+
+  const effectivePendingCount = typeof pendingCount === 'number' ? pendingCount : pendingCountLocal;
+
+  // nav decisions while loading: avoid flash
   const navItems = !loading ? (isMember ? NAV_MEMBER : NAV_PUBLIC) : [];
   const adminItems: NavItem[] = !loading && isAdmin ? [
-    { href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined },
+    { href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: effectivePendingCount || undefined },
   ] : [];
 
+  const allItems = [...navItems, ...adminItems];
+
+  // Bottom nav items (max 5)
   const bottomItems: NavItem[] = !loading && isMember
     ? [
         { href: '/', icon: '🏠', label: 'หน้าหลัก' },
         { href: '/zone-check', icon: '🧹', label: 'ตรวจเขต' },
         { href: '/duty', icon: '🏫', label: 'เวรยืน' },
         { href: '/submit', icon: '📁', label: 'ส่งข้อมูล' },
-        ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined }] : []),
+        ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: effectivePendingCount || undefined }] : []),
       ].slice(0, 5)
     : (!loading ? [
         { href: '/', icon: '🏠', label: 'หน้าหลัก' },
@@ -123,7 +185,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             >
               <span className="nav-icon">⚙️</span>
               <span>แอดมิน</span>
-              {pendingCount > 0 && <span className="nav-badge">{pendingCount}</span>}
+              {effectivePendingCount > 0 && <span className="nav-badge">{effectivePendingCount}</span>}
             </Link>
             <Link href="/admin/users" className={`sidebar-nav-item${pathname === '/admin/users' ? ' active' : ''}`}>
               <span className="nav-icon">👥</span>
@@ -132,7 +194,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             <Link href="/admin/requests" className={`sidebar-nav-item${pathname === '/admin/requests' ? ' active' : ''}`}>
               <span className="nav-icon">📬</span>
               <span>คำขอสมัคร</span>
-              {pendingCount > 0 && <span className="nav-badge">{pendingCount}</span>}
+              {effectivePendingCount > 0 && <span className="nav-badge">{effectivePendingCount}</span>}
             </Link>
             <Link href="/admin/duty" className={`sidebar-nav-item${pathname === '/admin/duty' ? ' active' : ''}`}>
               <span className="nav-icon">📋</span>
