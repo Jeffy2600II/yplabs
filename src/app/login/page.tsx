@@ -8,10 +8,15 @@
 //   2. ถ้าล้มเหลว → เรียก /api/auth/repair
 //   3. ถ้า repair สำเร็จ → setSession แล้ว redirect
 //   4. ถ้าล้มเหลว → แสดง DiagnosticPanel พร้อมรายละเอียด
+//
+// FIX: ลบทุก resetBrowserSupabase() ออกจาก login flow
+//   เดิม: schema error → resetBrowserSupabase() → subscription ใน AuthContext ถูกทำลาย
+//         → onAuthStateChange ไม่ทำงานอีก → หน้าทั้งหมด ไม่รู้ว่า login อยู่
+//   แก้:  schema error → wait + retry โดยไม่ reset client
 // ===================================================================
 
 import { useState, useCallback } from 'react';
-import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
+import { getBrowserSupabase } from '@/lib/supabaseClient';
 import { synthesizeEmail } from '@/lib/auth';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -34,7 +39,10 @@ function isSchemaError(err: any): boolean {
   );
 }
 
-/** Query council_users หลัง login พร้อม retry สำหรับ schema error */
+// Query council_users after login — with retry for transient schema errors.
+// CRITICAL: Do NOT call resetBrowserSupabase() here.
+// Resetting the client breaks the onAuthStateChange subscription in AuthProvider,
+// causing the entire app to lose auth state awareness.
 async function fetchCouncilRow(authUid: string, attempt = 0): Promise<any | null> {
   const supabase = getBrowserSupabase();
   const { data: row, error } = await supabase
@@ -44,7 +52,7 @@ async function fetchCouncilRow(authUid: string, attempt = 0): Promise<any | null
     .maybeSingle();
 
   if (error && isSchemaError(error) && attempt < 3) {
-    resetBrowserSupabase();
+    // Wait and retry WITHOUT resetting — preserves subscription
     await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
     return fetchCouncilRow(authUid, attempt + 1);
   }
@@ -252,15 +260,19 @@ export default function LoginPage() {
     setSimpleLog(p => [...p, `${new Date().toISOString().split('T')[1].slice(0, 8)} ${msg}`]);
   }, []);
 
+  // Apply a session returned from the repair API.
+  // CRITICAL: Do NOT call resetBrowserSupabase() here.
+  // Calling reset would destroy the onAuthStateChange subscription in AuthProvider,
+  // leaving all pages permanently unaware of the new session.
   async function applySession(session: { access_token: string; refresh_token: string }) {
-    // รีเซ็ต client ก่อน setSession เพื่อล้าง schema cache เก่า
-    resetBrowserSupabase();
     const supabase = getBrowserSupabase();
     const { error: sessErr } = await supabase.auth.setSession({
       access_token: session.access_token,
       refresh_token: session.refresh_token,
     });
     if (sessErr) throw new Error(`setSession ล้มเหลว: ${sessErr.message}`);
+    // refresh() re-reads the session from localStorage and sets the user profile
+    // before we navigate, ensuring the new page renders with the correct auth state.
     await refresh();
     router.push('/');
   }
@@ -284,10 +296,12 @@ export default function LoginPage() {
         password: studentId,
       });
 
-      // ── Schema error ขณะ signIn → รีเซ็ต client แล้ว retry ──
+      // Schema error on signIn → wait and retry via repair endpoint.
+      // CRITICAL: Do NOT call resetBrowserSupabase() here.
+      // The AuthProvider's subscription is on the current client — resetting it
+      // would permanently break auth state detection for this session.
       if (signInErr1 && isSchemaError(signInErr1)) {
-        log(`[ATTEMPT-1] schema error → reset client + retry`);
-        resetBrowserSupabase();
+        log(`[ATTEMPT-1] schema error → wait + repair (no client reset)`);
         await new Promise(r => setTimeout(r, 500));
         setLoading(false);
         await runRepair();
@@ -297,7 +311,6 @@ export default function LoginPage() {
       if (!signInErr1 && signIn1?.user) {
         log(`[ATTEMPT-1] ✅ auth OK uid=${signIn1.user.id}`);
 
-        // Query council_users พร้อม retry
         const row = await fetchCouncilRow(signIn1.user.id);
 
         if (!row) {
@@ -319,6 +332,8 @@ export default function LoginPage() {
         if (row.disabled) { await supabase.auth.signOut(); setError('บัญชีถูกปิดใช้งาน'); setLoading(false); return; }
 
         log('[OK] Login สำเร็จ');
+        // refresh() reads the session from local cache and sets the user profile.
+        // This ensures all components receive the new auth state before navigation.
         await refresh();
         router.push('/');
         return;
@@ -390,11 +405,10 @@ export default function LoginPage() {
 
       if (e2) {
         if (isSchemaError(e2)) {
-          // Schema error → reset แล้ว retry ครั้งเดียว
-          resetBrowserSupabase();
+          // Schema error → wait and retry WITHOUT resetting client
+          // (resetting would break AuthProvider's subscription)
           await new Promise(r => setTimeout(r, 500));
-          const supabase2 = getBrowserSupabase();
-          const { data: data2, error: e3 } = await supabase2.auth.signInWithPassword({ email, password });
+          const { data: data2, error: e3 } = await supabase.auth.signInWithPassword({ email, password });
           if (e3 || !data2?.user) throw new Error(e3?.message ?? 'Login ล้มเหลว');
           Object.assign(data, data2);
         } else {
