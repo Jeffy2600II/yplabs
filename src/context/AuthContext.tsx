@@ -37,10 +37,14 @@ export function useAuth() {
   return useContext(AuthContext);
 }
 
-/**
- * อ่าน session จาก localStorage เป็น fallback เมื่อ getSession() ช้า/ไม่ตอบ
- * - พยายามรองรับหลายรูปแบบที่ Supabase อาจเก็บ session
- */
+/** Mask helper (ไม่ส���ง token เต็ม) */
+function maskValue(v: string | null | undefined, head = 6, tail = 6) {
+  if (!v) return null;
+  if (v.length <= head + tail + 3) return v;
+  return `${v.slice(0, head)}...${v.slice(-tail)}`;
+}
+
+/** อ่าน session รูปแบบต่าง ๆ จาก localStorage (fallback) */
 function readSessionFromLocalStorage(): { access_token?: string; user?: any } | null {
   try {
     const keys = Object.keys(localStorage).filter(k => /supabase|sb|auth/i.test(k));
@@ -49,58 +53,37 @@ function readSessionFromLocalStorage(): { access_token?: string; user?: any } | 
       if (!raw) continue;
       try {
         const parsed = JSON.parse(raw);
-
-        // Common pattern: object.currentSession = { access_token, user }
         if (parsed?.currentSession && parsed.currentSession.access_token && parsed.currentSession.user) {
           return parsed.currentSession;
         }
-
-        // Sometimes stored as { access_token, user }
         if (parsed?.access_token && parsed?.user) {
           return parsed;
         }
-
-        // Some wrappers store JSON string inside JSON
-        if (typeof parsed === 'string') {
-          try {
-            const inner = JSON.parse(parsed);
-            if (inner?.currentSession && inner.currentSession.access_token && inner.currentSession.user) {
-              return inner.currentSession;
-            }
-            if (inner?.access_token && inner?.user) {
-              return inner;
-            }
-          } catch { /* ignore inner parse error */ }
-        }
-
-        // For other shapes, attempt to find nested currentSession recursively
-        const findCurrentSession = (obj: any): any | null => {
-          if (!obj || typeof obj !== 'object') return null;
-          if (obj.currentSession && obj.currentSession.access_token && obj.currentSession.user) return obj.currentSession;
-          for (const v of Object.values(obj)) {
+        // attempt nested search
+        const findCurr = (o: any): any | null => {
+          if (!o || typeof o !== 'object') return null;
+          if (o.currentSession && o.currentSession.access_token && o.currentSession.user) return o.currentSession;
+          for (const v of Object.values(o)) {
             if (typeof v === 'object') {
-              const found = findCurrentSession(v);
-              if (found) return found;
+              const f = findCurr(v);
+              if (f) return f;
             }
           }
           return null;
         };
-
-        const found = findCurrentSession(parsed);
+        const found = findCurr(parsed);
         if (found) return found;
       } catch {
-        // not JSON — ignore
+        // not JSON, ignore
       }
     }
   } catch (e) {
-    // localStorage may be inaccessible in some contexts -> ignore
+    // localStorage inaccessible
   }
   return null;
 }
 
-/**
- * โหลด profile ของ user จาก council_users
- */
+/** fetch profile same as before */
 async function fetchProfile(authUid: string): Promise<UserProfile | null> {
   try {
     const supabase = getBrowserSupabase();
@@ -131,112 +114,140 @@ async function fetchProfile(authUid: string): Promise<UserProfile | null> {
   }
 }
 
+/** Wait for auth.onAuthStateChange event (INITIAL_SESSION/SIGNED_IN) up to timeoutMs */
+function waitForAuthEvent(supabase: any, timeoutMs: number) {
+  return new Promise<any>(resolve => {
+    let resolved = false;
+    let subscription: any = null;
+    try {
+      const { data } = supabase.auth.onAuthStateChange((event: string, session: any) => {
+        try {
+          rlog('[Auth][waitForAuthEvent] event', { event, hasSession: !!session?.user });
+        } catch {}
+        if (!resolved) {
+          resolved = true;
+          resolve(session ?? null);
+        }
+      });
+      subscription = data?.subscription;
+    } catch (e) {
+      // ignore
+    }
+    const to = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        try { if (subscription) subscription.unsubscribe(); } catch {}
+        resolve(null);
+      }
+    }, timeoutMs);
+  });
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserProfile | null>(null);
 
-  /**
-   * loadUser: อ่าน session จาก localStorage แล้วโหลด profile
-   * - เพิ่ม logs และ timeouts เพื่อหลีกเลี่ยง stuck loading
-   * - เมื่อ timeout เกิด จะลอง fallback อ่านจาก localStorage ด้วย readSessionFromLocalStorage()
-   */
   const loadUser = useCallback(async () => {
-    let timedOut = false;
     const timeoutMs = 7000;
-    const to = setTimeout(() => {
-      timedOut = true;
-      rerr('[Auth][loadUser] timeout waiting for getSession', {});
-      // Ensure we don't leave loading=true indefinitely here; we will try fallback then leave
-      setLoading(false);
-    }, timeoutMs);
+    let timedOut = false;
+    const startedAt = Date.now();
+    try {
+      rlog('[Auth][loadUser] start', { ts: new Date().toISOString() });
+    } catch {}
+
+    // Before calling getBrowserSupabase, dump localStorage summary (masked) to remote log (helps when getSession hangs)
+    try {
+      const lsKeys = Object.keys(window.localStorage).filter(k => /supabase|sb|auth/i.test(k));
+      const lsPreview: any = {};
+      lsKeys.forEach(k => {
+        const v = window.localStorage.getItem(k);
+        const truncated = v ? String(v).slice(0, 120) : null;
+        lsPreview[k] = truncated ? (truncated.length > 80 ? `${truncated.slice(0,40)}...${truncated.slice(-40)}` : truncated) : null;
+      });
+      rlog('[Auth][loadUser] localStorage keys', { keysCount: lsKeys.length, sample: lsPreview });
+    } catch (e) {
+      rerr('[Auth][loadUser] localStorage read failed', { err: String(e) });
+    }
 
     try {
-      rlog('[Auth][loadUser] start');
       const supabase = getBrowserSupabase();
 
-      // getSession อ่านจาก localStorage (เร็ว) — แต่อาจแขวนในบาง environment
-      const { data: { session } } = await supabase.auth.getSession().catch((e) => {
+      // Race: try getSession(), but if it takes too long wait for auth event fallback
+      const getSessionPromise = supabase.auth.getSession().catch((e: any) => {
         rerr('[Auth][loadUser] getSession threw', { err: String(e) });
-        // propagate undefined to let timeout/fallback handle
         return { data: { session: null } };
       });
 
-      if (timedOut) {
-        // If we've already timed out, attempt fallback
-        rlog('[Auth][loadUser] getSession resolved after timeout', { hasSession: !!session?.user });
+      const authEventPromise = waitForAuthEvent(supabase, timeoutMs);
+
+      const raceResult = await Promise.race([
+        getSessionPromise,
+        authEventPromise,
+        new Promise(resolve => setTimeout(() => resolve({ timeout: true }), timeoutMs + 50)),
+      ]);
+
+      if ((raceResult as any)?.timeout) {
+        timedOut = true;
+        rerr('[Auth][loadUser] timeout waiting for getSession (race)', { elapsedMs: Date.now() - startedAt });
+      }
+
+      // If raceResult is session-like (getSession resolved) it will be { data: { session } }
+      let session: any = null;
+      if ((raceResult as any)?.data && ((raceResult as any).data.session !== undefined)) {
+        session = (raceResult as any).data.session;
+        rlog('[Auth][loadUser] getSession resolved via getSession()', { hasSession: !!session?.user });
+      } else if (raceResult && raceResult.user) {
+        // session object returned directly from authEventPromise
+        session = raceResult;
+        rlog('[Auth][loadUser] session obtained via auth event', { hasSession: !!session?.user });
+      }
+
+      // If timed out or no session, try fallback reading localStorage
+      if (!session?.user) {
         const fallback = readSessionFromLocalStorage();
-        if (fallback) {
-          rlog('[Auth][loadUser] fallback session found after timeout', { uidPreview: fallback.user?.id ? String(fallback.user.id).slice(-6) : null });
-          if (fallback.user?.id) {
-            const profile = await fetchProfile(fallback.user.id);
-            if (profile) {
-              setUser(profile);
-              rlog('[Auth][loadUser] user set from fallback', { uidPreview: profile.auth_uid.slice(-6) });
-              return;
-            } else {
-              rlog('[Auth][loadUser] fallback profile not found', { uidPreview: fallback.user?.id ? String(fallback.user.id).slice(-6) : null });
-            }
+        if (fallback?.user?.id) {
+          rlog('[Auth][loadUser] fallback session found in localStorage', { uidPreview: String(fallback.user.id).slice(-6) });
+          const profile = await fetchProfile(fallback.user.id);
+          if (profile) {
+            setUser(profile);
+            rlog('[Auth][loadUser] user set from fallback', { uidPreview: profile.auth_uid.slice(-6) });
+            setLoading(false);
+            return;
+          } else {
+            rlog('[Auth][loadUser] fallback profile not found', { uidPreview: String(fallback.user.id).slice(-6) });
           }
         } else {
-          rlog('[Auth][loadUser] no fallback session in localStorage after timeout');
+          rlog('[Auth][loadUser] no session from getSession/authEvent/localStorage');
         }
-        // nothing found — bail out
-        return;
-      }
-
-      clearTimeout(to);
-
-      rlog('[Auth][loadUser] getSession result', { hasSession: !!session?.user, userIdPreview: session?.user?.id ? String(session.user.id).slice(-6) : null });
-
-      if (!session?.user) {
-        // If no session from supabase, try fallback once before giving up (covers some edge cases)
-        const fallback = readSessionFromLocalStorage();
-        if (fallback) {
-          rlog('[Auth][loadUser] fallback session found (no session from getSession)', { uidPreview: fallback.user?.id ? String(fallback.user.id).slice(-6) : null });
-          if (fallback.user?.id) {
-            const profile = await fetchProfile(fallback.user.id);
-            if (profile) {
-              setUser(profile);
-              rlog('[Auth][loadUser] user set from fallback', { uidPreview: profile.auth_uid.slice(-6) });
-              return;
-            } else {
-              rlog('[Auth][loadUser] fallback profile not found', { uidPreview: fallback.user?.id ? String(fallback.user.id).slice(-6) : null });
-            }
-          }
-        }
-
         setUser(null);
+        setLoading(false);
         return;
       }
 
+      // Normal path: we have session.user.id
       const profile = await fetchProfile(session.user.id);
       if (!profile) {
         rlog('[Auth][loadUser] profile not found or invalid', { uidPreview: session.user.id ? String(session.user.id).slice(-6) : null });
         setUser(null);
+        setLoading(false);
         return;
       }
 
       setUser(profile);
-      rlog('[Auth][loadUser] user set', { uidPreview: profile.auth_uid.slice(-6) });
+      rlog('[Auth][loadUser] user set', { uidPreview: profile.auth_uid.slice(-6), elapsedMs: Date.now() - startedAt });
     } catch (e) {
-      rerr('[Auth][loadUser] error', { err: String(e) });
+      rerr('[Auth][loadUser] unexpected error', { err: String(e) });
       setUser(null);
     } finally {
       if (!timedOut) setLoading(false);
     }
   }, []);
 
-  /**
-   * refresh: บังคับโหลด user ใหม่ — เรียกหลัง login สำเร็จ
-   */
   const refresh = useCallback(async () => {
     setLoading(true);
     await loadUser();
   }, [loadUser]);
 
-  /**
-   * signOut: ปลอดภัยรีเซ็ต singleton และสถานะ
-   */
   const signOut = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
@@ -251,7 +262,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    // โหลด user ทันทีเมื่อ mount
     (async () => {
       try {
         rlog('[Auth][effect] mount -> loadUser');
@@ -264,7 +274,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     })();
 
-    // Subscribe onAuthStateChange เพื่อ react ต่อ sign-in / sign-out จาก tab อื่น
+    // Subscribe for auth changes
     let subscriptionUnsub: (() => void) | null = null;
     try {
       const supabase = getBrowserSupabase();
@@ -274,11 +284,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (event === 'SIGNED_OUT' || !session?.user) {
             setUser(null);
             setLoading(false);
-            rlog('[Auth][onAuthStateChange] user signed out or session missing');
             return;
           }
-
-          // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED → โหลด profile ใหม่
           if (session?.user) {
             const profile = await fetchProfile(session.user.id);
             if (profile) {
@@ -297,22 +304,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       });
       subscriptionUnsub = () => {
-        try {
-          subscription.unsubscribe();
-        } catch {
-          // ignore
-        }
+        try { subscription.unsubscribe(); } catch { /* ignore */ }
       };
     } catch (e) {
       rerr('[Auth][effect] subscribe failed', { err: String(e) });
     }
 
     return () => {
-      try {
-        if (subscriptionUnsub) subscriptionUnsub();
-      } catch {
-        /* ignore */
-      }
+      try { if (subscriptionUnsub) subscriptionUnsub(); } catch {}
     };
   }, [loadUser]);
 
