@@ -2,7 +2,7 @@
 
 import {
   createContext, useContext, useEffect,
-  useState, useCallback, ReactNode,
+  useState, useCallback, useRef, ReactNode,
 } from 'react';
 import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
 
@@ -49,7 +49,6 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
     .limit(1)
     .maybeSingle();
 
-  // "Database error querying schema" → รีเซ็ต client แล้ว retry สูงสุด 3 ครั้ง
   if (error) {
     const isSchemaError =
       error.message?.includes('schema') ||
@@ -58,8 +57,8 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
       error.code === '42P01';
 
     if (isSchemaError && attempt < 3) {
-      resetBrowserSupabase(); // ทิ้ง stale client
-      await new Promise(r => setTimeout(r, 300 * (attempt + 1))); // backoff
+      resetBrowserSupabase();
+      await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
       return queryCouncilUser(authUid, attempt + 1);
     }
     return null;
@@ -71,19 +70,31 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserProfile | null>(null);
+  // ป้องกัน race condition กรณีมีหลาย fetchUser ทำงานพร้อมกัน
+  const fetchCountRef = useRef(0);
 
+  /**
+   * ใช้ getSession() แทน getUser() เพื่ออ่านจาก localStorage โดยตรง
+   * ไม่ต้องทำ network request — เร็วกว่าและไม่ fail เพราะ network
+   */
   const fetchUser = useCallback(async () => {
+    const id = ++fetchCountRef.current;
     try {
       if (typeof window === 'undefined') return;
       const supabase = getBrowserSupabase();
-      const { data: authData, error: authError } = await supabase.auth.getUser();
 
-      if (authError || !authData?.user) {
-        setUser(null);
+      // getSession() อ่านจาก localStorage/memory — ไม่ทำ network call
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+
+      if (sessionError || !session?.user) {
+        if (id === fetchCountRef.current) setUser(null);
         return;
       }
 
-      const row = await queryCouncilUser(authData.user.id);
+      const row = await queryCouncilUser(session.user.id);
+
+      // ตรวจว่าเป็น request ล่าสุด (ป้องกัน stale update)
+      if (id !== fetchCountRef.current) return;
 
       if (row && row.approved && !row.disabled) {
         setUser(row as UserProfile);
@@ -91,7 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(null);
       }
     } catch {
-      setUser(null);
+      if (id === fetchCountRef.current) setUser(null);
     }
   }, []);
 
@@ -107,29 +118,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await supabase.auth.signOut();
     } catch {}
     setUser(null);
-    resetBrowserSupabase(); // ล้าง singleton หลัง sign out
+    resetBrowserSupabase();
   }, []);
 
   useEffect(() => {
     let mounted = true;
-    (async () => {
-      await fetchUser();
-      if (mounted) setLoading(false);
-    })();
 
-    let sub: any;
-    try {
-      const supabase = getBrowserSupabase();
-      const { data } = supabase.auth.onAuthStateChange(async (event) => {
-        if (event === 'SIGNED_IN') await fetchUser();
-        else if (event === 'SIGNED_OUT') setUser(null);
-      });
-      sub = data.subscription;
-    } catch {}
+    const supabase = getBrowserSupabase();
+
+    /**
+     * onAuthStateChange จะ fire "INITIAL_SESSION" ทันทีที่ client เริ่มต้น
+     * ซึ่งจะ restore session จาก localStorage ให้อัตโนมัติ
+     * นี่คือจุดหลักที่ handle page refresh
+     */
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (!mounted) return;
+
+        if (
+          event === 'INITIAL_SESSION' ||
+          event === 'SIGNED_IN' ||
+          event === 'TOKEN_REFRESHED' ||
+          event === 'USER_UPDATED'
+        ) {
+          if (session?.user) {
+            await fetchUser();
+          } else {
+            setUser(null);
+          }
+          setLoading(false);
+        } else if (event === 'SIGNED_OUT') {
+          setUser(null);
+          setLoading(false);
+        }
+      }
+    );
 
     return () => {
       mounted = false;
-      sub?.unsubscribe?.();
+      subscription?.unsubscribe();
     };
   }, [fetchUser]);
 
