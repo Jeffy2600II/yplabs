@@ -4,7 +4,7 @@ import {
   createContext, useContext, useEffect,
   useState, useCallback, ReactNode,
 } from 'react';
-import { getBrowserSupabase } from '@/lib/supabaseClient';
+import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
 
 export type UserProfile = {
   auth_uid: string;
@@ -39,6 +39,35 @@ export function useAuth() {
   return useContext(AuthContext);
 }
 
+/** Query council_users พร้อม retry สำหรับ schema cache error */
+async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | null> {
+  const supabase = getBrowserSupabase();
+  const { data: row, error } = await supabase
+    .from('council_users')
+    .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
+    .eq('auth_uid', authUid)
+    .limit(1)
+    .maybeSingle();
+
+  // "Database error querying schema" → รีเซ็ต client แล้ว retry สูงสุด 3 ครั้ง
+  if (error) {
+    const isSchemaError =
+      error.message?.includes('schema') ||
+      error.message?.includes('Database error') ||
+      error.code === 'PGRST106' ||
+      error.code === '42P01';
+
+    if (isSchemaError && attempt < 3) {
+      resetBrowserSupabase(); // ทิ้ง stale client
+      await new Promise(r => setTimeout(r, 300 * (attempt + 1))); // backoff
+      return queryCouncilUser(authUid, attempt + 1);
+    }
+    return null;
+  }
+
+  return row ?? null;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserProfile | null>(null);
@@ -47,15 +76,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       if (typeof window === 'undefined') return;
       const supabase = getBrowserSupabase();
-      const { data: authData } = await supabase.auth.getUser();
-      if (!authData?.user) { setUser(null); return; }
+      const { data: authData, error: authError } = await supabase.auth.getUser();
 
-      const { data: row } = await supabase
-        .from('council_users')
-        .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
-        .eq('auth_uid', authData.user.id)
-        .limit(1)
-        .maybeSingle();
+      if (authError || !authData?.user) {
+        setUser(null);
+        return;
+      }
+
+      const row = await queryCouncilUser(authData.user.id);
 
       if (row && row.approved && !row.disabled) {
         setUser(row as UserProfile);
@@ -79,6 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await supabase.auth.signOut();
     } catch {}
     setUser(null);
+    resetBrowserSupabase(); // ล้าง singleton หลัง sign out
   }, []);
 
   useEffect(() => {

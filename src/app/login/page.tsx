@@ -11,17 +11,45 @@
 // ===================================================================
 
 import { useState, useCallback } from 'react';
-import { getBrowserSupabase } from '@/lib/supabaseClient';
+import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
 import { synthesizeEmail } from '@/lib/auth';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/context/AuthContext';
-import type { RepairDiagnostic, DiagCheck, DiagRepair } from '@/app/api/auth/repair/route';
+import type { RepairDiagnostic } from '@/app/api/auth/repair/route';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
 function normalizeName(s: any) {
   return String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function isSchemaError(err: any): boolean {
+  const msg = String(err?.message ?? err?.error_description ?? '');
+  return (
+    msg.includes('Database error querying schema') ||
+    msg.includes('schema') ||
+    err?.code === 'PGRST106' ||
+    err?.code === '42P01'
+  );
+}
+
+/** Query council_users หลัง login พร้อม retry สำหรับ schema error */
+async function fetchCouncilRow(authUid: string, attempt = 0): Promise<any | null> {
+  const supabase = getBrowserSupabase();
+  const { data: row, error } = await supabase
+    .from('council_users')
+    .select('*')
+    .eq('auth_uid', authUid)
+    .maybeSingle();
+
+  if (error && isSchemaError(error) && attempt < 3) {
+    resetBrowserSupabase();
+    await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+    return fetchCouncilRow(authUid, attempt + 1);
+  }
+
+  return row ?? null;
 }
 
 // ── Diagnostic Panel Component ───────────────────────────────────────
@@ -73,12 +101,9 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
 
   return (
     <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-
-      {/* ── Fatal error box ── */}
       {fatalInfo && (
         <div style={{
-          padding: '12px 14px',
-          borderRadius: 10,
+          padding: '12px 14px', borderRadius: 10,
           background: fatalInfo.severity === 'error' ? '#fee2e2' : '#fef3c7',
           border: `1.5px solid ${fatalInfo.severity === 'error' ? '#fca5a5' : '#fcd34d'}`,
         }}>
@@ -94,11 +119,9 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
         </div>
       )}
 
-      {/* ── Auto-repair summary ── */}
       {hasRepairs && (
         <div style={{
-          padding: '10px 14px',
-          borderRadius: 10,
+          padding: '10px 14px', borderRadius: 10,
           background: diag.repaired ? '#dcfce7' : failedRepairs.length > 0 ? '#fef3c7' : '#eff6ff',
           border: `1.5px solid ${diag.repaired ? '#86efac' : failedRepairs.length > 0 ? '#fcd34d' : '#93c5fd'}`,
         }}>
@@ -120,7 +143,6 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
         </div>
       )}
 
-      {/* ── Developer diagnostic details ── */}
       <div style={{ border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden' }}>
         <button
           onClick={() => setShowJson(!showJson)}
@@ -138,14 +160,13 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
 
         {showJson && (
           <div style={{ borderTop: '1px solid #e5e7eb' }}>
-            {/* Checks */}
             <div style={{ padding: '10px 14px', borderBottom: '1px solid #f3f4f6' }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 7 }}>
                 Diagnostic Checks
               </div>
               {diag.checks.map((c, i) => (
                 <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 5, alignItems: 'flex-start' }}>
-                  <span style={{ fontSize: 13, flexShrink: 0, marginTop: 0 }}>{c.ok ? '✅' : '❌'}</span>
+                  <span style={{ fontSize: 13, flexShrink: 0 }}>{c.ok ? '✅' : '❌'}</span>
                   <div>
                     <span style={{
                       fontFamily: 'monospace', fontSize: 11.5, fontWeight: 700,
@@ -164,7 +185,6 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
               ))}
             </div>
 
-            {/* Snapshot */}
             {diag.council_snapshot && (
               <div style={{ padding: '10px 14px', borderBottom: '1px solid #f3f4f6' }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 7 }}>
@@ -179,10 +199,9 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
               </div>
             )}
 
-            {/* Full JSON */}
             <div style={{ padding: '10px 14px' }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 7 }}>
-                Full Diagnostic JSON (คัดลอกส่งให้ dev)
+                Full Diagnostic JSON
               </div>
               <pre style={{
                 fontSize: 10, background: '#1f2937', color: '#d1d5db',
@@ -218,29 +237,24 @@ export default function LoginPage() {
   const { refresh } = useAuth();
   const [mode, setMode] = useState<'student' | 'other'>('student');
 
-  // Student fields
   const [fullName, setFullName] = useState('');
   const [studentId, setStudentId] = useState('');
-
-  // Other fields
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
-  // State
   const [loading, setLoading] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [diagnostic, setDiagnostic] = useState<RepairDiagnostic | null>(null);
-
-  // ── Log helper (writes to diagnostic for display) ──
   const [simpleLog, setSimpleLog] = useState<string[]>([]);
 
   const log = useCallback((msg: string) => {
     setSimpleLog(p => [...p, `${new Date().toISOString().split('T')[1].slice(0, 8)} ${msg}`]);
   }, []);
 
-  // ── Apply session from repair ──
   async function applySession(session: { access_token: string; refresh_token: string }) {
+    // รีเซ็ต client ก่อน setSession เพื่อล้าง schema cache เก่า
+    resetBrowserSupabase();
     const supabase = getBrowserSupabase();
     const { error: sessErr } = await supabase.auth.setSession({
       access_token: session.access_token,
@@ -251,7 +265,6 @@ export default function LoginPage() {
     router.push('/');
   }
 
-  // ── Student login flow ────────────────────────────────────────────
   async function handleStudentLogin(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -265,22 +278,27 @@ export default function LoginPage() {
       const supabase = getBrowserSupabase();
       const synEmail = synthesizeEmail(studentId);
 
-      // ── Attempt 1: Normal login ──
       log(`[ATTEMPT-1] signIn email="${synEmail}"`);
       const { data: signIn1, error: signInErr1 } = await supabase.auth.signInWithPassword({
         email: synEmail,
         password: studentId,
       });
 
+      // ── Schema error ขณะ signIn → รีเซ็ต client แล้ว retry ──
+      if (signInErr1 && isSchemaError(signInErr1)) {
+        log(`[ATTEMPT-1] schema error → reset client + retry`);
+        resetBrowserSupabase();
+        await new Promise(r => setTimeout(r, 500));
+        setLoading(false);
+        await runRepair();
+        return;
+      }
+
       if (!signInErr1 && signIn1?.user) {
         log(`[ATTEMPT-1] ✅ auth OK uid=${signIn1.user.id}`);
 
-        // Verify council_users
-        const { data: row } = await supabase
-          .from('council_users')
-          .select('*')
-          .eq('auth_uid', signIn1.user.id)
-          .maybeSingle();
+        // Query council_users พร้อม retry
+        const row = await fetchCouncilRow(signIn1.user.id);
 
         if (!row) {
           log('[COUNCIL] ❌ ไม่พบแถวใน council_users — เรียก repair');
@@ -316,7 +334,6 @@ export default function LoginPage() {
     }
   }
 
-  // ── Auto-repair flow ─────────────────────────────────────────────
   async function runRepair() {
     setRepairing(true);
     setError(null);
@@ -340,7 +357,6 @@ export default function LoginPage() {
         return;
       }
 
-      // Map fatal to user-friendly message
       const USER_MSG: Record<string, string> = {
         NAME_MISMATCH: 'ชื่อ-นามสกุลไม่ตรงกับข้อมูลในระบบ กรุณาตรวจสอบการสะกด',
         NOT_APPROVED: 'บัญชียังไม่ได้รับการอนุมัติจากผู้ดูแลระบบ',
@@ -360,7 +376,6 @@ export default function LoginPage() {
     }
   }
 
-  // ── Other (teacher) login ─────────────────────────────────────────
   async function handleOtherLogin(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -372,15 +387,24 @@ export default function LoginPage() {
     try {
       const supabase = getBrowserSupabase();
       const { data, error: e2 } = await supabase.auth.signInWithPassword({ email, password });
-      if (e2 || !data?.user) throw new Error(e2?.message ?? 'Login ล้มเหลว');
 
-      const user = data.user;
-      const { data: row } = await supabase
-        .from('council_users')
-        .select('*')
-        .eq('auth_uid', user.id)
-        .maybeSingle();
+      if (e2) {
+        if (isSchemaError(e2)) {
+          // Schema error → reset แล้ว retry ครั้งเดียว
+          resetBrowserSupabase();
+          await new Promise(r => setTimeout(r, 500));
+          const supabase2 = getBrowserSupabase();
+          const { data: data2, error: e3 } = await supabase2.auth.signInWithPassword({ email, password });
+          if (e3 || !data2?.user) throw new Error(e3?.message ?? 'Login ล้มเหลว');
+          Object.assign(data, data2);
+        } else {
+          throw new Error(e2.message ?? 'Login ล้มเหลว');
+        }
+      }
 
+      if (!data?.user) throw new Error('Login ล้มเหลว');
+
+      const row = await fetchCouncilRow(data.user.id);
       if (!row) throw new Error('บัญชีนี้ยังไม่ได้ลงทะเบียนในระบบ');
       if (!row.approved) { await supabase.auth.signOut(); throw new Error('บัญชียังไม่ได้รับการอนุมัติ'); }
       if (row.disabled) { await supabase.auth.signOut(); throw new Error('บัญชีถูกปิดใช้งาน'); }
@@ -408,7 +432,6 @@ export default function LoginPage() {
       <div style={{ width: '100%', maxWidth: 460 }}>
         <div className="card" style={{ padding: '32px 32px 28px' }}>
 
-          {/* Header */}
           <div style={{ textAlign: 'center', marginBottom: 26 }}>
             <div style={{
               display: 'inline-flex', background: 'var(--sidebar-bg)',
@@ -421,7 +444,6 @@ export default function LoginPage() {
             <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>โรงเรียนคำยางพิทยา</div>
           </div>
 
-          {/* Tab toggle */}
           <div style={{
             display: 'flex', background: 'var(--surface-2)', borderRadius: 'var(--r)',
             padding: 4, gap: 3, marginBottom: 22,
@@ -440,7 +462,6 @@ export default function LoginPage() {
             ))}
           </div>
 
-          {/* Forms */}
           {mode === 'student' ? (
             <form onSubmit={handleStudentLogin} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div className="form-group">
@@ -466,12 +487,10 @@ export default function LoginPage() {
                 />
               </div>
 
-              {/* Error message */}
               {error && !diagnostic && (
                 <div className="alert alert-error" style={{ fontSize: 13 }}>{error}</div>
               )}
 
-              {/* Repairing indicator */}
               {repairing && (
                 <div style={{
                   padding: '10px 14px', borderRadius: 10,
@@ -483,7 +502,6 @@ export default function LoginPage() {
                 </div>
               )}
 
-              {/* Diagnostic panel */}
               {diagnostic && (
                 <>
                   {error && <div className="alert alert-error" style={{ fontSize: 13 }}>{error}</div>}
@@ -500,7 +518,6 @@ export default function LoginPage() {
                 {loading ? '🔄 กำลังตรวจสอบ...' : repairing ? '🔧 กำลังแก้ไขข้อมูล...' : 'เข้าสู่ระบบ →'}
               </button>
 
-              {/* Simple log for developers */}
               {simpleLog.length > 0 && (
                 <details style={{ fontSize: 11, color: 'var(--text-3)' }}>
                   <summary style={{ cursor: 'pointer', fontWeight: 600 }}>📝 Login log ({simpleLog.length} steps)</summary>
