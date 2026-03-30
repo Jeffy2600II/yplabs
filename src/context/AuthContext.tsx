@@ -58,6 +58,7 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise < any | n
       await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
       return queryCouncilUser(authUid, attempt + 1);
     }
+    console.error('[Auth] queryCouncilUser error', error);
     return null;
   }
   
@@ -68,6 +69,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState < UserProfile | null > (null);
   
+  // Load the user profile from council_users given an Auth UID.
+  // Called from onAuthStateChange (so the session object is already available).
   const loadProfile = useCallback(async (authUid: string) => {
     try {
       const row = await queryCouncilUser(authUid);
@@ -76,11 +79,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } else {
         setUser(null);
       }
-    } catch {
+    } catch (err) {
+      console.error('[Auth] loadProfile error', err);
       setUser(null);
     }
   }, []);
   
+  // Public refresh() — called explicitly after login / repair to force a re-fetch.
+  // Uses getSession() (reads localStorage, no network) for speed & reliability.
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -91,18 +97,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } else {
         setUser(null);
       }
-    } catch {
+    } catch (err) {
+      console.error('[Auth] refresh error', err);
       setUser(null);
     } finally {
       setLoading(false);
     }
   }, [loadProfile]);
   
+  // signOut — the ONLY place where resetBrowserSupabase() is safe to call.
   const signOut = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
       await supabase.auth.signOut();
-    } catch {}
+    } catch (err) {
+      console.error('[Auth] signOut error', err);
+    }
     setUser(null);
     resetBrowserSupabase(); // only safe point to reset singleton
   }, []);
@@ -111,9 +121,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
     const supabase = getBrowserSupabase();
     
-    // onAuthStateChange remains the single source of truth.
+    console.debug('[Auth] subscribing onAuthStateChange');
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        console.debug('[Auth:onAuthStateChange]', { event, session });
         if (!mounted) return;
         
         if (event === 'SIGNED_OUT') {
@@ -139,6 +150,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession();
+        console.debug('[Auth] fallback getSession result', { session });
         if (!mounted) return;
         
         if (session?.user) {
@@ -147,18 +159,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } else {
           setUser(null);
         }
-      } catch {
-        // ignore: we'll rely on onAuthStateChange events / refresh calls
+      } catch (err) {
+        console.error('[Auth] fallback getSession error', err);
       } finally {
         if (mounted) setLoading(false);
       }
     })();
     
+    // Listen for localStorage changes across tabs to detect unexpected clears.
+    function onStorage(e: StorageEvent) {
+      try {
+        console.debug('[Auth][storage event]', { key: e.key, newValue: e.newValue ? String(e.newValue).slice(0, 200) : null });
+      } catch (err) {
+        console.error('[Auth] storage event handler error', err);
+      }
+    }
+    window.addEventListener('storage', onStorage);
+    
     return () => {
       mounted = false;
       try {
         subscription.unsubscribe();
-      } catch {}
+      } catch (err) {
+        // ignore
+      }
+      window.removeEventListener('storage', onStorage);
     };
   }, [loadProfile]);
   
