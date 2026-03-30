@@ -36,158 +36,113 @@ export function useAuth() {
   return useContext(AuthContext);
 }
 
-// NOTE: Keep the query retry logic here (for transient schema errors).
-async function queryCouncilUser(authUid: string, attempt = 0): Promise < any | null > {
-  const supabase = getBrowserSupabase();
-  const { data: row, error } = await supabase
-  .from('council_users')
-  .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
-  .eq('auth_uid', authUid)
-  .limit(1)
-  .maybeSingle();
-  
-  if (error) {
-    const isSchemaError =
-      error.message?.includes('schema') ||
-      error.message?.includes('Database error') ||
-      error.code === 'PGRST106' ||
-      error.code === '42P01';
+/**
+ * โหลด profile ของ user จาก council_users
+ * ──────────────────────────────────────────
+ * ใช้แนวทางเดียวกับ reference (CouncilAuthGuard):
+ *  1. getSession() → อ่านจาก localStorage (เร็ว, ไม่ใช้ network)
+ *  2. query council_users → ตรวจ approved + disabled
+ *  3. set user state
+ *
+ * ไม่มี schema retry loop ที่ซับซ้อน → ถ้า error ก็ set null แล้วให้ user login ใหม่
+ */
+async function fetchProfile(authUid: string): Promise < UserProfile | null > {
+  try {
+    const supabase = getBrowserSupabase();
+    const { data: row, error } = await supabase
+      .from('council_users')
+      .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
+      .eq('auth_uid', authUid)
+      .limit(1)
+      .maybeSingle();
     
-    if (isSchemaError && attempt < 3) {
-      // Wait and retry WITHOUT resetting the singleton client.
-      await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
-      return queryCouncilUser(authUid, attempt + 1);
-    }
-    console.error('[Auth] queryCouncilUser error', error);
+    if (error || !row) return null;
+    if (!row.approved || row.disabled) return null;
+    
+    return row as UserProfile;
+  } catch {
     return null;
   }
-  
-  return row ?? null;
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState < UserProfile | null > (null);
   
-  // Load the user profile from council_users given an Auth UID.
-  // Called from onAuthStateChange (so the session object is already available).
-  const loadProfile = useCallback(async (authUid: string) => {
-    try {
-      const row = await queryCouncilUser(authUid);
-      if (row && row.approved && !row.disabled) {
-        setUser(row as UserProfile);
-      } else {
-        setUser(null);
-      }
-    } catch (err) {
-      console.error('[Auth] loadProfile error', err);
-      setUser(null);
-    }
-  }, []);
-  
-  // Public refresh() — called explicitly after login / repair to force a re-fetch.
-  // Uses getSession() (reads localStorage, no network) for speed & reliability.
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  /**
+   * loadUser: อ่าน session จาก localStorage แล้วโหลด profile
+   * ──────────────────────────────────────────────────────────
+   * เหมือน reference's guard component: getSession() → query council_users
+   */
+  const loadUser = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
       const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        await loadProfile(session.user.id);
-      } else {
+      
+      if (!session?.user) {
         setUser(null);
+        return;
       }
-    } catch (err) {
-      console.error('[Auth] refresh error', err);
+      
+      const profile = await fetchProfile(session.user.id);
+      setUser(profile);
+    } catch {
       setUser(null);
     } finally {
       setLoading(false);
     }
-  }, [loadProfile]);
+  }, []);
   
-  // signOut — the ONLY place where resetBrowserSupabase() is safe to call.
+  /**
+   * refresh: บังคับโหลด user ใหม่ — เรียกหลัง login สำเร็จ
+   */
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    await loadUser();
+  }, [loadUser]);
+  
+  /**
+   * signOut: เดียวที่ปลอดภัยจะ reset singleton
+   */
   const signOut = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
       await supabase.auth.signOut();
-    } catch (err) {
-      console.error('[Auth] signOut error', err);
+    } catch {
+      // ignore
     }
     setUser(null);
-    resetBrowserSupabase(); // only safe point to reset singleton
+    setLoading(false);
+    resetBrowserSupabase(); // ปลอดภัยเรียกที่นี่เท่านั้น
   }, []);
   
   useEffect(() => {
-    let mounted = true;
+    // โหลด user ทันทีเมื่อ mount (อ่านจาก localStorage — เร็ว)
+    void loadUser();
+    
+    // Subscribe onAuthStateChange เพื่อ react ต่อ sign-in / sign-out จาก tab อื่น
     const supabase = getBrowserSupabase();
-    
-    console.debug('[Auth] subscribing onAuthStateChange');
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        console.debug('[Auth:onAuthStateChange]', { event, session });
-        if (!mounted) return;
-        
-        if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setLoading(false);
-          return;
-        }
-        
-        // Covers: INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED, USER_UPDATED
-        if (session?.user) {
-          await loadProfile(session.user.id);
-        } else {
-          setUser(null);
-        }
-        
-        if (mounted) setLoading(false);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_OUT' || !session?.user) {
+        setUser(null);
+        setLoading(false);
+        return;
       }
-    );
-    
-    // Fallback: sometimes INITIAL_SESSION can be missed depending on timing;
-    // read session immediately after subscribing to ensure we are hydrated.
-    // This is a cheap, local read (no network) in most cases.
-    (async () => {
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        console.debug('[Auth] fallback getSession result', { session });
-        if (!mounted) return;
-        
-        if (session?.user) {
-          // If the subscription already handled it, loadProfile is idempotent.
-          await loadProfile(session.user.id);
-        } else {
-          setUser(null);
-        }
-      } catch (err) {
-        console.error('[Auth] fallback getSession error', err);
-      } finally {
-        if (mounted) setLoading(false);
+      
+      // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED → โหลด profile ใหม่
+      if (session?.user) {
+        const profile = await fetchProfile(session.user.id);
+        setUser(profile);
+        setLoading(false);
       }
-    })();
-    
-    // Listen for localStorage changes across tabs to detect unexpected clears.
-    function onStorage(e: StorageEvent) {
-      try {
-        console.debug('[Auth][storage event]', { key: e.key, newValue: e.newValue ? String(e.newValue).slice(0, 200) : null });
-      } catch (err) {
-        console.error('[Auth] storage event handler error', err);
-      }
-    }
-    window.addEventListener('storage', onStorage);
+    });
     
     return () => {
-      mounted = false;
-      try {
-        subscription.unsubscribe();
-      } catch (err) {
-        // ignore
-      }
-      window.removeEventListener('storage', onStorage);
+      try { subscription.unsubscribe(); } catch { /* ignore */ }
     };
-  }, [loadProfile]);
+  }, [loadUser]);
   
-  const isAdmin = !!(user && user.role === 'admin');
+  const isAdmin = !!(user?.role === 'admin');
   const isMember = !!user;
   
   return (
