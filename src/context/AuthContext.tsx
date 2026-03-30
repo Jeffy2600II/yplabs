@@ -2,6 +2,7 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
+import { rlog, rerr } from '@/lib/remoteLogger';
 
 type UserProfile = {
   auth_uid: string;
@@ -38,13 +39,7 @@ export function useAuth() {
 
 /**
  * โหลด profile ของ user จาก council_users
- * ──────────────────────────────────────────
- * ใช้แนวทางเดียวกับ reference (CouncilAuthGuard):
- *  1. getSession() → อ่านจาก localStorage (เร็ว, ไม่ใช้ network)
- *  2. query council_users → ตรวจ approved + disabled
- *  3. set user state
- *
- * ไม่มี schema retry loop ที่ซับซ้อน → ถ้า error ก็ set null แล้วให้ user login ใหม่
+ * - เพิ่ม logging เบา ๆ เพื่อช่วย debug ผ่าน remote logger
  */
 async function fetchProfile(authUid: string): Promise < UserProfile | null > {
   try {
@@ -56,11 +51,22 @@ async function fetchProfile(authUid: string): Promise < UserProfile | null > {
       .limit(1)
       .maybeSingle();
     
-    if (error || !row) return null;
-    if (!row.approved || row.disabled) return null;
+    if (error) {
+      rerr('[Auth][fetchProfile] supabase query error', { uid: authUid, message: error.message });
+      return null;
+    }
+    if (!row) {
+      rlog('[Auth][fetchProfile] no profile row', { uid: authUid });
+      return null;
+    }
+    if (!row.approved || row.disabled) {
+      rlog('[Auth][fetchProfile] profile not approved/disabled', { uid: authUid, approved: !!row.approved, disabled: !!row.disabled });
+      return null;
+    }
     
     return row as UserProfile;
-  } catch {
+  } catch (e) {
+    rerr('[Auth][fetchProfile] unexpected error', { uid: authUid, err: String(e) });
     return null;
   }
 }
@@ -71,13 +77,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   
   /**
    * loadUser: อ่าน session จาก localStorage แล้วโหลด profile
-   * ──────────────────────────────────────────────────────────
-   * เหมือน reference's guard component: getSession() → query council_users
+   * - เพิ่ม logs และ timeouts เพื่อหลีกเลี่ยง stuck loading
    */
   const loadUser = useCallback(async () => {
+    let timedOut = false;
+    const timeoutMs = 7000;
+    const to = setTimeout(() => {
+      timedOut = true;
+      rerr('[Auth][loadUser] timeout waiting for getSession', {});
+      // Ensure we don't leave loading=true indefinitely
+      setLoading(false);
+    }, timeoutMs);
+    
     try {
+      rlog('[Auth][loadUser] start');
       const supabase = getBrowserSupabase();
+      // getSession อ่านจาก localStorage (เร็ว)
       const { data: { session } } = await supabase.auth.getSession();
+      if (timedOut) {
+        // we've already given up due to timeout; still try to log and return
+        rlog('[Auth][loadUser] completed after timeout', { hasSession: !!session?.user });
+        return;
+      }
+      clearTimeout(to);
+      
+      rlog('[Auth][loadUser] getSession result', { hasSession: !!session?.user, userId: session?.user?.id ? String(session.user.id).slice(-6) : null });
       
       if (!session?.user) {
         setUser(null);
@@ -85,11 +109,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       
       const profile = await fetchProfile(session.user.id);
+      if (!profile) {
+        rlog('[Auth][loadUser] profile not found or invalid', { uidPreview: String(session.user.id).slice(-6) });
+        setUser(null);
+        return;
+      }
+      
       setUser(profile);
-    } catch {
+      rlog('[Auth][loadUser] user set', { uidPreview: profile.auth_uid.slice(-6) });
+    } catch (e) {
+      rerr('[Auth][loadUser] error', { err: String(e) });
       setUser(null);
     } finally {
-      setLoading(false);
+      // Ensure loading state is cleared unless we timed out already (setLoading called in timeout)
+      if (!timedOut) setLoading(false);
     }
   }, []);
   
@@ -102,43 +135,85 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [loadUser]);
   
   /**
-   * signOut: เดียวที่ปลอดภัยจะ reset singleton
+   * signOut: ปลอดภัยรีเซ็ต singleton และสถานะ
    */
   const signOut = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
       await supabase.auth.signOut();
-    } catch {
-      // ignore
+    } catch (e) {
+      // ignore but log
+      rerr('[Auth][signOut] signOut error', { err: String(e) });
     }
     setUser(null);
     setLoading(false);
     resetBrowserSupabase(); // ปลอดภัยเรียกที่นี่เท่านั้น
+    rlog('[Auth][signOut] completed');
   }, []);
   
   useEffect(() => {
     // โหลด user ทันทีเมื่อ mount (อ่านจาก localStorage — เร็ว)
-    void loadUser();
-    
-    // Subscribe onAuthStateChange เพื่อ react ต่อ sign-in / sign-out จาก tab อื่น
-    const supabase = getBrowserSupabase();
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_OUT' || !session?.user) {
+    (async () => {
+      try {
+        rlog('[Auth][effect] mount -> loadUser');
+        await loadUser();
+        rlog('[Auth][effect] loadUser finished');
+      } catch (e) {
+        rerr('[Auth][effect] loadUser unexpected error', { err: String(e) });
         setUser(null);
         setLoading(false);
-        return;
       }
-      
-      // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED → โหลด profile ใหม่
-      if (session?.user) {
-        const profile = await fetchProfile(session.user.id);
-        setUser(profile);
-        setLoading(false);
-      }
-    });
+    })();
+    
+    // Subscribe onAuthStateChange เพื่อ react ต่อ sign-in / sign-out จาก tab อื่น
+    let subscriptionUnsub: (() => void) | null = null;
+    try {
+      const supabase = getBrowserSupabase();
+      const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+        try {
+          rlog('[Auth][onAuthStateChange] event', { event, hasSession: !!session?.user });
+          if (event === 'SIGNED_OUT' || !session?.user) {
+            setUser(null);
+            setLoading(false);
+            rlog('[Auth][onAuthStateChange] user signed out or session missing');
+            return;
+          }
+          
+          // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED → โหลด profile ใหม่
+          if (session?.user) {
+            const profile = await fetchProfile(session.user.id);
+            if (profile) {
+              setUser(profile);
+              rlog('[Auth][onAuthStateChange] profile loaded', { uidPreview: String(session.user.id).slice(-6) });
+            } else {
+              setUser(null);
+              rlog('[Auth][onAuthStateChange] profile missing or invalid', { uidPreview: String(session.user.id).slice(-6) });
+            }
+            setLoading(false);
+          }
+        } catch (e) {
+          rerr('[Auth][onAuthStateChange] handler error', { err: String(e) });
+          setUser(null);
+          setLoading(false);
+        }
+      });
+      subscriptionUnsub = () => {
+        try {
+          subscription.unsubscribe();
+        } catch {
+          // ignore
+        }
+      };
+    } catch (e) {
+      rerr('[Auth][effect] subscribe failed', { err: String(e) });
+    }
     
     return () => {
-      try { subscription.unsubscribe(); } catch { /* ignore */ }
+      try {
+        if (subscriptionUnsub) subscriptionUnsub();
+      } catch {
+        /* ignore */
+      }
     };
   }, [loadUser]);
   
