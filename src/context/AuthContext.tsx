@@ -4,29 +4,14 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
 
 type UserProfile = {
-  auth_uid?: string;
-  full_name?: string;
-  student_id?: string | null;
-  year?: number | null;
-  role?: string;
-  account_type?: string;
-  approved?: boolean;
-  disabled?: boolean;
-};
-
-type AuthDiag = {
-  code?: string;
-  message: string;
-  detail?: string;
-  event?: string;
-  session?: {
-    hasSession: boolean;
-    userId?: string;
-    accessTokenMasked?: string | null;
-    refreshTokenMasked?: string | null;
-  };
-  raw?: any;
-  time: string;
+  auth_uid: string;
+  full_name ? : string;
+  student_id ? : string | null;
+  year ? : number | null;
+  role ? : string;
+  account_type ? : string;
+  approved ? : boolean;
+  disabled ? : boolean;
 };
 
 type AuthCtx = {
@@ -34,34 +19,34 @@ type AuthCtx = {
   user: UserProfile | null;
   isAdmin: boolean;
   isMember: boolean;
-  refresh: () => Promise<void>;
-  signOut: () => Promise<void>;
-  authDiag: AuthDiag | null;
-  clearAuthDiag: () => void;
+  refresh: () => Promise < void > ;
+  signOut: () => Promise < void > ;
 };
 
-const AuthContext = createContext<AuthCtx>({
+const AuthContext = createContext < AuthCtx > ({
   loading: true,
   user: null,
   isAdmin: false,
   isMember: false,
   refresh: async () => {},
   signOut: async () => {},
-  authDiag: null,
-  clearAuthDiag: () => {},
 });
 
 export function useAuth() {
   return useContext(AuthContext);
 }
 
-function maskToken(t?: string | null) {
-  if (!t) return null;
-  if (t.length <= 10) return '•••' + t.slice(-4);
-  return `${t.slice(0, 4)}…${t.slice(-4)}`;
-}
-
-async function fetchProfile(authUid: string): Promise<UserProfile | null> {
+/**
+ * โหลด profile ของ user จาก council_users
+ * ──────────────────────────────────────────
+ * ใช้แนวทางเดียวกับ reference (CouncilAuthGuard):
+ *  1. getSession() → อ่านจาก localStorage (เร็ว, ไม่ใช้ network)
+ *  2. query council_users → ตรวจ approved + disabled
+ *  3. set user state
+ *
+ * ไม่มี schema retry loop ที่ซับซ้อน → ถ้า error ก็ set null แล้วให้ user login ใหม่
+ */
+async function fetchProfile(authUid: string): Promise < UserProfile | null > {
   try {
     const supabase = getBrowserSupabase();
     const { data: row, error } = await supabase
@@ -70,13 +55,10 @@ async function fetchProfile(authUid: string): Promise<UserProfile | null> {
       .eq('auth_uid', authUid)
       .limit(1)
       .maybeSingle();
-
-    if (error) {
-      return null;
-    }
-    if (!row) return null;
+    
+    if (error || !row) return null;
     if (!row.approved || row.disabled) return null;
-
+    
     return row as UserProfile;
   } catch {
     return null;
@@ -85,156 +67,86 @@ async function fetchProfile(authUid: string): Promise<UserProfile | null> {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [authDiag, setAuthDiag] = useState<AuthDiag | null>(null);
-
-  const recordDiag = useCallback((partial: Partial<AuthDiag>) => {
-    const diag: AuthDiag = {
-      time: new Date().toISOString(),
-      message: partial.message ?? 'Unknown',
-      code: partial.code,
-      detail: partial.detail,
-      event: partial.event,
-      session: partial.session,
-      raw: partial.raw,
-    } as AuthDiag;
-    setAuthDiag(diag);
-  }, []);
-
-  const clearAuthDiag = useCallback(() => setAuthDiag(null), []);
-
+  const [user, setUser] = useState < UserProfile | null > (null);
+  
+  /**
+   * loadUser: อ่าน session จาก localStorage แล้วโหลด profile
+   * ──────────────────────────────────────────────────────────
+   * เหมือน reference's guard component: getSession() → query council_users
+   */
   const loadUser = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
       const { data: { session } } = await supabase.auth.getSession();
-
-      const hasSession = !!session?.user;
-      const sessionInfo = {
-        hasSession,
-        userId: session?.user?.id,
-        accessTokenMasked: maskToken((session as any)?.access_token ?? (session as any)?.session?.access_token ?? null),
-        refreshTokenMasked: maskToken((session as any)?.refresh_token ?? (session as any)?.session?.refresh_token ?? null),
-      };
-
-      // If no session (guest), do not show diagnostics
+      
       if (!session?.user) {
         setUser(null);
-        setAuthDiag(null);
         return;
       }
-
+      
       const profile = await fetchProfile(session.user.id);
-      if (!profile) {
-        // Session exists but profile missing/unapproved -> show diag to help devs
-        recordDiag({
-          code: 'PROFILE_MISSING',
-          message: 'พบ session แต่ไม่พบ/ยังไม่อนุญาตโปรไฟล์ใน council_users',
-          detail: 'session มี แต่ fetchProfile คืนค่า null (ไม่พบแถว หรือ ยังไม่อนุญาต/ถูกปิดใช้งาน)',
-          event: 'LOAD_USER',
-          session: sessionInfo,
-          raw: { sessionUserId: session.user.id },
-        });
-        setUser(null);
-        return;
-      }
-
       setUser(profile);
-      setAuthDiag(null);
-    } catch (e: any) {
-      recordDiag({
-        code: 'LOAD_USER_ERROR',
-        message: 'เกิดข้อผิดพลาดขณะกู้คืน session/profile',
-        detail: e?.message ?? String(e),
-        event: 'LOAD_USER',
-        session: { hasSession: false },
-        raw: { stack: e?.stack ?? null },
-      });
+    } catch {
       setUser(null);
     } finally {
       setLoading(false);
     }
-  }, [recordDiag]);
-
+  }, []);
+  
+  /**
+   * refresh: บังคับโหลด user ใหม่ — เรียกหลัง login สำเร็จ
+   */
   const refresh = useCallback(async () => {
     setLoading(true);
-    setAuthDiag(null);
     await loadUser();
   }, [loadUser]);
-
+  
+  /**
+   * signOut: เดียวที่ปลอดภัยจะ reset singleton
+   */
   const signOut = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
       await supabase.auth.signOut();
-    } catch (e: any) {
-      setAuthDiag({
-        time: new Date().toISOString(),
-        message: 'มีข้อผิดพลาดขณะ signOut',
-        detail: e?.message ?? String(e),
-        session: { hasSession: false },
-      });
+    } catch {
+      // ignore
     }
     setUser(null);
     setLoading(false);
-    resetBrowserSupabase();
+    resetBrowserSupabase(); // ปลอดภัยเรียกที่นี่เท่านั้น
   }, []);
-
+  
   useEffect(() => {
+    // โหลด user ทันทีเมื่อ mount (อ่านจาก localStorage — เร็ว)
     void loadUser();
-
+    
+    // Subscribe onAuthStateChange เพื่อ react ต่อ sign-in / sign-out จาก tab อื่น
     const supabase = getBrowserSupabase();
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      try {
-        // Only create diagnostics if session exists but profile can't be resolved.
-        if (!session?.user) {
-          // don't create diag for signed out / guest
-          setUser(null);
-          setLoading(false);
-          return;
-        }
-
-        // session.user exists -> try to fetch profile and create diag if missing/error
-        const profile = await fetchProfile(session.user.id);
-        if (!profile) {
-          recordDiag({
-            code: 'PROFILE_MISSING_ON_AUTH',
-            message: 'session ถูกยืนยัน แต่ไม่พบโปรไฟล์ภายใน onAuthStateChange',
-            event,
-            session: {
-              hasSession: true,
-              userId: session.user.id,
-            },
-            detail: 'profile fetch returned null — อาจยังไม่อนุญาตหรือมี mismatch ใน DB',
-          });
-          setUser(null);
-        } else {
-          setUser(profile);
-          setAuthDiag(null);
-        }
-        setLoading(false);
-      } catch (e: any) {
-        recordDiag({
-          code: 'ON_AUTH_CALLBACK_ERROR',
-          message: 'ข้อผิดพลาดใน onAuthStateChange handler',
-          detail: e?.message ?? String(e),
-          event,
-          session: { hasSession: !!session?.user, userId: session?.user?.id },
-          raw: { stack: e?.stack ?? null },
-        });
+      if (event === 'SIGNED_OUT' || !session?.user) {
         setUser(null);
+        setLoading(false);
+        return;
+      }
+      
+      // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED → โหลด profile ใหม่
+      if (session?.user) {
+        const profile = await fetchProfile(session.user.id);
+        setUser(profile);
         setLoading(false);
       }
     });
-
+    
     return () => {
       try { subscription.unsubscribe(); } catch { /* ignore */ }
     };
-  }, [loadUser, recordDiag]);
-
+  }, [loadUser]);
+  
   const isAdmin = !!(user?.role === 'admin');
   const isMember = !!user;
-
+  
   return (
-    <AuthContext.Provider value={{ loading, user, isAdmin, isMember, refresh, signOut, authDiag, clearAuthDiag }}>
+    <AuthContext.Provider value={{ loading, user, isAdmin, isMember, refresh, signOut }}>
       {children}
     </AuthContext.Provider>
   );
