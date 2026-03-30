@@ -1,3 +1,5 @@
+'use client';
+
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
 
@@ -23,7 +25,7 @@ type AuthDiag = {
     accessTokenMasked?: string | null;
     refreshTokenMasked?: string | null;
   };
-  raw?: any; // อย่าแสดงความลับใน raw – เราจะระวังการ mask ก่อนเก็บ/แสดง
+  raw?: any;
   time: string;
 };
 
@@ -70,15 +72,13 @@ async function fetchProfile(authUid: string): Promise<UserProfile | null> {
       .maybeSingle();
 
     if (error) {
-      // คืน null — caller จะสร้าง diag
       return null;
     }
     if (!row) return null;
     if (!row.approved || row.disabled) return null;
 
     return row as UserProfile;
-  } catch (err) {
-    // Caller จะเก็บ diag
+  } catch {
     return null;
   }
 }
@@ -118,41 +118,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (!session?.user) {
         setUser(null);
-        // ไม่มี session → ไม่ต้องแสดง diag (guest)
         setAuthDiag(null);
         return;
       }
 
       const profile = await fetchProfile(session.user.id);
       if (!profile) {
-        // มี session แต่ profile ไม่สามารถดึงได้ → เก็บ diag เพื่อให้ dev เห็น
         recordDiag({
           code: 'PROFILE_MISSING',
           message: 'พบ session แต่ไม่พบ/ไม่อนุญาตโปรไฟล์ใน council_users',
-          detail: 'session มี แต่ fetchProfile คืนค่า null (ไม่พบแถวหรือยังไม่อนุมัติ/ถูกปิดใช้งาน)',
+          detail: 'session มี แต่ fetchProfile คืนค่า null (ไม่พบแถวหรือยังไม่อนุญาต/ถูกปิดใช้งาน)',
           event: 'LOAD_USER',
           session: sessionInfo,
-          raw: { // ใส่ info ที่ไม่เปิดเผยความลับมาก
-            sessionUserId: session.user.id,
-          },
+          raw: { sessionUserId: session.user.id },
         });
         setUser(null);
         return;
       }
 
-      // สำเร็จ
       setUser(profile);
       setAuthDiag(null);
     } catch (e: any) {
-      // จับ error แบบละเอียด แต่ไม่เก็บ token แบบเต็ม
       recordDiag({
         code: 'LOAD_USER_ERROR',
         message: 'เกิดข้อผิดพลาดขณะกู้คืน session/profle',
         detail: e?.message ?? String(e),
         event: 'LOAD_USER',
-        session: {
-          hasSession: false,
-        },
+        session: { hasSession: false },
         raw: { stack: e?.stack ?? null },
       });
       setUser(null);
@@ -172,7 +164,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const supabase = getBrowserSupabase();
       await supabase.auth.signOut();
     } catch (e: any) {
-      // เก็บ diag แบบเบา
       setAuthDiag({
         time: new Date().toISOString(),
         message: 'มีข้อผิดพลาดขณะ signOut',
@@ -212,7 +203,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (session?.user) {
-          // พยายาม fetch profile อีกครั้ง
           const profile = await fetchProfile(session.user.id);
           if (!profile) {
             setUser(null);
@@ -221,7 +211,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               message: 'session ถูกยืนยัน แต่ไม่พบโปรไฟล์ภายหลัง onAuthStateChange',
               event,
               session: sessionInfo,
-              detail: 'profile fetch returned null — อาจจะยังไม่อนุมัติหรือ DB mismatch',
+              detail: 'profile fetch returned null — อาจจะยังไม่อนุญาตหรือ DB mismatch',
             });
           } else {
             setUser(profile);
