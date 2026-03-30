@@ -39,7 +39,6 @@ export function useAuth() {
   return useContext(AuthContext);
 }
 
-/** Query council_users พร้อม retry สำหรับ schema cache error */
 async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | null> {
   const supabase = getBrowserSupabase();
   const { data: row, error } = await supabase
@@ -71,22 +70,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserProfile | null>(null);
 
-  const fetchUser = useCallback(async () => {
+  const fetchUser = useCallback(async (uid: string) => {
     try {
-      if (typeof window === 'undefined') return;
-      const supabase = getBrowserSupabase();
-
-      // ใช้ getSession() แทน getUser() เพราะอ่านจาก localStorage โดยตรง
-      // ไม่ต้อง network call → ไม่ fail จาก timeout และรองรับ refresh page
-      const { data: { session }, error: sessError } = await supabase.auth.getSession();
-
-      if (sessError || !session?.user) {
-        setUser(null);
-        return;
-      }
-
-      const row = await queryCouncilUser(session.user.id);
-
+      const row = await queryCouncilUser(uid);
       if (row && row.approved && !row.disabled) {
         setUser(row as UserProfile);
       } else {
@@ -99,7 +85,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    await fetchUser();
+    try {
+      const supabase = getBrowserSupabase();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        await fetchUser(session.user.id);
+      } else {
+        setUser(null);
+      }
+    } catch {
+      setUser(null);
+    }
     setLoading(false);
   }, [fetchUser]);
 
@@ -115,33 +111,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let mounted = true;
 
-    (async () => {
-      await fetchUser();
-      if (mounted) setLoading(false);
-    })();
+    const supabase = getBrowserSupabase();
 
-    let sub: any;
-    try {
-      const supabase = getBrowserSupabase();
-      const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
-        if (
-          event === 'SIGNED_IN' ||
-          event === 'INITIAL_SESSION' ||
-          event === 'TOKEN_REFRESHED'
-        ) {
-          // session มีอยู่ → โหลดข้อมูล user
-          if (session?.user) await fetchUser();
-          else setUser(null);
-        } else if (event === 'SIGNED_OUT') {
+    // onAuthStateChange เป็น single source of truth
+    // INITIAL_SESSION = ยิงทันทีตอน mount ถ้ามี session ใน localStorage
+    // ทำให้ไม่มี race condition และ loading จะถูก set เป็น false เสมอ
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (!mounted) return;
+
+        if (event === 'SIGNED_OUT') {
+          setUser(null);
+          setLoading(false);
+          return;
+        }
+
+        // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED
+        if (session?.user) {
+          await fetchUser(session.user.id);
+        } else {
           setUser(null);
         }
-      });
-      sub = data.subscription;
-    } catch {}
+
+        // loading จะถูก set เป็น false หลังจาก event แรกเสมอ
+        if (mounted) setLoading(false);
+      }
+    );
 
     return () => {
       mounted = false;
-      sub?.unsubscribe?.();
+      subscription.unsubscribe();
     };
   }, [fetchUser]);
 
