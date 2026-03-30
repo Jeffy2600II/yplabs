@@ -1,18 +1,12 @@
 'use client';
 
 // ===================================================================
-// LOGIN PAGE — Auto-Repair + Smart Diagnostic System
+// LOGIN PAGE — Fixed Auth Flow (no resetBrowserSupabase in flow)
 // ===================================================================
-// Flow:
-//   1. ลอง login ปกติก่อน
-//   2. ถ้าล้มเหลว → เรียก /api/auth/repair
-//   3. ถ้า repair สำเร็จ → setSession แล้ว redirect
-//   4. ถ้าล้มเหลว → แสดง DiagnosticPanel พร้อมรายละเอียด
-//
-// FIX: ลบทุก resetBrowserSupabase() ออกจาก login flow
-//   เดิม: schema error → resetBrowserSupabase() → subscription ใน AuthContext ถูกทำลาย
-//         → onAuthStateChange ไม่ทำงานอีก → หน้าทั้งหมด ไม่รู้ว่า login อยู่
-//   แก้:  schema error → wait + retry โดยไม่ reset client
+// CRITICAL FIX: Removed ALL resetBrowserSupabase() calls except
+// after explicit sign-out. Previous code called it on schema errors
+// and in applySession(), destroying AuthProvider's subscription and
+// making all pages permanently lose auth state awareness.
 // ===================================================================
 
 import { useState, useCallback } from 'react';
@@ -22,8 +16,6 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/context/AuthContext';
 import type { RepairDiagnostic } from '@/app/api/auth/repair/route';
-
-// ── Helpers ─────────────────────────────────────────────────────────
 
 function normalizeName(s: any) {
   return String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -39,10 +31,9 @@ function isSchemaError(err: any): boolean {
   );
 }
 
-// Query council_users after login — with retry for transient schema errors.
-// CRITICAL: Do NOT call resetBrowserSupabase() here.
-// Resetting the client breaks the onAuthStateChange subscription in AuthProvider,
-// causing the entire app to lose auth state awareness.
+// Fetch council row after login — retry WITHOUT resetting client singleton.
+// Resetting the client would destroy AuthProvider's subscription and break
+// auth state for the entire app session.
 async function fetchCouncilRow(authUid: string, attempt = 0): Promise<any | null> {
   const supabase = getBrowserSupabase();
   const { data: row, error } = await supabase
@@ -52,59 +43,29 @@ async function fetchCouncilRow(authUid: string, attempt = 0): Promise<any | null
     .maybeSingle();
 
   if (error && isSchemaError(error) && attempt < 3) {
-    // Wait and retry WITHOUT resetting — preserves subscription
     await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
-    return fetchCouncilRow(authUid, attempt + 1);
+    return fetchCouncilRow(authUid, attempt + 1); // no reset
   }
 
   return row ?? null;
 }
 
-// ── Diagnostic Panel Component ───────────────────────────────────────
+// ── Diagnostic Panel ─────────────────────────────────────────────
 
 function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
   const [showJson, setShowJson] = useState(false);
 
-  const FATAL_LABELS: Record<string, { th: string; hint: string; severity: 'error' | 'warn' | 'info' }> = {
-    NAME_MISMATCH: {
-      th: 'ชื่อ-นามสกุลไม่ตรงกับในระบบ',
-      hint: 'กรุณากรอกชื่อตามที่สมัครไว้ เช่น "สมชาย ใจดี" (ต้องตรงทุกตัวอักษร)',
-      severity: 'warn',
-    },
-    NOT_APPROVED: {
-      th: 'บัญชียังไม่ได้รับการอนุมัติ',
-      hint: 'ติดต่อผู้ดูแลระบบ (admin) เพื่ออนุมัติบัญชี หรือรอการตรวจสอบ',
-      severity: 'warn',
-    },
-    ACCOUNT_DISABLED: {
-      th: 'บัญชีถูกปิดใช้งานโดยผู้ดูแล',
-      hint: 'ติดต่อผู้ดูแลระบบ (admin) เพื่อเปิดใช้งานบัญชีอีกครั้ง',
-      severity: 'error',
-    },
-    COUNCIL_ROW_NOT_FOUND: {
-      th: 'ไม่พบรหัสนักเรียนนี้ในระบบ',
-      hint: 'ตรวจสอบรหัสนักเรียน 5 หลัก หรือส่งคำขอสมัครสมาชิกก่อน',
-      severity: 'error',
-    },
-    INVALID_STUDENT_ID_FORMAT: {
-      th: 'รูปแบบรหัสนักเรียนไม่ถูกต้อง',
-      hint: 'รหัสนักเรียนต้องเป็นตัวเลข 5 หลักเท่านั้น',
-      severity: 'error',
-    },
-    AUTH_IRRECOVERABLE: {
-      th: 'แก้ไขข้อมูล Auth อัตโนมัติไม่สำเร็จ',
-      hint: 'ติดต่อผู้ดูแลระบบ — พบข้อมูลในระบบแต่ไม่สามารถซ่อมแซม Auth ได้',
-      severity: 'error',
-    },
-    AUTH_USER_NOT_EXIST: {
-      th: 'ไม่พบบัญชีใน Supabase Auth',
-      hint: 'ข้อมูลอยู่ใน council_users แต่ Supabase Auth user ถูกลบหรือไม่เคยสร้าง — ติดต่อ admin',
-      severity: 'error',
-    },
+  const FATAL_LABELS: Record<string, { th: string; hint: string; severity: 'error' | 'warn' }> = {
+    NAME_MISMATCH: { th: 'ชื่อ-นามสกุลไม่ตรงกับในระบบ', hint: 'กรุณากรอกชื่อตามที่สมัครไว้ (ต้องตรงทุกตัวอักษร)', severity: 'warn' },
+    NOT_APPROVED: { th: 'บัญชียังไม่ได้รับการอนุมัติ', hint: 'ติดต่อผู้ดูแลระบบ (admin) เพื่ออนุมัติบัญชี', severity: 'warn' },
+    ACCOUNT_DISABLED: { th: 'บัญชีถูกปิดใช้งานโดยผู้ดูแล', hint: 'ติดต่อผู้ดูแลระบบ (admin) เพื่อเปิดใช้งานบัญชี', severity: 'error' },
+    COUNCIL_ROW_NOT_FOUND: { th: 'ไม่พบรหัสนักเรียนนี้ในระบบ', hint: 'ตรวจสอบรหัสนักเรียน 5 หลัก หรือส่งคำขอสมัครสมาชิก', severity: 'error' },
+    INVALID_STUDENT_ID_FORMAT: { th: 'รูปแบบรหัสนักเรียนไม่ถูกต้อง', hint: 'รหัสนักเรียนต้องเป็นตัวเลข 5 หลักเท่านั้น', severity: 'error' },
+    AUTH_IRRECOVERABLE: { th: 'แก้ไขข้อมูล Auth อัตโนมัติไม่สำเร็จ', hint: 'ติดต่อผู้ดูแลระบบพร้อม Diagnostic JSON', severity: 'error' },
+    AUTH_USER_NOT_EXIST: { th: 'ไม่พบบัญชีใน Supabase Auth', hint: 'ข้อมูลอยู่ใน council_users แต่ Supabase Auth user ไม่มี — ติดต่อ admin', severity: 'error' },
   };
 
   const fatalInfo = diag.fatal ? FATAL_LABELS[diag.fatal] : null;
-  const hasRepairs = diag.repairs.length > 0;
   const failedRepairs = diag.repairs.filter(r => !r.success);
 
   return (
@@ -118,16 +79,12 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
           <div style={{ fontWeight: 700, fontSize: 13.5, color: fatalInfo.severity === 'error' ? '#b91c1c' : '#92400e', marginBottom: 4 }}>
             {fatalInfo.severity === 'error' ? '🚫' : '⚠️'} {fatalInfo.th}
           </div>
-          <div style={{ fontSize: 12.5, color: fatalInfo.severity === 'error' ? '#991b1b' : '#78350f' }}>
-            💡 {fatalInfo.hint}
-          </div>
-          <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 5, fontFamily: 'monospace' }}>
-            CODE: {diag.fatal}
-          </div>
+          <div style={{ fontSize: 12.5, color: fatalInfo.severity === 'error' ? '#991b1b' : '#78350f' }}>💡 {fatalInfo.hint}</div>
+          <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 5, fontFamily: 'monospace' }}>CODE: {diag.fatal}</div>
         </div>
       )}
 
-      {hasRepairs && (
+      {diag.repairs.length > 0 && (
         <div style={{
           padding: '10px 14px', borderRadius: 10,
           background: diag.repaired ? '#dcfce7' : failedRepairs.length > 0 ? '#fef3c7' : '#eff6ff',
@@ -142,9 +99,7 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
               <div>
                 <span style={{ fontWeight: 600, color: r.success ? '#15803d' : '#b91c1c' }}>{r.code}</span>
                 <span style={{ color: '#6b7280', fontFamily: 'monospace', fontSize: 10.5, display: 'block' }}>{r.detail}</span>
-                {!r.success && r.error && (
-                  <span style={{ color: '#ef4444', fontSize: 10.5 }}>Error: {r.error}</span>
-                )}
+                {!r.success && r.error && <span style={{ color: '#ef4444', fontSize: 10.5 }}>Error: {r.error}</span>}
               </div>
             </div>
           ))}
@@ -155,82 +110,37 @@ function DiagnosticPanel({ diag }: { diag: RepairDiagnostic }) {
         <button
           onClick={() => setShowJson(!showJson)}
           style={{
-            width: '100%', padding: '9px 14px', background: '#f9fafb',
-            border: 'none', cursor: 'pointer', textAlign: 'left',
-            fontSize: 12.5, fontWeight: 700, color: '#374151',
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            fontFamily: 'var(--font-body)',
+            width: '100%', padding: '9px 14px', background: '#f9fafb', border: 'none',
+            cursor: 'pointer', textAlign: 'left', fontSize: 12.5, fontWeight: 700, color: '#374151',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontFamily: 'var(--font-body)',
           }}
         >
           <span>🛠️ รายละเอียดสำหรับนักพัฒนา ({diag.checks.length} checks)</span>
           <span style={{ color: '#9ca3af', transform: showJson ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>▼</span>
         </button>
-
         {showJson && (
-          <div style={{ borderTop: '1px solid #e5e7eb' }}>
-            <div style={{ padding: '10px 14px', borderBottom: '1px solid #f3f4f6' }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 7 }}>
-                Diagnostic Checks
-              </div>
-              {diag.checks.map((c, i) => (
-                <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 5, alignItems: 'flex-start' }}>
-                  <span style={{ fontSize: 13, flexShrink: 0 }}>{c.ok ? '✅' : '❌'}</span>
-                  <div>
-                    <span style={{
-                      fontFamily: 'monospace', fontSize: 11.5, fontWeight: 700,
-                      color: c.ok ? '#065f46' : '#991b1b',
-                      background: c.ok ? '#d1fae5' : '#fee2e2',
-                      padding: '1px 5px', borderRadius: 4,
-                    }}>{c.code}</span>
-                    <span style={{ fontSize: 12, color: '#374151', marginLeft: 6 }}>{c.message}</span>
-                    {c.detail && (
-                      <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#9ca3af', marginTop: 2, wordBreak: 'break-all' }}>
-                        {c.detail}
-                      </div>
-                    )}
-                  </div>
+          <div style={{ borderTop: '1px solid #e5e7eb', padding: '10px 14px' }}>
+            {diag.checks.map((c, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 5, alignItems: 'flex-start' }}>
+                <span style={{ fontSize: 13, flexShrink: 0 }}>{c.ok ? '✅' : '❌'}</span>
+                <div>
+                  <span style={{ fontFamily: 'monospace', fontSize: 11.5, fontWeight: 700, color: c.ok ? '#065f46' : '#991b1b', background: c.ok ? '#d1fae5' : '#fee2e2', padding: '1px 5px', borderRadius: 4 }}>{c.code}</span>
+                  <span style={{ fontSize: 12, color: '#374151', marginLeft: 6 }}>{c.message}</span>
+                  {c.detail && <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#9ca3af', marginTop: 2, wordBreak: 'break-all' }}>{c.detail}</div>}
                 </div>
-              ))}
-            </div>
-
+              </div>
+            ))}
             {diag.council_snapshot && (
-              <div style={{ padding: '10px 14px', borderBottom: '1px solid #f3f4f6' }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 7 }}>
-                  council_users Snapshot
-                </div>
-                <pre style={{
-                  fontSize: 10.5, background: '#0f1c35', color: '#93c5fd',
-                  padding: '10px', borderRadius: 6, overflow: 'auto', margin: 0,
-                }}>
-                  {JSON.stringify(diag.council_snapshot, null, 2)}
-                </pre>
-              </div>
-            )}
-
-            <div style={{ padding: '10px 14px' }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 7 }}>
-                Full Diagnostic JSON
-              </div>
-              <pre style={{
-                fontSize: 10, background: '#1f2937', color: '#d1d5db',
-                padding: '10px', borderRadius: 6, overflow: 'auto', maxHeight: 280, margin: 0,
-              }}>
-                {JSON.stringify({ ...diag, session: diag.session ? '[SESSION HIDDEN]' : null }, null, 2)}
+              <pre style={{ fontSize: 10.5, background: '#0f1c35', color: '#93c5fd', padding: '10px', borderRadius: 6, overflow: 'auto', marginTop: 10 }}>
+                {JSON.stringify(diag.council_snapshot, null, 2)}
               </pre>
-              <button
-                onClick={() => {
-                  const text = JSON.stringify({ ...diag, session: diag.session ? '[SESSION HIDDEN]' : null }, null, 2);
-                  navigator.clipboard?.writeText(text).catch(() => {});
-                }}
-                style={{
-                  marginTop: 6, padding: '5px 12px', fontSize: 11.5, fontWeight: 600,
-                  background: '#374151', color: '#d1d5db', border: 'none', borderRadius: 6,
-                  cursor: 'pointer', fontFamily: 'var(--font-body)',
-                }}
-              >
-                📋 คัดลอก JSON
-              </button>
-            </div>
+            )}
+            <button
+              onClick={() => navigator.clipboard?.writeText(JSON.stringify({ ...diag, session: '[HIDDEN]' }, null, 2)).catch(() => {})}
+              style={{ marginTop: 8, padding: '5px 12px', fontSize: 11.5, fontWeight: 600, background: '#374151', color: '#d1d5db', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'var(--font-body)' }}
+            >
+              📋 คัดลอก JSON
+            </button>
           </div>
         )}
       </div>
@@ -244,12 +154,10 @@ export default function LoginPage() {
   const router = useRouter();
   const { refresh } = useAuth();
   const [mode, setMode] = useState<'student' | 'other'>('student');
-
   const [fullName, setFullName] = useState('');
   const [studentId, setStudentId] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-
   const [loading, setLoading] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -260,10 +168,9 @@ export default function LoginPage() {
     setSimpleLog(p => [...p, `${new Date().toISOString().split('T')[1].slice(0, 8)} ${msg}`]);
   }, []);
 
-  // Apply a session returned from the repair API.
-  // CRITICAL: Do NOT call resetBrowserSupabase() here.
-  // Calling reset would destroy the onAuthStateChange subscription in AuthProvider,
-  // leaving all pages permanently unaware of the new session.
+  // Apply session from repair API.
+  // DO NOT call resetBrowserSupabase() here — it would destroy AuthProvider's
+  // onAuthStateChange subscription, causing all pages to lose auth state.
   async function applySession(session: { access_token: string; refresh_token: string }) {
     const supabase = getBrowserSupabase();
     const { error: sessErr } = await supabase.auth.setSession({
@@ -271,17 +178,13 @@ export default function LoginPage() {
       refresh_token: session.refresh_token,
     });
     if (sessErr) throw new Error(`setSession ล้มเหลว: ${sessErr.message}`);
-    // refresh() re-reads the session from localStorage and sets the user profile
-    // before we navigate, ensuring the new page renders with the correct auth state.
-    await refresh();
+    await refresh(); // re-reads from localStorage, no network needed
     router.push('/');
   }
 
   async function handleStudentLogin(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
-    setDiagnostic(null);
-    setSimpleLog([]);
+    setError(null); setDiagnostic(null); setSimpleLog([]);
     if (!fullName.trim()) return setError('กรุณากรอกชื่อ-นามสกุล');
     if (!/^\d{5}$/.test(studentId)) return setError('รหัสนักเรียนต้องเป็นตัวเลข 5 หลัก');
     setLoading(true);
@@ -289,19 +192,15 @@ export default function LoginPage() {
     try {
       const supabase = getBrowserSupabase();
       const synEmail = synthesizeEmail(studentId);
-
       log(`[ATTEMPT-1] signIn email="${synEmail}"`);
+
       const { data: signIn1, error: signInErr1 } = await supabase.auth.signInWithPassword({
-        email: synEmail,
-        password: studentId,
+        email: synEmail, password: studentId,
       });
 
-      // Schema error on signIn → wait and retry via repair endpoint.
-      // CRITICAL: Do NOT call resetBrowserSupabase() here.
-      // The AuthProvider's subscription is on the current client — resetting it
-      // would permanently break auth state detection for this session.
+      // Schema error: wait + retry WITHOUT resetting client
       if (signInErr1 && isSchemaError(signInErr1)) {
-        log(`[ATTEMPT-1] schema error → wait + repair (no client reset)`);
+        log('[ATTEMPT-1] schema error → wait 500ms + repair (no client reset)');
         await new Promise(r => setTimeout(r, 500));
         setLoading(false);
         await runRepair();
@@ -310,11 +209,10 @@ export default function LoginPage() {
 
       if (!signInErr1 && signIn1?.user) {
         log(`[ATTEMPT-1] ✅ auth OK uid=${signIn1.user.id}`);
-
         const row = await fetchCouncilRow(signIn1.user.id);
 
         if (!row) {
-          log('[COUNCIL] ❌ ไม่พบแถวใน council_users — เรียก repair');
+          log('[COUNCIL] ไม่พบแถวใน council_users — เรียก repair');
           setLoading(false);
           await runRepair();
           return;
@@ -322,18 +220,14 @@ export default function LoginPage() {
 
         if (normalizeName(row.full_name) !== normalizeName(fullName)) {
           await supabase.auth.signOut();
-          log(`[NAME] ❌ ไม่ตรง DB="${row.full_name}" Input="${fullName}"`);
           setError('ชื่อ-นามสกุลไม่ตรงกับข้อมูลในระบบ');
           setLoading(false);
           return;
         }
-
         if (!row.approved) { await supabase.auth.signOut(); setError('บัญชียังไม่ได้รับการอนุมัติ'); setLoading(false); return; }
         if (row.disabled) { await supabase.auth.signOut(); setError('บัญชีถูกปิดใช้งาน'); setLoading(false); return; }
 
         log('[OK] Login สำเร็จ');
-        // refresh() reads the session from local cache and sets the user profile.
-        // This ensures all components receive the new auth state before navigation.
         await refresh();
         router.push('/');
         return;
@@ -342,7 +236,6 @@ export default function LoginPage() {
       log(`[ATTEMPT-1] ❌ ${signInErr1?.message} — เรียก Auto-Repair`);
       setLoading(false);
       await runRepair();
-
     } catch (err: any) {
       setError(err?.message ?? 'เกิดข้อผิดพลาด');
       setLoading(false);
@@ -350,10 +243,7 @@ export default function LoginPage() {
   }
 
   async function runRepair() {
-    setRepairing(true);
-    setError(null);
-    setDiagnostic(null);
-
+    setRepairing(true); setError(null); setDiagnostic(null);
     try {
       log('[REPAIR] เรียก /api/auth/repair...');
       const res = await fetch('/api/auth/repair', {
@@ -362,8 +252,7 @@ export default function LoginPage() {
         body: JSON.stringify({ full_name: fullName, student_id: studentId }),
       });
       const diag: RepairDiagnostic = await res.json();
-      log(`[REPAIR] repaired=${diag.repaired} fatal=${diag.fatal ?? 'none'} repairs=${diag.repairs.length}`);
-
+      log(`[REPAIR] repaired=${diag.repaired} fatal=${diag.fatal ?? 'none'}`);
       setDiagnostic(diag);
 
       if (diag.repaired && diag.session) {
@@ -373,18 +262,16 @@ export default function LoginPage() {
       }
 
       const USER_MSG: Record<string, string> = {
-        NAME_MISMATCH: 'ชื่อ-นามสกุลไม่ตรงกับข้อมูลในระบบ กรุณาตรวจสอบการสะกด',
+        NAME_MISMATCH: 'ชื่อ-นามสกุลไม่ตรงกับข้อมูลในระบบ',
         NOT_APPROVED: 'บัญชียังไม่ได้รับการอนุมัติจากผู้ดูแลระบบ',
         ACCOUNT_DISABLED: 'บัญชีถูกปิดใช้งาน ติดต่อผู้ดูแลระบบ',
-        COUNCIL_ROW_NOT_FOUND: 'ไม่พบรหัสนักเรียนนี้ในระบบ กรุณาตรวจสอบหรือสมัครสมาชิก',
+        COUNCIL_ROW_NOT_FOUND: 'ไม่พบรหัสนักเรียนนี้ในระบบ',
         INVALID_STUDENT_ID_FORMAT: 'รูปแบบรหัสนักเรียนไม่ถูกต้อง',
         AUTH_IRRECOVERABLE: 'ข้อมูล Auth เสียหาย — ติดต่อผู้ดูแลระบบพร้อม Diagnostic JSON',
         AUTH_USER_NOT_EXIST: 'บัญชีใน Auth ไม่มีอยู่ — ติดต่อผู้ดูแลระบบ',
       };
-      setError(USER_MSG[diag.fatal ?? ''] ?? 'ไม่สามารถแก้ไขข้อมูลได้อัตโนมัติ — ดูรายละเอียดด้านล่าง');
-
+      setError(USER_MSG[diag.fatal ?? ''] ?? 'ไม่สามารถแก้ไขได้อัตโนมัติ — ดูรายละเอียดด้านล่าง');
     } catch (err: any) {
-      log(`[REPAIR] exception: ${err?.message}`);
       setError('ระบบแก้ไขอัตโนมัติล้มเหลว — ติดต่อผู้ดูแลระบบ');
     } finally {
       setRepairing(false);
@@ -393,20 +280,16 @@ export default function LoginPage() {
 
   async function handleOtherLogin(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
-    setDiagnostic(null);
-    setSimpleLog([]);
+    setError(null); setDiagnostic(null); setSimpleLog([]);
     if (!email.trim() || !password) return setError('กรุณากรอก email และรหัสผ่าน');
     setLoading(true);
-
     try {
       const supabase = getBrowserSupabase();
       const { data, error: e2 } = await supabase.auth.signInWithPassword({ email, password });
 
       if (e2) {
         if (isSchemaError(e2)) {
-          // Schema error → wait and retry WITHOUT resetting client
-          // (resetting would break AuthProvider's subscription)
+          // Wait and retry WITHOUT resetting client
           await new Promise(r => setTimeout(r, 500));
           const { data: data2, error: e3 } = await supabase.auth.signInWithPassword({ email, password });
           if (e3 || !data2?.user) throw new Error(e3?.message ?? 'Login ล้มเหลว');
@@ -417,7 +300,6 @@ export default function LoginPage() {
       }
 
       if (!data?.user) throw new Error('Login ล้มเหลว');
-
       const row = await fetchCouncilRow(data.user.id);
       if (!row) throw new Error('บัญชีนี้ยังไม่ได้ลงทะเบียนในระบบ');
       if (!row.approved) { await supabase.auth.signOut(); throw new Error('บัญชียังไม่ได้รับการอนุมัติ'); }
@@ -439,18 +321,11 @@ export default function LoginPage() {
   const isLoading = loading || repairing;
 
   return (
-    <div style={{
-      minHeight: '100vh', display: 'flex', background: 'var(--bg)',
-      alignItems: 'center', justifyContent: 'center', padding: 20,
-    }}>
+    <div style={{ minHeight: '100vh', display: 'flex', background: 'var(--bg)', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
       <div style={{ width: '100%', maxWidth: 460 }}>
         <div className="card" style={{ padding: '32px 32px 28px' }}>
-
           <div style={{ textAlign: 'center', marginBottom: 26 }}>
-            <div style={{
-              display: 'inline-flex', background: 'var(--sidebar-bg)',
-              borderRadius: 'var(--r-lg)', padding: '10px 20px', marginBottom: 14, gap: 8, alignItems: 'center',
-            }}>
+            <div style={{ display: 'inline-flex', background: 'var(--sidebar-bg)', borderRadius: 'var(--r-lg)', padding: '10px 20px', marginBottom: 14, gap: 8, alignItems: 'center' }}>
               <span style={{ background: 'var(--gold)', color: '#fff', fontWeight: 800, fontSize: 12, padding: '2px 8px', borderRadius: 6 }}>YPLABS</span>
               <span style={{ color: '#fff', fontWeight: 600, fontSize: 13 }}>สภานักเรียน</span>
             </div>
@@ -458,18 +333,12 @@ export default function LoginPage() {
             <div style={{ fontSize: 12.5, color: 'var(--text-3)' }}>โรงเรียนคำยางพิทยา</div>
           </div>
 
-          <div style={{
-            display: 'flex', background: 'var(--surface-2)', borderRadius: 'var(--r)',
-            padding: 4, gap: 3, marginBottom: 22,
-          }}>
+          <div style={{ display: 'flex', background: 'var(--surface-2)', borderRadius: 'var(--r)', padding: 4, gap: 3, marginBottom: 22 }}>
             {(['student', 'other'] as const).map(m => (
               <button key={m} type="button" onClick={() => { setMode(m); setError(null); setDiagnostic(null); }} style={{
-                flex: 1, border: 'none', borderRadius: 8, padding: '8px 4px',
-                fontWeight: 700, fontSize: 13, cursor: 'pointer', transition: 'all 0.15s',
-                background: mode === m ? 'var(--surface)' : 'transparent',
-                color: mode === m ? 'var(--brand)' : 'var(--text-3)',
-                boxShadow: mode === m ? 'var(--shadow-xs)' : 'none',
-                fontFamily: 'var(--font-body)',
+                flex: 1, border: 'none', borderRadius: 8, padding: '8px 4px', fontWeight: 700, fontSize: 13, cursor: 'pointer', transition: 'all 0.15s',
+                background: mode === m ? 'var(--surface)' : 'transparent', color: mode === m ? 'var(--brand)' : 'var(--text-3)',
+                boxShadow: mode === m ? 'var(--shadow-xs)' : 'none', fontFamily: 'var(--font-body)',
               }}>
                 {m === 'student' ? '👩‍🎓 นักเรียน' : '👨‍🏫 ครู / อื่นๆ'}
               </button>
@@ -480,51 +349,25 @@ export default function LoginPage() {
             <form onSubmit={handleStudentLogin} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div className="form-group">
                 <label className="form-label">ชื่อ-นามสกุล (ตามที่สมัคร)</label>
-                <input
-                  value={fullName}
-                  onChange={e => { setFullName(e.target.value); setError(null); setDiagnostic(null); }}
-                  placeholder="เช่น สมชาย ใจดี"
-                  required autoFocus
-                  disabled={isLoading}
-                />
+                <input value={fullName} onChange={e => { setFullName(e.target.value); setError(null); setDiagnostic(null); }} placeholder="เช่น สมชาย ใจดี" required autoFocus disabled={isLoading} />
               </div>
               <div className="form-group">
                 <label className="form-label">รหัสนักเรียน (5 หลัก)</label>
-                <input
-                  value={studentId}
-                  onChange={e => { setStudentId(e.target.value); setError(null); setDiagnostic(null); }}
-                  placeholder="12345"
-                  inputMode="numeric"
-                  maxLength={5}
-                  required
-                  disabled={isLoading}
-                />
+                <input value={studentId} onChange={e => { setStudentId(e.target.value); setError(null); setDiagnostic(null); }} placeholder="12345" inputMode="numeric" maxLength={5} required disabled={isLoading} />
               </div>
 
-              {error && !diagnostic && (
-                <div className="alert alert-error" style={{ fontSize: 13 }}>{error}</div>
-              )}
-
+              {error && !diagnostic && <div className="alert alert-error" style={{ fontSize: 13 }}>{error}</div>}
               {repairing && (
-                <div style={{
-                  padding: '10px 14px', borderRadius: 10,
-                  background: '#eff6ff', border: '1.5px solid #93c5fd',
-                  display: 'flex', alignItems: 'center', gap: 8, fontSize: 13,
-                }}>
+                <div style={{ padding: '10px 14px', borderRadius: 10, background: '#eff6ff', border: '1.5px solid #93c5fd', display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
                   <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2, flexShrink: 0 }} />
                   <span style={{ color: '#1d4ed8' }}>กำลังวิเคราะห์และแก้ไขข้อมูลอัตโนมัติ...</span>
                 </div>
               )}
-
               {diagnostic && (
                 <>
                   {error && <div className="alert alert-error" style={{ fontSize: 13 }}>{error}</div>}
                   <DiagnosticPanel diag={diagnostic} />
-                  {diagnostic.repaired && (
-                    <div className="alert alert-success" style={{ fontSize: 13 }}>
-                      ✅ แก้ไขข้อมูลสำเร็จ — กำลัง redirect...
-                    </div>
-                  )}
+                  {diagnostic.repaired && <div className="alert alert-success" style={{ fontSize: 13 }}>✅ แก้ไขข้อมูลสำเร็จ — กำลัง redirect...</div>}
                 </>
               )}
 
@@ -535,9 +378,7 @@ export default function LoginPage() {
               {simpleLog.length > 0 && (
                 <details style={{ fontSize: 11, color: 'var(--text-3)' }}>
                   <summary style={{ cursor: 'pointer', fontWeight: 600 }}>📝 Login log ({simpleLog.length} steps)</summary>
-                  <pre style={{ whiteSpace: 'pre-wrap', marginTop: 6, padding: '8px', background: '#f9fafb', borderRadius: 6, fontSize: 10 }}>
-                    {simpleLog.join('\n')}
-                  </pre>
+                  <pre style={{ whiteSpace: 'pre-wrap', marginTop: 6, padding: '8px', background: '#f9fafb', borderRadius: 6, fontSize: 10 }}>{simpleLog.join('\n')}</pre>
                 </details>
               )}
             </form>
@@ -545,25 +386,11 @@ export default function LoginPage() {
             <form onSubmit={handleOtherLogin} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div className="form-group">
                 <label className="form-label">Email</label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={e => { setEmail(e.target.value); setError(null); }}
-                  placeholder="teacher@school.ac.th"
-                  required autoFocus
-                  disabled={isLoading}
-                />
+                <input type="email" value={email} onChange={e => { setEmail(e.target.value); setError(null); }} placeholder="teacher@school.ac.th" required autoFocus disabled={isLoading} />
               </div>
               <div className="form-group">
                 <label className="form-label">รหัสผ่าน</label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={e => { setPassword(e.target.value); setError(null); }}
-                  placeholder="••••••••"
-                  required
-                  disabled={isLoading}
-                />
+                <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(null); }} placeholder="••••••••" required disabled={isLoading} />
               </div>
               {error && <div className="alert alert-error" style={{ fontSize: 13 }}>{error}</div>}
               <button type="submit" disabled={isLoading} className="btn btn-primary btn-full btn-lg">
@@ -573,11 +400,9 @@ export default function LoginPage() {
           )}
 
           <div style={{ textAlign: 'center', marginTop: 18, fontSize: 13, color: 'var(--text-3)' }}>
-            ยังไม่มีบัญชี?{' '}
-            <Link href="/register" style={{ color: 'var(--brand)', fontWeight: 700 }}>ส่งคำขอสมัคร</Link>
+            ยังไม่มีบัญชี? <Link href="/register" style={{ color: 'var(--brand)', fontWeight: 700 }}>ส่งคำขอสมัคร</Link>
           </div>
         </div>
-
         <div style={{ textAlign: 'center', marginTop: 16, fontSize: 13 }}>
           <Link href="/" style={{ color: 'var(--text-3)' }}>← กลับหน้าหลัก</Link>
         </div>
