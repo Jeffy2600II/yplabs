@@ -49,7 +49,6 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
     .limit(1)
     .maybeSingle();
 
-  // "Database error querying schema" → รีเซ็ต client แล้ว retry สูงสุด 3 ครั้ง
   if (error) {
     const isSchemaError =
       error.message?.includes('schema') ||
@@ -58,8 +57,8 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
       error.code === '42P01';
 
     if (isSchemaError && attempt < 3) {
-      resetBrowserSupabase(); // ทิ้ง stale client
-      await new Promise(r => setTimeout(r, 300 * (attempt + 1))); // backoff
+      resetBrowserSupabase();
+      await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
       return queryCouncilUser(authUid, attempt + 1);
     }
     return null;
@@ -76,14 +75,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       if (typeof window === 'undefined') return;
       const supabase = getBrowserSupabase();
-      const { data: authData, error: authError } = await supabase.auth.getUser();
 
-      if (authError || !authData?.user) {
+      // ใช้ getSession() แทน getUser() เพราะอ่านจาก localStorage โดยตรง
+      // ไม่ต้อง network call → ไม่ fail จาก timeout และรองรับ refresh page
+      const { data: { session }, error: sessError } = await supabase.auth.getSession();
+
+      if (sessError || !session?.user) {
         setUser(null);
         return;
       }
 
-      const row = await queryCouncilUser(authData.user.id);
+      const row = await queryCouncilUser(session.user.id);
 
       if (row && row.approved && !row.disabled) {
         setUser(row as UserProfile);
@@ -107,11 +109,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await supabase.auth.signOut();
     } catch {}
     setUser(null);
-    resetBrowserSupabase(); // ล้าง singleton หลัง sign out
+    resetBrowserSupabase();
   }, []);
 
   useEffect(() => {
     let mounted = true;
+
     (async () => {
       await fetchUser();
       if (mounted) setLoading(false);
@@ -120,9 +123,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let sub: any;
     try {
       const supabase = getBrowserSupabase();
-      const { data } = supabase.auth.onAuthStateChange(async (event) => {
-        if (event === 'SIGNED_IN') await fetchUser();
-        else if (event === 'SIGNED_OUT') setUser(null);
+      const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
+        if (
+          event === 'SIGNED_IN' ||
+          event === 'INITIAL_SESSION' ||
+          event === 'TOKEN_REFRESHED'
+        ) {
+          // session มีอยู่ → โหลดข้อมูล user
+          if (session?.user) await fetchUser();
+          else setUser(null);
+        } else if (event === 'SIGNED_OUT') {
+          setUser(null);
+        }
       });
       sub = data.subscription;
     } catch {}
