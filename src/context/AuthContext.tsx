@@ -36,16 +36,6 @@ export function useAuth() {
   return useContext(AuthContext);
 }
 
-/**
- * โหลด profile ของ user จาก council_users
- * ──────────────────────────────────────────
- * ใช้แนวทางเดียวกับ reference (CouncilAuthGuard):
- *  1. getSession() → อ่านจาก localStorage (เร็ว, ไม่ใช้ network)
- *  2. query council_users → ตรวจ approved + disabled
- *  3. set user state
- *
- * ไม่มี schema retry loop ที่ซับซ้อน → ถ้า error ก็ set null แล้วให้ user login ใหม่
- */
 async function fetchProfile(authUid: string): Promise < UserProfile | null > {
   try {
     const supabase = getBrowserSupabase();
@@ -58,7 +48,6 @@ async function fetchProfile(authUid: string): Promise < UserProfile | null > {
     
     if (error || !row) return null;
     if (!row.approved || row.disabled) return null;
-    
     return row as UserProfile;
   } catch {
     return null;
@@ -69,22 +58,58 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState < UserProfile | null > (null);
   
-  /**
-   * loadUser: อ่าน session จาก localStorage แล้วโหลด profile
-   * ──────────────────────────────────────────────────────────
-   * เหมือน reference's guard component: getSession() → query council_users
-   */
-  const loadUser = useCallback(async () => {
+  useEffect(() => {
+    let mounted = true;
+    
+    const supabase = getBrowserSupabase();
+    
+    // ══════════════════════════════════════════════════════════════════
+    // onAuthStateChange เป็น source of truth เดียว — ไม่เรียก getSession() แยก
+    // ──────────────────────────────────────────────────────────────────
+    // Supabase จะยิง INITIAL_SESSION ทันทีที่ subscribe:
+    //   - ถ้ามี session ใน localStorage → session ≠ null
+    //   - ถ้าไม่มี → session = null
+    // ไม่ต้องเรียก getSession() ในทาง parallel เพราะจะทำให้เกิด
+    // race condition: 2 async paths set state พร้อมกัน บางครั้ง
+    // user=null path มาถึงหลัง user=profile ทำให้ state กลับเป็น null
+    // ══════════════════════════════════════════════════════════════════
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (!mounted) return;
+        
+        if (event === 'SIGNED_OUT' || !session?.user) {
+          setUser(null);
+          setLoading(false);
+          return;
+        }
+        
+        // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED, USER_UPDATED
+        try {
+          const profile = await fetchProfile(session.user.id);
+          if (mounted) setUser(profile);
+        } catch {
+          if (mounted) setUser(null);
+        } finally {
+          if (mounted) setLoading(false);
+        }
+      }
+    );
+    
+    return () => {
+      mounted = false;
+      try { subscription.unsubscribe(); } catch { /* ignore */ }
+    };
+  }, []);
+  
+  // refresh: ใช้ getUser() (network call) เพื่อ verify กับ server จริงๆ
+  // เรียกหลัง signInWithPassword สำเร็จ ก่อน router.push
+  const refresh = useCallback(async () => {
+    setLoading(true);
     try {
       const supabase = getBrowserSupabase();
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (!session?.user) {
-        setUser(null);
-        return;
-      }
-      
-      const profile = await fetchProfile(session.user.id);
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (!authUser) { setUser(null); return; }
+      const profile = await fetchProfile(authUser.id);
       setUser(profile);
     } catch {
       setUser(null);
@@ -93,60 +118,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
   
-  /**
-   * refresh: บังคับโหลด user ใหม่ — เรียกหลัง login สำเร็จ
-   */
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    await loadUser();
-  }, [loadUser]);
-  
-  /**
-   * signOut: เดียวที่ปลอดภัยจะ reset singleton
-   */
   const signOut = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
       await supabase.auth.signOut();
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
     setUser(null);
     setLoading(false);
-    resetBrowserSupabase(); // ปลอดภัยเรียกที่นี่เท่านั้น
+    resetBrowserSupabase();
   }, []);
   
-  useEffect(() => {
-    // โหลด user ทันทีเมื่อ mount (อ่านจาก localStorage — เร็ว)
-    void loadUser();
-    
-    // Subscribe onAuthStateChange เพื่อ react ต่อ sign-in / sign-out จาก tab อื่น
-    const supabase = getBrowserSupabase();
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_OUT' || !session?.user) {
-        setUser(null);
-        setLoading(false);
-        return;
-      }
-      
-      // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED → โหลด profile ใหม่
-      if (session?.user) {
-        const profile = await fetchProfile(session.user.id);
-        setUser(profile);
-        setLoading(false);
-      }
-    });
-    
-    return () => {
-      try { subscription.unsubscribe(); } catch { /* ignore */ }
-    };
-  }, [loadUser]);
-  
-  const isAdmin = !!(user?.role === 'admin');
-  const isMember = !!user;
-  
   return (
-    <AuthContext.Provider value={{ loading, user, isAdmin, isMember, refresh, signOut }}>
+    <AuthContext.Provider value={{
+      loading,
+      user,
+      isAdmin: !!(user?.role === 'admin'),
+      isMember: !!user,
+      refresh,
+      signOut,
+    }}>
       {children}
     </AuthContext.Provider>
   );
