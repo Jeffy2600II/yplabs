@@ -1,23 +1,18 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// ===================================================================
-// Supabase Client Singleton
-// ===================================================================
-// ARCHITECTURE RULE:
-//   resetBrowserSupabase() MUST only be called after explicit user
-//   sign-out. Calling it at any other time will destroy the
-//   onAuthStateChange subscription in AuthProvider, causing all
-//   pages to permanently lose auth state awareness.
-//
-//   ✅ Safe:   signOut() → resetBrowserSupabase()
-//   ❌ NEVER:  schema error retry → resetBrowserSupabase()
-//   ❌ NEVER:  applySession() → resetBrowserSupabase()
-//   ❌ NEVER:  any page data-fetch error → resetBrowserSupabase()
-// ===================================================================
-
 let client: SupabaseClient | null = null;
 
+/**
+ * Browser-only singleton Supabase client.
+ * - Guard against server-side usage.
+ * - Explicitly use window.localStorage to ensure a consistent storage backend.
+ * - Keep persistSession & autoRefreshToken enabled.
+ */
 export function getBrowserSupabase(): SupabaseClient {
+  if (typeof window === 'undefined') {
+    throw new Error('getBrowserSupabase must be called in the browser');
+  }
+  
   if (!client) {
     client = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -28,6 +23,8 @@ export function getBrowserSupabase(): SupabaseClient {
           persistSession: true,
           autoRefreshToken: true,
           detectSessionInUrl: true,
+          // Make storage explicit (helps avoid accidental server storage or mismatches)
+          storage: window.localStorage,
         },
         global: {
           headers: { 'x-client-info': 'yplabs-web' },
@@ -38,10 +35,7 @@ export function getBrowserSupabase(): SupabaseClient {
   return client;
 }
 
-/**
- * ล้าง singleton client — ใช้ได้เฉพาะหลัง signOut() เท่านั้น
- * ห้ามเรียกจาก error handler หรือ retry loop เด็ดขาด
- */
+/** ล้าง singleton — ใช้หลัง signOut เพื่อป้องกัน stale schema cache */
 export function resetBrowserSupabase(): void {
   client = null;
 }
