@@ -133,7 +133,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const supabase = getBrowserSupabase();
 
-    // onAuthStateChange fires INITIAL_SESSION on init (restores session from localStorage)
+    // Immediately attempt to restore session from localStorage right away
+    (async () => {
+      await fetchUser();
+      if (mounted) setLoading(false);
+    })();
+
+    // onAuthStateChange fires INITIAL_SESSION on init and on subsequent auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
         if (!mounted) return;
