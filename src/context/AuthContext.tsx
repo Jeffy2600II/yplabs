@@ -116,6 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         refreshTokenMasked: maskToken((session as any)?.refresh_token ?? (session as any)?.session?.refresh_token ?? null),
       };
 
+      // If no session (guest), do not show diagnostics
       if (!session?.user) {
         setUser(null);
         setAuthDiag(null);
@@ -124,10 +125,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const profile = await fetchProfile(session.user.id);
       if (!profile) {
+        // Session exists but profile missing/unapproved -> show diag to help devs
         recordDiag({
           code: 'PROFILE_MISSING',
-          message: 'พบ session แต่ไม่พบ/ไม่อนุญาตโปรไฟล์ใน council_users',
-          detail: 'session มี แต่ fetchProfile คืนค่า null (ไม่พบแถวหรือยังไม่อนุญาต/ถูกปิดใช้งาน)',
+          message: 'พบ session แต่ไม่พบ/ยังไม่อนุญาตโปรไฟล์ใน council_users',
+          detail: 'session มี แต่ fetchProfile คืนค่า null (ไม่พบแถว หรือ ยังไม่อนุญาต/ถูกปิดใช้งาน)',
           event: 'LOAD_USER',
           session: sessionInfo,
           raw: { sessionUserId: session.user.id },
@@ -141,7 +143,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (e: any) {
       recordDiag({
         code: 'LOAD_USER_ERROR',
-        message: 'เกิดข้อผิดพลาดขณะกู้คืน session/profle',
+        message: 'เกิดข้อผิดพลาดขณะกู้คืน session/profile',
         detail: e?.message ?? String(e),
         event: 'LOAD_USER',
         session: { hasSession: false },
@@ -182,43 +184,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const supabase = getBrowserSupabase();
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       try {
-        const hasSession = !!session?.user;
-        const sessionInfo = {
-          hasSession,
-          userId: session?.user?.id,
-          accessTokenMasked: maskToken((session as any)?.access_token ?? (session as any)?.session?.access_token ?? null),
-          refreshTokenMasked: maskToken((session as any)?.refresh_token ?? (session as any)?.session?.refresh_token ?? null),
-        };
-
-        if (event === 'SIGNED_OUT' || !session?.user) {
+        // Only create diagnostics if session exists but profile can't be resolved.
+        if (!session?.user) {
+          // don't create diag for signed out / guest
           setUser(null);
           setLoading(false);
-          setAuthDiag({
-            time: new Date().toISOString(),
-            message: event === 'SIGNED_OUT' ? 'เซสชันถูกออกจากระบบ' : 'session ไม่มีผู้ใช้',
-            event,
-            session: sessionInfo,
-          });
           return;
         }
 
-        if (session?.user) {
-          const profile = await fetchProfile(session.user.id);
-          if (!profile) {
-            setUser(null);
-            recordDiag({
-              code: 'PROFILE_MISSING_ON_AUTH',
-              message: 'session ถูกยืนยัน แต่ไม่พบโปรไฟล์ภายหลัง onAuthStateChange',
-              event,
-              session: sessionInfo,
-              detail: 'profile fetch returned null — อาจจะยังไม่อนุญาตหรือ DB mismatch',
-            });
-          } else {
-            setUser(profile);
-            setAuthDiag(null);
-          }
-          setLoading(false);
+        // session.user exists -> try to fetch profile and create diag if missing/error
+        const profile = await fetchProfile(session.user.id);
+        if (!profile) {
+          recordDiag({
+            code: 'PROFILE_MISSING_ON_AUTH',
+            message: 'session ถูกยืนยัน แต่ไม่พบโปรไฟล์ภายใน onAuthStateChange',
+            event,
+            session: {
+              hasSession: true,
+              userId: session.user.id,
+            },
+            detail: 'profile fetch returned null — อาจยังไม่อนุญาตหรือมี mismatch ใน DB',
+          });
+          setUser(null);
+        } else {
+          setUser(profile);
+          setAuthDiag(null);
         }
+        setLoading(false);
       } catch (e: any) {
         recordDiag({
           code: 'ON_AUTH_CALLBACK_ERROR',
