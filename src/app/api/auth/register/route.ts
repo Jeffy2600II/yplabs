@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { synthesizeEmail } from '@/lib/auth';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -24,11 +25,15 @@ export async function POST(req: NextRequest) {
         .limit(1);
       if (existing && existing.length > 0) return NextResponse.json({ error: 'รหัสนักเรียนนี้มีคำขออยู่แล้ว' }, { status: 400 });
       
+      // สร้าง email สังเคราะห์สำหรับนักเรียนที่ไม่ได้ให้ email ด้วย (เก็บไปพร้อมคำขอ)
+      const synthesized = synthesizeEmail(student_id);
+      
       const { error } = await supabase.from('council_join_requests').insert({
         full_name: full_name.trim(),
         student_id,
         year: Number(year),
         account_type: 'student',
+        email: synthesized, // เพิ่มตรงนี้
       });
       if (error) throw error;
     } else {
