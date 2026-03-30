@@ -2,10 +2,9 @@
 
 import {
   createContext, useContext, useEffect,
-  useState, useCallback, useRef, ReactNode,
+  useState, useCallback, ReactNode,
 } from 'react';
 import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
-import { setLastActive, clearLastActive, isLastActiveExpired } from '@/lib/sessionActivity';
 
 export type UserProfile = {
   auth_uid: string;
@@ -50,6 +49,7 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
     .limit(1)
     .maybeSingle();
 
+  // "Database error querying schema" → รีเซ็ต client แล้ว retry สูงสุด 3 ครั้ง
   if (error) {
     const isSchemaError =
       error.message?.includes('schema') ||
@@ -58,8 +58,8 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
       error.code === '42P01';
 
     if (isSchemaError && attempt < 3) {
-      resetBrowserSupabase();
-      await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+      resetBrowserSupabase(); // ทิ้ง stale client
+      await new Promise(r => setTimeout(r, 300 * (attempt + 1))); // backoff
       return queryCouncilUser(authUid, attempt + 1);
     }
     return null;
@@ -71,44 +71,27 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserProfile | null>(null);
-  // prevent race condition when multiple fetchUser run concurrently
-  const fetchCountRef = useRef(0);
 
   const fetchUser = useCallback(async () => {
-    const id = ++fetchCountRef.current;
     try {
       if (typeof window === 'undefined') return;
       const supabase = getBrowserSupabase();
+      const { data: authData, error: authError } = await supabase.auth.getUser();
 
-      // Use getSession() (reads from localStorage) — no network required
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-
-      if (sessionError || !session?.user) {
-        if (id === fetchCountRef.current) setUser(null);
+      if (authError || !authData?.user) {
+        setUser(null);
         return;
       }
 
-      // If lastActivity expired, force signOut (don't treat as logged-in)
-      if (isLastActiveExpired()) {
-        try { await supabase.auth.signOut(); } catch {}
-        clearLastActive();
-        if (id === fetchCountRef.current) setUser(null);
-        return;
-      }
-
-      const row = await queryCouncilUser(session.user.id);
-
-      if (id !== fetchCountRef.current) return; // prevent stale write
+      const row = await queryCouncilUser(authData.user.id);
 
       if (row && row.approved && !row.disabled) {
         setUser(row as UserProfile);
-        // mark this browser as active now
-        setLastActive();
       } else {
         setUser(null);
       }
     } catch {
-      if (id === fetchCountRef.current) setUser(null);
+      setUser(null);
     }
   }, []);
 
@@ -124,72 +107,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await supabase.auth.signOut();
     } catch {}
     setUser(null);
-    resetBrowserSupabase();
-    clearLastActive();
+    resetBrowserSupabase(); // ล้าง singleton หลัง sign out
   }, []);
 
   useEffect(() => {
     let mounted = true;
-
-    const supabase = getBrowserSupabase();
-
-    // Immediately attempt to restore session from localStorage right away
     (async () => {
       await fetchUser();
       if (mounted) setLoading(false);
     })();
 
-    // onAuthStateChange fires INITIAL_SESSION on init and on subsequent auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (!mounted) return;
-
-        if (
-          event === 'INITIAL_SESSION' ||
-          event === 'SIGNED_IN' ||
-          event === 'TOKEN_REFRESHED' ||
-          event === 'USER_UPDATED'
-        ) {
-          // If session exists but lastActive expired -> signOut
-          if (session?.user && isLastActiveExpired()) {
-            try { await supabase.auth.signOut(); } catch {}
-            clearLastActive();
-            setUser(null);
-            setLoading(false);
-            return;
-          }
-
-          if (session?.user) {
-            await fetchUser();
-          } else {
-            setUser(null);
-          }
-          setLoading(false);
-        } else if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setLoading(false);
-          clearLastActive();
-        }
-      }
-    );
-
-    // Activity listeners: keep updating lastActive while user interacts with the site
-    const updateActive = () => setLastActive();
-    const visibilityHandler = () => {
-      if (document.visibilityState === 'visible') setLastActive();
-    };
-    window.addEventListener('mousemove', updateActive, { passive: true });
-    window.addEventListener('click', updateActive, { passive: true });
-    window.addEventListener('keydown', updateActive, { passive: true });
-    window.addEventListener('visibilitychange', visibilityHandler);
+    let sub: any;
+    try {
+      const supabase = getBrowserSupabase();
+      const { data } = supabase.auth.onAuthStateChange(async (event) => {
+        if (event === 'SIGNED_IN') await fetchUser();
+        else if (event === 'SIGNED_OUT') setUser(null);
+      });
+      sub = data.subscription;
+    } catch {}
 
     return () => {
       mounted = false;
-      subscription?.unsubscribe();
-      window.removeEventListener('mousemove', updateActive);
-      window.removeEventListener('click', updateActive);
-      window.removeEventListener('keydown', updateActive);
-      window.removeEventListener('visibilitychange', visibilityHandler);
+      sub?.unsubscribe?.();
     };
   }, [fetchUser]);
 

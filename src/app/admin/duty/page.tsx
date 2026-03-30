@@ -1,18 +1,18 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { getAuthToken } from '@/lib/getAuthToken';
+import { getBrowserSupabase } from '@/lib/supabaseClient';
 
-type MemberRow = { auth_uid: string; full_name: string; student_id: string | null; role: string; year: number; };
-type DutyRow = { id: string; student_name: string; student_id: string | null; auth_uid: string; checked_in: boolean; checked_in_at: string | null; };
+type DutyEntry = { id: string; student_name: string; student_id: string; auth_uid: string | null; duty_date: string; checked_in: boolean; checked_in_at: string | null; note: string | null; };
+type MemberRow = { auth_uid: string; full_name: string; student_id: string; };
 
 export default function AdminDutyPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
-  const [duties, setDuties] = useState<DutyRow[]>([]);
+  const [duties, setDuties] = useState<DutyEntry[]>([]);
   const [members, setMembers] = useState<MemberRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [date, setDate] = useState(() => new Date().toISOString().split('T')[0]);
@@ -22,16 +22,22 @@ export default function AdminDutyPage() {
 
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
-  }, [authLoading, isAdmin, router]);
+  }, [authLoading, isAdmin]);
 
   useEffect(() => {
-    if (!authLoading && isAdmin) void load();
-  }, [authLoading, isAdmin, date]);
+    if (isAdmin) void load();
+  }, [isAdmin, date]);
+
+  async function getToken() {
+    const supabase = getBrowserSupabase();
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.access_token ?? null;
+  }
 
   async function load() {
     setLoading(true);
     try {
-      const token = await getAuthToken();
+      const token = await getToken();
       const h = { Authorization: `Bearer ${token ?? ''}` };
       const [dR, mR] = await Promise.all([
         fetch(`/api/admin/duty?date=${date}`, { headers: h }),
@@ -47,7 +53,7 @@ export default function AdminDutyPage() {
     if (!selected) { setError('กรุณาเลือกสมาชิก'); return; }
     setAdding(true); setError(null);
     try {
-      const token = await getAuthToken();
+      const token = await getToken();
       const m = members.find(x => x.auth_uid === selected);
       if (!m) throw new Error('ไม่พบสมาชิก');
       const res = await fetch('/api/admin/duty', {
@@ -65,7 +71,7 @@ export default function AdminDutyPage() {
 
   async function removeDuty(id: string, name: string) {
     if (!confirm(`ลบ "${name}" ออกจากเวรวันนี้?`)) return;
-    const token = await getAuthToken();
+    const token = await getToken();
     await fetch(`/api/admin/duty/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token ?? ''}` } });
     await load();
   }
@@ -79,52 +85,82 @@ export default function AdminDutyPage() {
     <AppShell pageTitle="จัดการเวรหน้าโรงเรียน">
       <div className="page-header">
         <div className="page-title">จัดการเวรยืนหน้าโรงเรียน</div>
+        <div className="page-subtitle">กำหนดรายชื่อผู้ปฏิบัติหน้าที่ประจำวัน</div>
       </div>
 
-      <div className="grid-2" style={{ marginBottom: 18 }}>
+      {/* Stats */}
+      <div className="grid-2" style={{ marginBottom: 16, maxWidth: 400 }}>
         <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
           <div className="stat-label">เช็คอินแล้ว</div>
           <div className="stat-value" style={{ color: 'var(--green)' }}>{checkedCount}</div>
-          <div className="stat-sub">คน</div>
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--amber)' }}>
-          <div className="stat-label">รวม</div>
-          <div className="stat-value" style={{ color: 'var(--amber)' }}>{duties.length}</div>
-          <div className="stat-sub">คน</div>
+          <div className="stat-label">รอเช็คอิน</div>
+          <div className="stat-value" style={{ color: 'var(--amber)' }}>{duties.length - checkedCount}</div>
         </div>
       </div>
 
-      <div className="card" style={{ marginBottom: 12 }}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input type="date" value={date} onChange={e => setDate(e.target.value)} />
-          <select value={selected} onChange={e => setSelected(e.target.value)}>
-            <option value="">เพิ่มสมาชิก...</option>
-            {members.map(m => <option key={m.auth_uid} value={m.auth_uid}>{m.full_name} {m.student_id ? `(${m.student_id})` : ''}</option>)}
-          </select>
-          <button onClick={addDuty} disabled={adding} className="btn btn-primary">เพิ่ม</button>
-        </div>
-      </div>
-
-      <div className="card">
-        {loading ? <div className="loading-center"><div className="spinner" /></div> : (
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>การกระทำ</th></tr></thead>
-              <tbody>
-                {duties.map((d, i) => (
-                  <tr key={d.id}>
-                    <td style={{ color: 'var(--text-3)' }}>{i + 1}</td>
-                    <td style={{ fontWeight: 700 }}>{d.student_name}</td>
-                    <td style={{ fontFamily: 'monospace' }}>{d.student_id ?? '—'}</td>
-                    <td>{d.checked_in ? <span className="badge badge-green">✓ มาแล้ว</span> : <span className="badge badge-gray">รอ</span>}</td>
-                    <td>
-                      <button onClick={() => removeDuty(d.id, d.student_name)} className="btn btn-sm">ลบ</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {/* Add duty */}
+      <div className="card" style={{ marginBottom: 16, maxWidth: 640 }}>
+        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>➕ เพิ่มรายชื่อเวร</div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div className="form-group" style={{ flex: '0 0 auto' }}>
+            <label className="form-label">วันที่</label>
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ width: 'auto' }} />
           </div>
+          <div className="form-group" style={{ flex: 1, minWidth: 200 }}>
+            <label className="form-label">สมาชิกที่จะเพิ่ม</label>
+            <select value={selected} onChange={e => setSelected(e.target.value)}>
+              <option value="">— เลือกสมาชิก —</option>
+              {members.map(m => (
+                <option key={m.auth_uid} value={m.auth_uid}>{m.full_name} ({m.student_id})</option>
+              ))}
+            </select>
+          </div>
+          <button onClick={addDuty} disabled={adding || !selected} className="btn btn-primary" style={{ flexShrink: 0 }}>
+            {adding ? 'กำลังเพิ่ม...' : '＋ เพิ่ม'}
+          </button>
+        </div>
+        {error && <div className="alert alert-error" style={{ marginTop: 10 }}>{error}</div>}
+      </div>
+
+      {/* Duty list */}
+      <div className="table-wrap" style={{ maxWidth: 800 }}>
+        <div style={{ padding: '12px 16px', background: 'var(--surface-2)', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontWeight: 700, fontSize: 14 }}>
+            เวรวันที่ {new Date(date + 'T00:00:00').toLocaleDateString('th-TH', { day: 'numeric', month: 'long', year: 'numeric' })}
+          </span>
+          <span className="badge badge-blue">{duties.length} คน</span>
+        </div>
+        {loading ? (
+          <div className="loading-center"><div className="spinner" /></div>
+        ) : duties.length === 0 ? (
+          <div className="empty-state"><div className="empty-icon">📋</div><div>ยังไม่มีรายชื่อเวรสำหรับวันนี้</div></div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลาเช็คอิน</th><th>หมายเหตุ</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {duties.map((d, i) => (
+                <tr key={d.id}>
+                  <td style={{ color: 'var(--text-3)' }}>{i + 1}</td>
+                  <td style={{ fontWeight: 600 }}>{d.student_name}</td>
+                  <td style={{ fontFamily: 'monospace' }}>{d.student_id}</td>
+                  <td>{d.checked_in ? <span className="badge badge-green">✓ มาแล้ว</span> : <span className="badge badge-gray">รอ</span>}</td>
+                  <td style={{ fontSize: 12.5, color: 'var(--text-3)' }}>
+                    {d.checked_in_at ? new Date(d.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.' : '—'}
+                  </td>
+                  <td style={{ fontSize: 12.5, color: 'var(--text-3)' }}>{d.note ?? '—'}</td>
+                  <td>
+                    <button onClick={() => removeDuty(d.id, d.student_name)} className="btn btn-danger btn-sm">ลบ</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
     </AppShell>

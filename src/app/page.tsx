@@ -1,11 +1,10 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { getAuthToken } from '@/lib/getAuthToken';
-import { subscribeTable } from '@/lib/realtime';
+import { getBrowserSupabase } from '@/lib/supabaseClient';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
 
@@ -26,139 +25,59 @@ type DutyEntry = {
 
 export default function HomePage() {
   const { user, isAdmin, isMember, loading: authLoading } = useAuth();
-
-  const [zones, setZones] = useState<ZoneSummary[]>(
+  const [zones, setZones] = useState < ZoneSummary[] > (
     ZONES.map(z => ({ zone: z, status: 'pending', inspector: null }))
   );
-  const [duties, setDuties] = useState<DutyEntry[]>([]);
+  const [duties, setDuties] = useState < DutyEntry[] > ([]);
   const [dataLoading, setDataLoading] = useState(true);
-
-  const [pendingCountLocal, setPendingCountLocal] = useState<number>(0);
-
-  // refs to avoid stale closure values in subscription callbacks
-  const isMemberRef = useRef(isMember);
-  const isAdminRef = useRef(isAdmin);
-  useEffect(() => { isMemberRef.current = isMember; }, [isMember]);
-  useEffect(() => { isAdminRef.current = isAdmin; }, [isAdmin]);
-
-  // --- initial public load (zones + duties) ---
+  const [pendingCount, setPendingCount] = useState(0);
+  
+  useEffect(() => { void loadPublicData(); }, []);
+  useEffect(() => { if (isAdmin) void loadAdminStats(); }, [isAdmin]);
+  
   async function loadPublicData() {
-    setDataLoading(true);
     try {
       const [zRes, dRes] = await Promise.allSettled([
         fetch('/api/public/zones/today'),
         fetch('/api/public/duty/today'),
       ]);
       if (zRes.status === 'fulfilled' && zRes.value.ok) {
-        const zd = await zRes.value.json();
-        if (Array.isArray(zd)) setZones(zd);
+        const d = await zRes.value.json();
+        if (Array.isArray(d)) setZones(d);
       }
       if (dRes.status === 'fulfilled' && dRes.value.ok) {
-        const dd = await dRes.value.json();
-        if (Array.isArray(dd)) setDuties(dd);
+        const d = await dRes.value.json();
+        if (Array.isArray(d)) setDuties(d);
       }
     } catch {}
     setDataLoading(false);
   }
-
-  // --- admin stats loader (one-time initial fetch) ---
+  
   async function loadAdminStats() {
     try {
-      const token = await getAuthToken();
+      const supabase = getBrowserSupabase();
+      const { data: sess } = await supabase.auth.getSession();
+      const token = sess?.session?.access_token;
       if (!token) return;
-      const res = await fetch('/api/admin/requests', { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch('/api/admin/requests', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       if (res.ok) {
         const data = await res.json();
-        setPendingCountLocal(Array.isArray(data) ? data.length : 0);
+        setPendingCount(Array.isArray(data) ? data.length : 0);
       }
     } catch {}
   }
-
-  // initial mount: load public data immediately
-  useEffect(() => {
-    void loadPublicData();
-  }, []);
-
-  // when auth is decided (either logged in or not), set up realtime subscriptions
-  useEffect(() => {
-    if (authLoading) return; // wait until auth ready
-
-    // If admin, load admin stats initial
-    if (isAdmin) void loadAdminStats();
-
-    // Subscribe to duties changes -> update duties (refetch public duty endpoint for authoritative data)
-    const unsubDuty = subscribeTable('council_duties', (payload: any) => {
-      // On any change to duties, refetch the public duty endpoint.
-      // This ensures we show the latest authoritative list and keep logic simple.
-      void (async () => {
-        try {
-          const res = await fetch('/api/public/duty/today');
-          if (res.ok) {
-            const arr = await res.json();
-            if (Array.isArray(arr)) setDuties(arr);
-          }
-        } catch {}
-      })();
-    }, { events: ['INSERT', 'UPDATE', 'DELETE'] });
-
-    // Subscribe to zones changes -> update zones (refetch public zones endpoint)
-    const unsubZones = subscribeTable('council_zone_checks', (payload: any) => {
-      void (async () => {
-        try {
-          const res = await fetch('/api/public/zones/today');
-          if (res.ok) {
-            const arr = await res.json();
-            if (Array.isArray(arr)) setZones(arr);
-          }
-        } catch {}
-      })();
-    }, { events: ['INSERT', 'UPDATE', 'DELETE'] });
-
-    // If admin, subscribe to requests to update pendingCount in real-time
-    let unsubRequests: (() => Promise<void> | void) | null = null;
-    if (isAdmin) {
-      // seed value already loaded by loadAdminStats() but keep local updates in realtime
-      unsubRequests = subscribeTable('council_requests', (payload: any) => {
-        const ev = payload.eventType ?? payload.type ?? payload.event;
-        if (ev === 'INSERT') {
-          setPendingCountLocal(c => c + 1);
-        } else if (ev === 'DELETE') {
-          setPendingCountLocal(c => Math.max(0, c - 1));
-        } else {
-          // update or unknown => best to refetch authoritative list
-          void (async () => {
-            try {
-              const token = await getAuthToken();
-              if (!token) return;
-              const res = await fetch('/api/admin/requests', { headers: { Authorization: `Bearer ${token}` } });
-              if (res.ok) {
-                const arr = await res.json();
-                setPendingCountLocal(Array.isArray(arr) ? arr.length : 0);
-              }
-            } catch {}
-          })();
-        }
-      }, { events: ['INSERT', 'UPDATE', 'DELETE'] });
-    }
-
-    // cleanup
-    return () => {
-      try { if (unsubDuty) unsubDuty(); } catch {}
-      try { if (unsubZones) unsubZones(); } catch {}
-      try { if (unsubRequests) unsubRequests(); } catch {}
-    };
-  }, [authLoading, isAdmin]);
-
-  // derived stats
+  
   const cleanCount = zones.filter(z => z.status === 'clean').length;
   const dirtyCount = zones.filter(z => z.status === 'dirty').length;
   const pendingZone = zones.filter(z => z.status === 'pending').length;
   const dutyChecked = duties.filter(d => d.checked_in).length;
   const myDuty = user ? duties.find(d => d.auth_uid === user.auth_uid) : null;
-
-  // Pass pendingCountLocal to AppShell so header badge is realtime
+  
   return (
-    <AppShell pageTitle="หน้าหลัก" pendingCount={pendingCountLocal}>
+    <AppShell pageTitle="หน้าหลัก" pendingCount={pendingCount}>
+
       {/* Guest banner */}
       {!isMember && !authLoading && (
         <div style={{
@@ -205,10 +124,10 @@ export default function HomePage() {
       )}
 
       {/* Admin alert */}
-      {isAdmin && pendingCountLocal > 0 && (
+      {isAdmin && pendingCount > 0 && (
         <Link href="/admin/requests" style={{ textDecoration: 'none', display: 'block', marginBottom: 16 }}>
           <div className="alert alert-warning" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>⚠️ มีคำขอสมัครรอพิจารณา <strong>{pendingCountLocal} รายการ</strong></span>
+            <span>⚠️ มีคำขอสมัครรอพิจารณา <strong>{pendingCount} รายการ</strong></span>
             <span style={{ fontWeight: 700, fontSize: 13 }}>ดูทั้งหมด →</span>
           </div>
         </Link>
@@ -236,7 +155,7 @@ export default function HomePage() {
             <Link href="/submit" className="action-card">
               <div className="action-icon" style={{ background: '#f5f3ff' }}>📁</div>
               <div>
-                <div className="action-title">ส���งข้อมูล/เอกสาร</div>
+                <div className="action-title">ส่งข้อมูล/เอกสาร</div>
                 <div className="action-desc">อัปโหลดเอกสารสำหรับสภา</div>
               </div>
             </Link>
@@ -247,7 +166,7 @@ export default function HomePage() {
                   <div className="action-title">แผงแอดมิน</div>
                   <div className="action-desc">จัดการสมาชิกและระบบ</div>
                 </div>
-                {pendingCountLocal > 0 && <span className="badge badge-red">{pendingCountLocal} รายการรอ</span>}
+                {pendingCount > 0 && <span className="badge badge-red">{pendingCount} รายการรอ</span>}
               </Link>
             )}
           </div>
@@ -346,6 +265,7 @@ export default function HomePage() {
           </div>
         </div>
       )}
+
     </AppShell>
   );
 }

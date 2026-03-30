@@ -1,11 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { getBrowserSupabase } from '@/lib/supabaseClient';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
-import { getAuthToken } from '@/lib/getAuthToken';
 
 const ZONES = ['ม.1/1','ม.1/2','ม.2/1','ม.2/2','ม.3/1','ม.3/2','ม.4','ม.5','ม.6'];
 type ZStatus = 'pending'|'clean'|'dirty';
@@ -41,7 +41,9 @@ export default function ZoneCheckPage() {
     if (!toSend.length) { setError('กรุณาตรวจอย่างน้อย 1 เขต'); return; }
     setSubmitting(true); setError(null);
     try {
-      const token = await getAuthToken();
+      const supabase = getBrowserSupabase();
+      const { data: sess } = await supabase.auth.getSession();
+      const token = sess?.session?.access_token;
       if (!token) throw new Error('กรุณาเข้าสู่ระบบก่อน');
       for (const zone of toSend) {
         const z = zones[zone];
@@ -65,17 +67,23 @@ export default function ZoneCheckPage() {
 
   const checked = ZONES.filter(z => zones[z].status !== 'pending').length;
 
-  // Redirect to login if not member (but wait for auth to be decided)
-  useEffect(() => {
-    if (!authLoading && !isMember) {
-      router.replace('/login');
-    }
-  }, [authLoading, isMember, router]);
+  if (!authLoading && !isMember) {
+    return (
+      <AppShell pageTitle="ตรวจเขตสะอาด">
+        <div className="card" style={{ textAlign: 'center', padding: '48px 24px' }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>🔒</div>
+          <h2 style={{ marginBottom: 8 }}>ต้องเข้าสู่ระบบก่อน</h2>
+          <p style={{ color: 'var(--text-3)', marginBottom: 20 }}>เฉพาะสมาชิกสภาเท่านั้นที่สามารถบันทึกผลการตรวจได้</p>
+          <Link href="/login" className="btn btn-primary">เข้าสู่ระบบ</Link>
+        </div>
+      </AppShell>
+    );
+  }
 
   return (
     <AppShell pageTitle="ตรวจเขตสะอาด">
       <div className="page-header">
-        <div className="page-title">ตรวจเขตสะ���าด</div>
+        <div className="page-title">ตรวจเขตสะอาด</div>
         <div className="page-subtitle">แตะ ✅ หรือ ❌ ต่อเขต — ขยายเพื่อใส่หมายเหตุและแนบรูป</div>
       </div>
 

@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useState, useEffect } from 'react';
-import { subscribeTable } from '@/lib/realtime';
 
 type NavItem = {
   href: string;
@@ -35,7 +34,6 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   const router = useRouter();
   const { user, isAdmin, isMember, loading, signOut } = useAuth();
   const [today, setToday] = useState('');
-  const [pendingCountLocal, setPendingCountLocal] = useState<number>(0);
 
   useEffect(() => {
     setToday(new Date().toLocaleDateString('th-TH', {
@@ -43,84 +41,26 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
     }));
   }, []);
 
-  // realtime: subscribe to council_requests (or the admin request table) to update badge count
-  useEffect(() => {
-    if (loading || !isAdmin) return;
-    let unsub: (() => Promise<void> | void) | null = null;
-
-    // initial fetch (best-effort) to seed count — optional; pages may pass pendingCount prop
-    (async () => {
-      try {
-        const res = await fetch('/api/admin/requests'); // reuse API for initial value
-        if (res.ok) {
-          const arr = await res.json();
-          setPendingCountLocal(Array.isArray(arr) ? arr.length : 0);
-        }
-      } catch {}
-    })();
-
-    unsub = subscribeTable('council_requests', (p) => {
-      // Postgres changes payload has eventType and record
-      // payload.record may be the new row or old, depending on event
-      // Simpler: increment/decrement based on event
-      const ev = p.eventType ?? p.type ?? (p?.commit ? 'UPDATE' : null);
-      if (!ev) {
-        // fallback: refetch list size
-        (async () => {
-          try {
-            const res = await fetch('/api/admin/requests');
-            if (res.ok) {
-              const arr = await res.json();
-              setPendingCountLocal(Array.isArray(arr) ? arr.length : 0);
-            }
-          } catch {}
-        })();
-        return;
-      }
-      if (ev === 'INSERT') setPendingCountLocal(c => c + 1);
-      else if (ev === 'DELETE') setPendingCountLocal(c => Math.max(0, c - 1));
-      else {
-        // UPDATE -> best to refetch
-        (async () => {
-          try {
-            const res = await fetch('/api/admin/requests');
-            if (res.ok) {
-              const arr = await res.json();
-              setPendingCountLocal(Array.isArray(arr) ? arr.length : 0);
-            }
-          } catch {}
-        })();
-      }
-    }, { events: ['INSERT','UPDATE','DELETE'] });
-
-    return () => {
-      if (unsub) unsub();
-    };
-  }, [loading, isAdmin]);
-
-  const effectivePendingCount = typeof pendingCount === 'number' ? pendingCount : pendingCountLocal;
-
-  // nav decisions while loading: avoid flash
-  const navItems = !loading ? (isMember ? NAV_MEMBER : NAV_PUBLIC) : [];
-  const adminItems: NavItem[] = !loading && isAdmin ? [
-    { href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: effectivePendingCount || undefined },
+  const navItems = isMember ? NAV_MEMBER : NAV_PUBLIC;
+  const adminItems: NavItem[] = isAdmin ? [
+    { href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined },
   ] : [];
 
   const allItems = [...navItems, ...adminItems];
 
   // Bottom nav items (max 5)
-  const bottomItems: NavItem[] = !loading && isMember
+  const bottomItems: NavItem[] = isMember
     ? [
         { href: '/', icon: '🏠', label: 'หน้าหลัก' },
         { href: '/zone-check', icon: '🧹', label: 'ตรวจเขต' },
         { href: '/duty', icon: '🏫', label: 'เวรยืน' },
         { href: '/submit', icon: '📁', label: 'ส่งข้อมูล' },
-        ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: effectivePendingCount || undefined }] : []),
+        ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined }] : []),
       ].slice(0, 5)
-    : (!loading ? [
+    : [
         { href: '/', icon: '🏠', label: 'หน้าหลัก' },
         { href: '/login', icon: '🔑', label: 'เข้าสู่ระบบ' },
-      ] : []);
+      ];
 
   const initials = user?.full_name
     ? user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()
@@ -129,17 +69,6 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   async function handleSignOut() {
     await signOut();
     router.push('/');
-  }
-
-  // Small helper to render a lightweight skeleton while auth is deciding
-  function SidebarSkeleton() {
-    return (
-      <div style={{ padding: 12 }}>
-        <div style={{ height: 24, width: 120, background: 'linear-gradient(90deg,#eee,#f6f6f6)', borderRadius: 6, marginBottom: 12 }} />
-        <div style={{ height: 12, width: 80, background: '#eee', borderRadius: 6, marginBottom: 8 }} />
-        <div style={{ height: 12, width: 100, background: '#eee', borderRadius: 6, marginBottom: 8 }} />
-      </div>
-    );
   }
 
   return (
@@ -157,26 +86,26 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
 
         {/* Main nav */}
         <div className="sidebar-section">
-          {!loading && !isMember && <div className="sidebar-section-label">เมนู</div>}
-          {!loading && isMember && <div className="sidebar-section-label">เมนูหลัก</div>}
-          {loading ? (
-            <SidebarSkeleton />
-          ) : (
-            navItems.map(item => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`sidebar-nav-item${pathname === item.href ? ' active' : ''}`}
-              >
-                <span className="nav-icon">{item.icon}</span>
-                <span>{item.label}</span>
-              </Link>
-            ))
+          {!isMember && (
+            <div className="sidebar-section-label">เมนู</div>
           )}
+          {isMember && (
+            <div className="sidebar-section-label">เมนูหลัก</div>
+          )}
+          {navItems.map(item => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`sidebar-nav-item${pathname === item.href ? ' active' : ''}`}
+            >
+              <span className="nav-icon">{item.icon}</span>
+              <span>{item.label}</span>
+            </Link>
+          ))}
         </div>
 
         {/* Admin section */}
-        {!loading && isAdmin && (
+        {isAdmin && (
           <div className="sidebar-section">
             <div className="sidebar-section-label">ผู้ดูแลระบบ</div>
             <Link
@@ -185,7 +114,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             >
               <span className="nav-icon">⚙️</span>
               <span>แอดมิน</span>
-              {effectivePendingCount > 0 && <span className="nav-badge">{effectivePendingCount}</span>}
+              {pendingCount > 0 && <span className="nav-badge">{pendingCount}</span>}
             </Link>
             <Link href="/admin/users" className={`sidebar-nav-item${pathname === '/admin/users' ? ' active' : ''}`}>
               <span className="nav-icon">👥</span>
@@ -194,7 +123,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             <Link href="/admin/requests" className={`sidebar-nav-item${pathname === '/admin/requests' ? ' active' : ''}`}>
               <span className="nav-icon">📬</span>
               <span>คำขอสมัคร</span>
-              {effectivePendingCount > 0 && <span className="nav-badge">{effectivePendingCount}</span>}
+              {pendingCount > 0 && <span className="nav-badge">{pendingCount}</span>}
             </Link>
             <Link href="/admin/duty" className={`sidebar-nav-item${pathname === '/admin/duty' ? ' active' : ''}`}>
               <span className="nav-icon">📋</span>
@@ -213,15 +142,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
 
         {/* Footer: user info or login */}
         <div className="sidebar-footer">
-          {loading ? (
-            <div style={{ padding: '8px 12px' }}>
-              <div style={{ height: 36, width: 36, borderRadius: 18, background: '#eee', display: 'inline-block', marginRight: 8 }} />
-              <div style={{ display: 'inline-block', verticalAlign: 'top' }}>
-                <div style={{ height: 12, width: 120, background: '#eee', borderRadius: 6 }} />
-                <div style={{ height: 10, width: 80, background: '#f5f5f5', borderRadius: 6, marginTop: 6 }} />
-              </div>
-            </div>
-          ) : user ? (
+          {loading ? null : user ? (
             <>
               <div className="sidebar-user">
                 <div className="sidebar-avatar">{initials}</div>
@@ -255,9 +176,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {loading ? (
-              <div style={{ width: 28, height: 28, background: '#eee', borderRadius: 14 }} />
-            ) : user ? (
+            {user ? (
               <div style={{ width: 28, height: 28, background: 'var(--brand-light)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 12 }}>
                 {initials}
               </div>
@@ -274,9 +193,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             {today && <span className="topbar-date">{today}</span>}
           </div>
           <div className="topbar-user">
-            {loading ? (
-              <div style={{ height: 40, width: 160, background: '#f5f5f5', borderRadius: 6 }} />
-            ) : user ? (
+            {loading ? null : user ? (
               <>
                 <div style={{ textAlign: 'right' }}>
                   <div className="topbar-user-name">{user.full_name}</div>

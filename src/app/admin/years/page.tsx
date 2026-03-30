@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { getAuthToken } from '@/lib/getAuthToken';
+import { getBrowserSupabase } from '@/lib/supabaseClient';
 
 type YearRow = { year: number; closed: boolean; };
 
@@ -20,17 +20,22 @@ export default function AdminYearsPage() {
 
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
-  }, [authLoading, isAdmin, router]);
-
-  // load when auth ready and admin
-  useEffect(() => {
-    if (!authLoading && isAdmin) void load();
   }, [authLoading, isAdmin]);
+
+  useEffect(() => {
+    if (isAdmin) void load();
+  }, [isAdmin]);
+
+  async function getToken() {
+    const supabase = getBrowserSupabase();
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.access_token ?? null;
+  }
 
   async function load() {
     setLoading(true);
     try {
-      const token = await getAuthToken();
+      const token = await getToken();
       const res = await fetch('/api/admin/years', { headers: { Authorization: `Bearer ${token ?? ''}` } });
       setYears(res.ok ? await res.json() : []);
     } catch {}
@@ -43,7 +48,7 @@ export default function AdminYearsPage() {
     if (years.some(yr => yr.year === y)) { setError('ปีนี้มีอยู่ในระบบแล้ว'); return; }
     setAdding(true); setError(null); setSuccess(null);
     try {
-      const token = await getAuthToken();
+      const token = await getToken();
       const res = await fetch('/api/admin/years', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
@@ -59,7 +64,7 @@ export default function AdminYearsPage() {
   }
 
   async function toggleClose(year: number, closed: boolean) {
-    const token = await getAuthToken();
+    const token = await getToken();
     await fetch(`/api/admin/years/${year}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
@@ -78,34 +83,102 @@ export default function AdminYearsPage() {
     <AppShell pageTitle="ปีการศึกษา">
       <div className="page-header">
         <div className="page-title">จัดการปีการศึกษา</div>
+        <div className="page-subtitle">ระบบเก็บข้อมูลสมาชิก <strong>3 ปีล่าสุด</strong> — ปีที่เก่ากว่าจะถูก archive อัตโนมัติ</div>
       </div>
 
-      <div className="card">
-        <div style={{ padding: 14, display: 'flex', gap: 12, alignItems: 'center' }}>
-          <input value={newYear} onChange={e => setNewYear(e.target.value)} placeholder="ปีการศึกษา (เช่น 2026)" />
-          <button onClick={addYear} disabled={adding} className="btn btn-primary">เพิ่มปี</button>
+      {/* Retention policy visual */}
+      <div className="card" style={{ marginBottom: 18, background: 'var(--blue-bg)', border: '1.5px solid var(--blue)' }}>
+        <div style={{ fontWeight: 700, fontSize: 13.5, color: 'var(--blue)', marginBottom: 12 }}>
+          📊 นโยบาย 3-Year Retention
         </div>
-        {error && <div className="alert alert-error" style={{ margin: 12 }}>{error}</div>}
-        {success && <div className="alert alert-success" style={{ margin: 12 }}>{success}</div>}
-        <div style={{ padding: 14 }}>
-          <table style={{ width: '100%' }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {sorted.length === 0 ? (
+            <span style={{ fontSize: 13, color: 'var(--text-3)' }}>ยังไม่มีปีการศึกษา</span>
+          ) : sorted.map((y, i) => (
+            <div key={y.year} style={{
+              padding: '7px 14px', borderRadius: 'var(--r)',
+              background: i < 3 ? 'var(--green-bg)' : 'var(--red-bg)',
+              border: `1.5px solid ${i < 3 ? '#86efac' : '#fca5a5'}`,
+              fontWeight: 700, fontSize: 13.5,
+              color: i < 3 ? 'var(--green)' : 'var(--red)',
+              display: 'flex', alignItems: 'center', gap: 6,
+            }}>
+              {i === 0 && '⭐'} ปี {y.year}
+              <span style={{ fontSize: 11, fontWeight: 500 }}>{i < 3 ? `✓ เก็บ (${i + 1}/3)` : 'archive'}</span>
+            </div>
+          ))}
+        </div>
+        {sorted.length > 3 && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--blue)' }}>
+            ⚠️ รัน <code>SELECT council_enforce_three_latest_years();</code> เพื่อ archive ปีเก่า
+          </div>
+        )}
+      </div>
+
+      {/* Add year */}
+      <div className="card" style={{ marginBottom: 18, maxWidth: 480 }}>
+        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>➕ เพิ่มปีการศึกษาใหม่</div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div className="form-group" style={{ flex: 1 }}>
+            <label className="form-label">ปีการศึกษา (พ.ศ.)</label>
+            <input
+              value={newYear}
+              onChange={e => setNewYear(e.target.value)}
+              placeholder="เช่น 68"
+              inputMode="numeric"
+              onKeyDown={e => e.key === 'Enter' && addYear()}
+            />
+          </div>
+          <button onClick={addYear} disabled={adding || !newYear} className="btn btn-primary" style={{ alignSelf: 'flex-end', flexShrink: 0 }}>
+            {adding ? '...' : 'เพิ่มปี'}
+          </button>
+        </div>
+        {error && <div className="alert alert-error" style={{ marginTop: 10 }}>{error}</div>}
+        {success && <div className="alert alert-success" style={{ marginTop: 10 }}>{success}</div>}
+      </div>
+
+      {/* Year list */}
+      <div className="table-wrap" style={{ maxWidth: 640 }}>
+        {loading ? (
+          <div className="loading-center"><div className="spinner" /></div>
+        ) : sorted.length === 0 ? (
+          <div className="empty-state"><div className="empty-icon">📅</div><div>ยังไม่มีปีการศึกษา</div></div>
+        ) : (
+          <table>
             <thead>
-              <tr><th>ปี</th><th>สถานะ</th><th>การกระทำ</th></tr>
+              <tr>
+                <th>ปีการศึกษา</th>
+                <th>สถานะ</th>
+                <th>Retention</th>
+                <th>การดำเนินการ</th>
+              </tr>
             </thead>
             <tbody>
-              {sorted.map(y => (
+              {sorted.map((y, i) => (
                 <tr key={y.year}>
-                  <td style={{ fontWeight: 700 }}>{y.year}</td>
-                  <td>{y.closed ? <span className="badge badge-gray">ปิดแล้ว</span> : <span className="badge badge-green">เปิด</span>}</td>
+                  <td style={{ fontWeight: 700, fontSize: 16 }}>
+                    {i === 0 && <span style={{ marginRight: 5 }}>⭐</span>}ปี {y.year}
+                  </td>
                   <td>
-                    <button onClick={() => toggleClose(y.year, y.closed)} className="btn btn-sm">{y.closed ? 'เปิด' : 'ปิด'}</button>
-                    {!retained.includes(y.year) && <button onClick={() => {/* optional delete */}} className="btn btn-sm" style={{ marginLeft: 8 }}>ลบ</button>}
+                    {y.closed
+                      ? <span className="badge badge-red">ปิดแล้ว</span>
+                      : <span className="badge badge-green">เปิดใช้งาน</span>}
+                  </td>
+                  <td>
+                    {retained.includes(y.year)
+                      ? <span className="badge badge-green">✓ เก็บไว้ ({i + 1}/3)</span>
+                      : <span className="badge badge-amber">จะถูก archive</span>}
+                  </td>
+                  <td>
+                    <button onClick={() => toggleClose(y.year, y.closed)} className={`btn btn-sm ${y.closed ? 'btn-success' : 'btn-ghost'}`}>
+                      {y.closed ? 'เปิดอีกครั้ง' : 'ปิดปีนี้'}
+                    </button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        )}
       </div>
     </AppShell>
   );
