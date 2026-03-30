@@ -1,10 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { getBrowserSupabase } from '@/lib/supabaseClient';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
+import { getAuthToken } from '@/lib/getAuthToken';
 
 type DutyEntry = { id: string; student_name: string; student_id: string; checked_in: boolean; checked_in_at: string|null; note: string|null; auth_uid: string; };
 
@@ -17,18 +17,17 @@ export default function DutyPage() {
   const [error, setError] = useState<string|null>(null);
   const [success, setSuccess] = useState<string|null>(null);
 
-  useEffect(() => { void load(); }, []);
-
-  async function getToken() {
-    const supabase = getBrowserSupabase();
-    const { data } = await supabase.auth.getSession();
-    return data?.session?.access_token ?? null;
-  }
+  // Wait for auth to be ready before loading; also reload when user changes (sign in/out)
+  useEffect(() => {
+    if (!authLoading) {
+      void load();
+    }
+  }, [authLoading, user?.auth_uid]);
 
   async function load() {
     setLoading(true);
     try {
-      const token = await getToken();
+      const token = await getAuthToken();
       const res = await fetch('/api/council/duty/today', { headers: token ? { Authorization: `Bearer ${token}` } : {} });
       if (res.ok) setDuties(await res.json() || []);
     } catch {}
@@ -41,7 +40,7 @@ export default function DutyPage() {
   async function handleCheckIn() {
     setCheckingIn(true); setError(null); setSuccess(null);
     try {
-      const token = await getToken();
+      const token = await getAuthToken();
       if (!token) throw new Error('กรุณาเข้าสู่ระบบก่อน');
       const res = await fetch('/api/council/duty/checkin', {
         method: 'POST',

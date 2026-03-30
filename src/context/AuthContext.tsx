@@ -5,6 +5,7 @@ import {
   useState, useCallback, useRef, ReactNode,
 } from 'react';
 import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
+import { setLastActive, clearLastActive, isLastActiveExpired } from '@/lib/sessionActivity';
 
 export type UserProfile = {
   auth_uid: string;
@@ -70,20 +71,16 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserProfile | null>(null);
-  // ป้องกัน race condition กรณีมีหลาย fetchUser ทำงานพร้อมกัน
+  // prevent race condition when multiple fetchUser run concurrently
   const fetchCountRef = useRef(0);
 
-  /**
-   * ใช้ getSession() แทน getUser() เพื่ออ่านจาก localStorage โดยตรง
-   * ไม่ต้องทำ network request — เร็วกว่าและไม่ fail เพราะ network
-   */
   const fetchUser = useCallback(async () => {
     const id = ++fetchCountRef.current;
     try {
       if (typeof window === 'undefined') return;
       const supabase = getBrowserSupabase();
 
-      // getSession() อ่านจาก localStorage/memory — ไม่ทำ network call
+      // Use getSession() (reads from localStorage) — no network required
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
 
       if (sessionError || !session?.user) {
@@ -91,13 +88,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      // If lastActivity expired, force signOut (don't treat as logged-in)
+      if (isLastActiveExpired()) {
+        try { await supabase.auth.signOut(); } catch {}
+        clearLastActive();
+        if (id === fetchCountRef.current) setUser(null);
+        return;
+      }
+
       const row = await queryCouncilUser(session.user.id);
 
-      // ตรวจว่าเป็น request ล่าสุด (ป้องกัน stale update)
-      if (id !== fetchCountRef.current) return;
+      if (id !== fetchCountRef.current) return; // prevent stale write
 
       if (row && row.approved && !row.disabled) {
         setUser(row as UserProfile);
+        // mark this browser as active now
+        setLastActive();
       } else {
         setUser(null);
       }
@@ -119,6 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {}
     setUser(null);
     resetBrowserSupabase();
+    clearLastActive();
   }, []);
 
   useEffect(() => {
@@ -126,11 +133,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const supabase = getBrowserSupabase();
 
-    /**
-     * onAuthStateChange จะ fire "INITIAL_SESSION" ทันทีที่ client เริ่มต้น
-     * ซึ่งจะ restore session จาก localStorage ให้อัตโนมัติ
-     * นี่คือจุดหลักที่ handle page refresh
-     */
+    // onAuthStateChange fires INITIAL_SESSION on init (restores session from localStorage)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
         if (!mounted) return;
@@ -141,6 +144,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           event === 'TOKEN_REFRESHED' ||
           event === 'USER_UPDATED'
         ) {
+          // If session exists but lastActive expired -> signOut
+          if (session?.user && isLastActiveExpired()) {
+            try { await supabase.auth.signOut(); } catch {}
+            clearLastActive();
+            setUser(null);
+            setLoading(false);
+            return;
+          }
+
           if (session?.user) {
             await fetchUser();
           } else {
@@ -150,13 +162,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } else if (event === 'SIGNED_OUT') {
           setUser(null);
           setLoading(false);
+          clearLastActive();
         }
       }
     );
 
+    // Activity listeners: keep updating lastActive while user interacts with the site
+    const updateActive = () => setLastActive();
+    const visibilityHandler = () => {
+      if (document.visibilityState === 'visible') setLastActive();
+    };
+    window.addEventListener('mousemove', updateActive, { passive: true });
+    window.addEventListener('click', updateActive, { passive: true });
+    window.addEventListener('keydown', updateActive, { passive: true });
+    window.addEventListener('visibilitychange', visibilityHandler);
+
     return () => {
       mounted = false;
       subscription?.unsubscribe();
+      window.removeEventListener('mousemove', updateActive);
+      window.removeEventListener('click', updateActive);
+      window.removeEventListener('keydown', updateActive);
+      window.removeEventListener('visibilitychange', visibilityHandler);
     };
   }, [fetchUser]);
 
