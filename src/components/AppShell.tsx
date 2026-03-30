@@ -10,17 +10,17 @@ type NavItem = {
   icon: string;
   label: string;
   badge?: number;
+  minRole?: 'member' | 'admin';
 };
 
 const NAV_PUBLIC: NavItem[] = [
   { href: '/', icon: '🏠', label: 'หน้าหลัก' },
 ];
-
 const NAV_MEMBER: NavItem[] = [
   { href: '/', icon: '🏠', label: 'หน้าหลัก' },
-  { href: '/zone-check', icon: '🧹', label: 'ตรวจเขตสะอาด' },
-  { href: '/duty', icon: '🏫', label: 'เวรหน้าโรงเรียน' },
-  { href: '/submit', icon: '📁', label: 'ส่งข้อมูล' },
+  { href: '/zone-check', icon: '🧹', label: 'ตรวจเขตสะอาด', minRole: 'member' },
+  { href: '/duty', icon: '🏫', label: 'เวรหน้าโรงเรียน', minRole: 'member' },
+  { href: '/submit', icon: '📁', label: 'ส่งข้อมูล', minRole: 'member' },
 ];
 
 type Props = {
@@ -32,8 +32,9 @@ type Props = {
 export default function AppShell({ children, pageTitle, pendingCount = 0 }: Props) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isAdmin, isMember, loading, signOut } = useAuth();
+  const { user, isAdmin, isMember, loading, signOut, authDiag, clearAuthDiag, refresh } = useAuth();
   const [today, setToday] = useState('');
+  const [diagOpen, setDiagOpen] = useState(false);
 
   useEffect(() => {
     setToday(new Date().toLocaleDateString('th-TH', {
@@ -41,30 +42,29 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
     }));
   }, []);
 
-  // ══════════════════════════════════════════════════════════════════
-  // ระหว่าง loading: ใช้ nav ว่างเปล่า ไม่แสดง public หรือ member
-  // เพื่อป้องกัน flash of unauthenticated content หลัง refresh
-  // ══════════════════════════════════════════════════════════════════
-  const navItems = loading ? [] : (isMember ? NAV_MEMBER : NAV_PUBLIC);
+  useEffect(() => {
+    if (authDiag) setDiagOpen(true);
+  }, [authDiag]);
 
-  const adminItems: NavItem[] = (!loading && isAdmin) ? [
+  const navItems = isMember ? NAV_MEMBER : NAV_PUBLIC;
+  const adminItems: NavItem[] = isAdmin ? [
     { href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined },
   ] : [];
 
-  const bottomItems: NavItem[] = loading
-    ? [] // ระหว่างโหลด: ไม่แสดงปุ่มใดเลย (ป้องกัน flash)
-    : isMember
-      ? [
-          { href: '/', icon: '🏠', label: 'หน้าหลัก' },
-          { href: '/zone-check', icon: '🧹', label: 'ตรวจเขต' },
-          { href: '/duty', icon: '🏫', label: 'เวรยืน' },
-          { href: '/submit', icon: '📁', label: 'ส่งข้อมูล' },
-          ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined }] : []),
-        ].slice(0, 5)
-      : [
-          { href: '/', icon: '🏠', label: 'หน้าหลัก' },
-          { href: '/login', icon: '🔑', label: 'เข้าสู่ระบบ' },
-        ];
+  const allItems = [...navItems, ...adminItems];
+
+  const bottomItems: NavItem[] = isMember
+    ? [
+        { href: '/', icon: '🏠', label: 'หน้าหลัก' },
+        { href: '/zone-check', icon: '🧹', label: 'ตรวจเขต' },
+        { href: '/duty', icon: '🏫', label: 'เวรยืน' },
+        { href: '/submit', icon: '📁', label: 'ส่งข้อมูล' },
+        ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined }] : []),
+      ].slice(0, 5)
+    : [
+        { href: '/', icon: '🏠', label: 'หน้าหลัก' },
+        { href: '/login', icon: '🔑', label: 'เข้าสู่ระบบ' },
+      ];
 
   const initials = user?.full_name
     ? user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()
@@ -75,190 +75,63 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
     router.push('/');
   }
 
+  const copyDiag = async () => {
+    if (!authDiag) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(authDiag, null, 2));
+      alert('คัดลอก diagnostics เป็น JSON เรียบร้อย — สามารถส่งให้ทีม dev ได้');
+    } catch {
+      alert('คัดลอกไม่สำเร็จ — โปรดคัดลอกด้วยมือ');
+    }
+  };
+
   return (
-    <div className="app-layout">
-      {/* ── Desktop Sidebar ── */}
-      <aside className="app-sidebar">
-        {/* Logo */}
-        <div className="sidebar-logo">
-          <Link href="/" style={{ textDecoration: 'none' }}>
-            <div className="sidebar-logo-badge">YPLABS</div>
-            <div className="sidebar-logo-title">สภานักเรียน</div>
-            <div className="sidebar-logo-sub">ร.ร. คำยางพิทยา</div>
-          </Link>
-        </div>
-
-        {/* Main nav */}
-        <div className="sidebar-section">
-          {loading ? (
-            // ระหว่างโหลด: แสดง skeleton แทน nav items
-            <div style={{ padding: '8px 9px' }}>
-              {[1, 2, 3].map(i => (
-                <div key={i} style={{
-                  height: 32, borderRadius: 'var(--r)',
-                  background: 'rgba(255,255,255,0.06)',
-                  marginBottom: 4,
-                }} />
-              ))}
-            </div>
-          ) : (
-            <>
-              <div className="sidebar-section-label">
-                {isMember ? 'เมนูหลัก' : 'เมนู'}
+    <div>
+      {/* Diagnostic banner — แสดงให้ทุกคนเห็นเมื่อมี authDiag */}
+      {authDiag && (
+        <div style={{ margin: 12 }}>
+          <div className="alert alert-error" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontSize: 13 }}>
+                <strong>เกิดปัญหาการกู้คืนการเข้าสู่ระบบ</strong> — {authDiag.message}
+                <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 6 }}>
+                  เวลา: {new Date(authDiag.time).toLocaleString()} {authDiag.code ? `· รหัส: ${authDiag.code}` : ''}
+                </div>
               </div>
-              {navItems.map(item => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`sidebar-nav-item${pathname === item.href ? ' active' : ''}`}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn" onClick={() => clearAuthDiag()}>ปิด</button>
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    try {
+                      await refresh();
+                    } catch (e) {
+                      // refresh จัดการ diag ใน context
+                    }
+                  }}
                 >
-                  <span className="nav-icon">{item.icon}</span>
-                  <span>{item.label}</span>
-                </Link>
-              ))}
-            </>
-          )}
-        </div>
+                  ลองใหม่
+                </button>
+                <button className="btn" onClick={() => setDiagOpen(o => !o)}>{diagOpen ? 'ซ่อน' : 'รายละเอียด'}</button>
+                <button className="btn btn-ghost" onClick={copyDiag}>คัดลอก</button>
+              </div>
+            </div>
 
-        {/* Admin section */}
-        {!loading && isAdmin && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-label">ผู้ดูแลระบบ</div>
-            <Link href="/admin" className={`sidebar-nav-item${pathname.startsWith('/admin') ? ' active' : ''}`}>
-              <span className="nav-icon">⚙️</span>
-              <span>แอดมิน</span>
-              {pendingCount > 0 && <span className="nav-badge">{pendingCount}</span>}
-            </Link>
-            <Link href="/admin/users" className={`sidebar-nav-item${pathname === '/admin/users' ? ' active' : ''}`}>
-              <span className="nav-icon">👥</span><span>จัดการบัญชี</span>
-            </Link>
-            <Link href="/admin/requests" className={`sidebar-nav-item${pathname === '/admin/requests' ? ' active' : ''}`}>
-              <span className="nav-icon">📬</span><span>คำขอสมัคร</span>
-              {pendingCount > 0 && <span className="nav-badge">{pendingCount}</span>}
-            </Link>
-            <Link href="/admin/duty" className={`sidebar-nav-item${pathname === '/admin/duty' ? ' active' : ''}`}>
-              <span className="nav-icon">📋</span><span>จัดการเวร</span>
-            </Link>
-            <Link href="/admin/zones" className={`sidebar-nav-item${pathname === '/admin/zones' ? ' active' : ''}`}>
-              <span className="nav-icon">📊</span><span>รายงานเขต</span>
-            </Link>
-            <Link href="/admin/years" className={`sidebar-nav-item${pathname === '/admin/years' ? ' active' : ''}`}>
-              <span className="nav-icon">📅</span><span>ปีการศึกษา</span>
-            </Link>
-          </div>
-        )}
-
-        {/* Footer */}
-        <div className="sidebar-footer">
-          {loading ? (
-            // skeleton
-            <div style={{ height: 48, borderRadius: 'var(--r)', background: 'rgba(255,255,255,0.06)' }} />
-          ) : user ? (
-            <>
-              <div className="sidebar-user">
-                <div className="sidebar-avatar">{initials}</div>
-                <div style={{ overflow: 'hidden', flex: 1 }}>
-                  <div className="sidebar-user-name">{user.full_name}</div>
-                  <div className="sidebar-user-role">
-                    {user.role === 'admin' ? '⭐ ผู้ดูแลระบบ' : 'สมาชิกสภา'} · ปี {user.year}
-                  </div>
+            {diagOpen && (
+              <div style={{ fontSize: 13, background: 'rgba(0,0,0,0.03)', padding: 10, borderRadius: 6, overflowX: 'auto' }}>
+                <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+{JSON.stringify(authDiag, null, 2)}
+                </pre>
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-3)' }}>
+                  หมายเหตุ: ข้อมูลบางอย่างถูกทำให้ปลอดภัย (token ถูก mask) — หากต้องการรายละเอียดเพิ่ม ให้พิจารณาบันทึก diagnostics ไปยัง endpoint ภายในสำหรับนักพัฒนาเท่านั้น
                 </div>
               </div>
-              <button className="sidebar-signout" onClick={handleSignOut}>
-                <span>↩</span> ออกจากระบบ
-              </button>
-            </>
-          ) : (
-            <Link href="/login" className="btn btn-gold btn-full" style={{ borderRadius: 'var(--r)', fontSize: 13 }}>
-              🔑 เข้าสู่ระบบ
-            </Link>
-          )}
-        </div>
-      </aside>
-
-      {/* ── Main content ── */}
-      <main className="app-main">
-        {/* Mobile topbar */}
-        <div className="app-topbar-mobile">
-          <div className="topbar-mobile-logo">
-            <span className="mobile-logo-badge">YPLABS</span>
-            <span className="mobile-logo-title">{pageTitle ?? 'สภานักเรียน'}</span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {loading ? (
-              <div className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }} />
-            ) : user ? (
-              <div style={{
-                width: 28, height: 28, background: 'var(--brand-light)', borderRadius: '50%',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: '#fff', fontWeight: 700, fontSize: 12,
-              }}>
-                {initials}
-              </div>
-            ) : (
-              <Link href="/login" className="btn btn-gold btn-sm">เข้าสู่ระบบ</Link>
             )}
           </div>
         </div>
+      )}
 
-        {/* Desktop topbar */}
-        <div className="app-topbar">
-          <div style={{ display: 'flex', flexDirection: 'column' }}>
-            <span className="topbar-title">{pageTitle ?? 'สภานักเรียน YPLABS'}</span>
-            {today && <span className="topbar-date">{today}</span>}
-          </div>
-          <div className="topbar-user">
-            {loading ? (
-              <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
-            ) : user ? (
-              <>
-                <div style={{ textAlign: 'right' }}>
-                  <div className="topbar-user-name">{user.full_name}</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                    {user.role === 'admin' ? '⭐ แอดมิน' : 'สมาชิก'} · ปี {user.year}
-                  </div>
-                </div>
-                <button onClick={handleSignOut} className="btn btn-ghost btn-sm">ออก</button>
-              </>
-            ) : (
-              <Link href="/login" className="btn btn-primary btn-sm">🔑 เข้าสู่ระบบ</Link>
-            )}
-          </div>
-        </div>
-
-        {/* Page content */}
-        <div className="app-content">
-          {children}
-        </div>
-      </main>
-
-      {/* ── Mobile Bottom Nav ── */}
-      <nav className="app-bottomnav">
-        {loading ? (
-          // ระหว่างโหลด: แสดง spinner กลาง bottom nav
-          <div style={{
-            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
-          </div>
-        ) : (
-          bottomItems.map(item => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`bottomnav-item${pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href)) ? ' active' : ''}`}
-            >
-              <span className="bottomnav-icon" style={{ position: 'relative' }}>
-                {item.icon}
-                {item.badge ? (
-                  <span className="bottomnav-badge">{item.badge}</span>
-                ) : null}
-              </span>
-              <span>{item.label}</span>
-            </Link>
-          ))
-        )}
-      </nav>
+      {children}
     </div>
   );
 }
