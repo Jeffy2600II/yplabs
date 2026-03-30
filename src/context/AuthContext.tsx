@@ -39,6 +39,7 @@ export function useAuth() {
   return useContext(AuthContext);
 }
 
+/** Query council_users พร้อม retry สำหรับ schema cache error */
 async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | null> {
   const supabase = getBrowserSupabase();
   const { data: row, error } = await supabase
@@ -48,6 +49,7 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
     .limit(1)
     .maybeSingle();
 
+  // "Database error querying schema" → รีเซ็ต client แล้ว retry สูงสุด 3 ครั้ง
   if (error) {
     const isSchemaError =
       error.message?.includes('schema') ||
@@ -56,8 +58,8 @@ async function queryCouncilUser(authUid: string, attempt = 0): Promise<any | nul
       error.code === '42P01';
 
     if (isSchemaError && attempt < 3) {
-      resetBrowserSupabase();
-      await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+      resetBrowserSupabase(); // ทิ้ง stale client
+      await new Promise(r => setTimeout(r, 300 * (attempt + 1))); // backoff
       return queryCouncilUser(authUid, attempt + 1);
     }
     return null;
@@ -70,9 +72,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserProfile | null>(null);
 
-  const fetchUser = useCallback(async (uid: string) => {
+  const fetchUser = useCallback(async () => {
     try {
-      const row = await queryCouncilUser(uid);
+      if (typeof window === 'undefined') return;
+      const supabase = getBrowserSupabase();
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+
+      if (authError || !authData?.user) {
+        setUser(null);
+        return;
+      }
+
+      const row = await queryCouncilUser(authData.user.id);
+
       if (row && row.approved && !row.disabled) {
         setUser(row as UserProfile);
       } else {
@@ -85,17 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    try {
-      const supabase = getBrowserSupabase();
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        await fetchUser(session.user.id);
-      } else {
-        setUser(null);
-      }
-    } catch {
-      setUser(null);
-    }
+    await fetchUser();
     setLoading(false);
   }, [fetchUser]);
 
@@ -105,42 +107,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await supabase.auth.signOut();
     } catch {}
     setUser(null);
-    resetBrowserSupabase();
+    resetBrowserSupabase(); // ล้าง singleton หลัง sign out
   }, []);
 
   useEffect(() => {
     let mounted = true;
+    (async () => {
+      await fetchUser();
+      if (mounted) setLoading(false);
+    })();
 
-    const supabase = getBrowserSupabase();
-
-    // onAuthStateChange เป็น single source of truth
-    // INITIAL_SESSION = ยิงทันทีตอน mount ถ้ามี session ใน localStorage
-    // ทำให้ไม่มี race condition และ loading จะถูก set เป็น false เสมอ
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (!mounted) return;
-
-        if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setLoading(false);
-          return;
-        }
-
-        // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED
-        if (session?.user) {
-          await fetchUser(session.user.id);
-        } else {
-          setUser(null);
-        }
-
-        // loading จะถูก set เป็น false หลังจาก event แรกเสมอ
-        if (mounted) setLoading(false);
-      }
-    );
+    let sub: any;
+    try {
+      const supabase = getBrowserSupabase();
+      const { data } = supabase.auth.onAuthStateChange(async (event) => {
+        if (event === 'SIGNED_IN') await fetchUser();
+        else if (event === 'SIGNED_OUT') setUser(null);
+      });
+      sub = data.subscription;
+    } catch {}
 
     return () => {
       mounted = false;
-      subscription.unsubscribe();
+      sub?.unsubscribe?.();
     };
   }, [fetchUser]);
 
