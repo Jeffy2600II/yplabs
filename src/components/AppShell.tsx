@@ -10,17 +10,17 @@ type NavItem = {
   icon: string;
   label: string;
   badge?: number;
-  minRole?: 'member' | 'admin';
 };
 
 const NAV_PUBLIC: NavItem[] = [
   { href: '/', icon: '🏠', label: 'หน้าหลัก' },
 ];
+
 const NAV_MEMBER: NavItem[] = [
   { href: '/', icon: '🏠', label: 'หน้าหลัก' },
-  { href: '/zone-check', icon: '🧹', label: 'ตรวจเขตสะอาด', minRole: 'member' },
-  { href: '/duty', icon: '🏫', label: 'เวรหน้าโรงเรียน', minRole: 'member' },
-  { href: '/submit', icon: '📁', label: 'ส่งข้อมูล', minRole: 'member' },
+  { href: '/zone-check', icon: '🧹', label: 'ตรวจเขตสะอาด' },
+  { href: '/duty', icon: '🏫', label: 'เวรหน้าโรงเรียน' },
+  { href: '/submit', icon: '📁', label: 'ส่งข้อมูล' },
 ];
 
 type Props = {
@@ -41,26 +41,26 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
     }));
   }, []);
 
-  const navItems = isMember ? NAV_MEMBER : NAV_PUBLIC;
-  const adminItems: NavItem[] = isAdmin ? [
-    { href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined },
-  ] : [];
+  // ══════════════════════════════════════════════════════════════
+  // ระหว่าง loading: ใช้ nav ว่างเปล่า ไม่แสดง public หรือ member
+  // ป้องกัน flash of unauthenticated content หลัง refresh
+  // ══════════════════════════════════════════════════════════════
+  const navItems = loading ? [] : (isMember ? NAV_MEMBER : NAV_PUBLIC);
 
-  const allItems = [...navItems, ...adminItems];
-
-  // Bottom nav items (max 5)
-  const bottomItems: NavItem[] = isMember
-    ? [
-        { href: '/', icon: '🏠', label: 'หน้าหลัก' },
-        { href: '/zone-check', icon: '🧹', label: 'ตรวจเขต' },
-        { href: '/duty', icon: '🏫', label: 'เวรยืน' },
-        { href: '/submit', icon: '📁', label: 'ส่งข้อมูล' },
-        ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined }] : []),
-      ].slice(0, 5)
-    : [
-        { href: '/', icon: '🏠', label: 'หน้าหลัก' },
-        { href: '/login', icon: '🔑', label: 'เข้าสู่ระบบ' },
-      ];
+  const bottomItems: NavItem[] = loading
+    ? []
+    : isMember
+      ? [
+          { href: '/', icon: '🏠', label: 'หน้าหลัก' },
+          { href: '/zone-check', icon: '🧹', label: 'ตรวจเขต' },
+          { href: '/duty', icon: '🏫', label: 'เวรยืน' },
+          { href: '/submit', icon: '📁', label: 'ส่งข้อมูล' },
+          ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined }] : []),
+        ].slice(0, 5)
+      : [
+          { href: '/', icon: '🏠', label: 'หน้าหลัก' },
+          { href: '/login', icon: '🔑', label: 'เข้าสู่ระบบ' },
+        ];
 
   const initials = user?.full_name
     ? user.full_name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()
@@ -75,7 +75,6 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
     <div className="app-layout">
       {/* ── Desktop Sidebar ── */}
       <aside className="app-sidebar">
-        {/* Logo */}
         <div className="sidebar-logo">
           <Link href="/" style={{ textDecoration: 'none' }}>
             <div className="sidebar-logo-badge">YPLABS</div>
@@ -84,65 +83,67 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           </Link>
         </div>
 
-        {/* Main nav */}
         <div className="sidebar-section">
-          {!isMember && (
-            <div className="sidebar-section-label">เมนู</div>
+          {loading ? (
+            // skeleton ระหว่างโหลด
+            <div style={{ padding: '4px 0' }}>
+              {[1, 2, 3].map(i => (
+                <div key={i} style={{
+                  height: 30, borderRadius: 'var(--r)',
+                  background: 'rgba(255,255,255,0.06)',
+                  marginBottom: 4,
+                }} />
+              ))}
+            </div>
+          ) : (
+            <>
+              <div className="sidebar-section-label">{isMember ? 'เมนูหลัก' : 'เมนู'}</div>
+              {navItems.map(item => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={`sidebar-nav-item${pathname === item.href ? ' active' : ''}`}
+                >
+                  <span className="nav-icon">{item.icon}</span>
+                  <span>{item.label}</span>
+                </Link>
+              ))}
+            </>
           )}
-          {isMember && (
-            <div className="sidebar-section-label">เมนูหลัก</div>
-          )}
-          {navItems.map(item => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`sidebar-nav-item${pathname === item.href ? ' active' : ''}`}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              <span>{item.label}</span>
-            </Link>
-          ))}
         </div>
 
         {/* Admin section */}
-        {isAdmin && (
+        {!loading && isAdmin && (
           <div className="sidebar-section">
             <div className="sidebar-section-label">ผู้ดูแลระบบ</div>
-            <Link
-              href="/admin"
-              className={`sidebar-nav-item${pathname.startsWith('/admin') ? ' active' : ''}`}
-            >
+            <Link href="/admin" className={`sidebar-nav-item${pathname.startsWith('/admin') ? ' active' : ''}`}>
               <span className="nav-icon">⚙️</span>
               <span>แอดมิน</span>
               {pendingCount > 0 && <span className="nav-badge">{pendingCount}</span>}
             </Link>
             <Link href="/admin/users" className={`sidebar-nav-item${pathname === '/admin/users' ? ' active' : ''}`}>
-              <span className="nav-icon">👥</span>
-              <span>จัดการบัญชี</span>
+              <span className="nav-icon">👥</span><span>จัดการบัญชี</span>
             </Link>
             <Link href="/admin/requests" className={`sidebar-nav-item${pathname === '/admin/requests' ? ' active' : ''}`}>
-              <span className="nav-icon">📬</span>
-              <span>คำขอสมัคร</span>
+              <span className="nav-icon">📬</span><span>คำขอสมัคร</span>
               {pendingCount > 0 && <span className="nav-badge">{pendingCount}</span>}
             </Link>
             <Link href="/admin/duty" className={`sidebar-nav-item${pathname === '/admin/duty' ? ' active' : ''}`}>
-              <span className="nav-icon">📋</span>
-              <span>จัดการเวร</span>
+              <span className="nav-icon">📋</span><span>จัดการเวร</span>
             </Link>
             <Link href="/admin/zones" className={`sidebar-nav-item${pathname === '/admin/zones' ? ' active' : ''}`}>
-              <span className="nav-icon">📊</span>
-              <span>รายงานเขต</span>
+              <span className="nav-icon">📊</span><span>รายงานเขต</span>
             </Link>
             <Link href="/admin/years" className={`sidebar-nav-item${pathname === '/admin/years' ? ' active' : ''}`}>
-              <span className="nav-icon">📅</span>
-              <span>ปีการศึกษา</span>
+              <span className="nav-icon">📅</span><span>ปีการศึกษา</span>
             </Link>
           </div>
         )}
 
-        {/* Footer: user info or login */}
         <div className="sidebar-footer">
-          {loading ? null : user ? (
+          {loading ? (
+            <div style={{ height: 44, borderRadius: 'var(--r)', background: 'rgba(255,255,255,0.06)' }} />
+          ) : user ? (
             <>
               <div className="sidebar-user">
                 <div className="sidebar-avatar">{initials}</div>
@@ -171,13 +172,17 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
         <div className="app-topbar-mobile">
           <div className="topbar-mobile-logo">
             <span className="mobile-logo-badge">YPLABS</span>
-            <span className="mobile-logo-title">
-              {pageTitle ?? 'สภานักเรียน'}
-            </span>
+            <span className="mobile-logo-title">{pageTitle ?? 'สภานักเรียน'}</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {user ? (
-              <div style={{ width: 28, height: 28, background: 'var(--brand-light)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 12 }}>
+            {loading ? (
+              <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
+            ) : user ? (
+              <div style={{
+                width: 28, height: 28, background: 'var(--brand-light)', borderRadius: '50%',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: '#fff', fontWeight: 700, fontSize: 12,
+              }}>
                 {initials}
               </div>
             ) : (
@@ -193,7 +198,9 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             {today && <span className="topbar-date">{today}</span>}
           </div>
           <div className="topbar-user">
-            {loading ? null : user ? (
+            {loading ? (
+              <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
+            ) : user ? (
               <>
                 <div style={{ textAlign: 'right' }}>
                   <div className="topbar-user-name">{user.full_name}</div>
@@ -209,7 +216,6 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           </div>
         </div>
 
-        {/* Page content */}
         <div className="app-content">
           {children}
         </div>
@@ -217,21 +223,25 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
 
       {/* ── Mobile Bottom Nav ── */}
       <nav className="app-bottomnav">
-        {bottomItems.map(item => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className={`bottomnav-item${pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href)) ? ' active' : ''}`}
-          >
-            <span className="bottomnav-icon" style={{ position: 'relative' }}>
-              {item.icon}
-              {item.badge ? (
-                <span className="bottomnav-badge">{item.badge}</span>
-              ) : null}
-            </span>
-            <span>{item.label}</span>
-          </Link>
-        ))}
+        {loading ? (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
+          </div>
+        ) : (
+          bottomItems.map(item => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`bottomnav-item${pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href)) ? ' active' : ''}`}
+            >
+              <span className="bottomnav-icon" style={{ position: 'relative' }}>
+                {item.icon}
+                {item.badge ? <span className="bottomnav-badge">{item.badge}</span> : null}
+              </span>
+              <span>{item.label}</span>
+            </Link>
+          ))
+        )}
       </nav>
     </div>
   );
