@@ -1,11 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
+import { createLogger } from './serverLogger';
 
-/**
- * Server-side Supabase client using SERVICE_ROLE key.
- * This file runs on server only (API routes, server components).
- *
- * IMPORTANT: Keep SUPABASE_SERVICE_ROLE_KEY secret (do NOT expose to client).
- */
+const logger = createLogger('lib/apiHelper');
+
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -13,79 +10,99 @@ const supabase = createClient(
 
 export { supabase };
 
-/**
- * Verify admin by reading the token (Bearer ...) and checking council_users row.
- * Returns Supabase "user" object on success, otherwise null.
- */
 export async function verifyAdmin(authHeader: string | null) {
-  if (!authHeader) return null;
+  if (!authHeader) {
+    logger.authFail('no Authorization header');
+    return null;
+  }
   const token = authHeader.replace('Bearer ', '');
   try {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) {
-      console.error('[apiHelper][verifyAdmin] getUser failed', { err: error?.message ?? null, tokenPreview: token ? token.slice(-6) : null });
+      logger.authFail('getUser failed', {
+        supabaseError: error?.message ?? null,
+        tokenTail: token ? token.slice(-6) : null,
+      });
       return null;
     }
-    
+
     const { data: row, error: rowErr } = await supabase
       .from('council_users')
       .select('role, approved, disabled')
       .eq('auth_uid', user.id)
       .limit(1)
       .maybeSingle();
-    
+
     if (rowErr) {
-      console.error('[apiHelper][verifyAdmin] council_users lookup error', { uidPreview: String(user.id).slice(-6), err: rowErr.message });
+      logger.supabaseError('verifyAdmin council_users lookup', rowErr, {
+        uid: user.id.slice(-6),
+      });
       return null;
     }
-    
+
     if (!row || !row.approved || row.disabled || row.role !== 'admin') {
-      console.log('[apiHelper][verifyAdmin] not admin or not approved/disabled', { uidPreview: String(user.id).slice(-6), rowExists: !!row });
+      logger.authFail('not admin / not approved / disabled', {
+        uid: user.id.slice(-6),
+        rowExists: !!row,
+        approved: row?.approved,
+        disabled: row?.disabled,
+        role: row?.role,
+      });
       return null;
     }
-    
+
+    logger.debug('verifyAdmin OK', { uid: user.id.slice(-6) });
     return user;
   } catch (e) {
-    console.error('[apiHelper][verifyAdmin] unexpected error', { err: String(e) });
+    logger.error('verifyAdmin unexpected error', { error: String(e) });
     return null;
   }
 }
 
-/**
- * Verify member by reading the token (Bearer ...) and checking council_users row.
- * Returns merged user+profile object on success, otherwise null.
- */
 export async function verifyMember(authHeader: string | null) {
-  if (!authHeader) return null;
+  if (!authHeader) {
+    logger.authFail('no Authorization header (verifyMember)');
+    return null;
+  }
   const token = authHeader.replace('Bearer ', '');
   try {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) {
-      console.error('[apiHelper][verifyMember] getUser failed', { err: error?.message ?? null, tokenPreview: token ? token.slice(-6) : null });
+      logger.authFail('verifyMember getUser failed', {
+        supabaseError: error?.message ?? null,
+        tokenTail: token ? token.slice(-6) : null,
+      });
       return null;
     }
-    
+
     const { data: row, error: rowErr } = await supabase
       .from('council_users')
       .select('role, approved, disabled, full_name, student_id')
       .eq('auth_uid', user.id)
       .limit(1)
       .maybeSingle();
-    
+
     if (rowErr) {
-      console.error('[apiHelper][verifyMember] council_users lookup error', { uidPreview: String(user.id).slice(-6), err: rowErr.message });
+      logger.supabaseError('verifyMember council_users lookup', rowErr, {
+        uid: user.id.slice(-6),
+      });
       return null;
     }
-    
+
     if (!row || !row.approved || row.disabled) {
-      console.log('[apiHelper][verifyMember] not approved or disabled', { uidPreview: String(user.id).slice(-6), rowExists: !!row });
+      logger.authFail('verifyMember not approved or disabled', {
+        uid: user.id.slice(-6),
+        rowExists: !!row,
+        approved: row?.approved,
+        disabled: row?.disabled,
+      });
       return null;
     }
-    
-    // merge user and profile fields for convenience (do not include tokens)
+
+    logger.debug('verifyMember OK', { uid: user.id.slice(-6), name: row.full_name });
     return { ...user, ...row };
   } catch (e) {
-    console.error('[apiHelper][verifyMember] unexpected error', { err: String(e) });
+    logger.error('verifyMember unexpected error', { error: String(e) });
     return null;
   }
 }

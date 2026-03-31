@@ -5,8 +5,13 @@ import { getBrowserSupabase } from '@/lib/supabaseClient';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
+import { remoteLog } from '@/lib/remoteLogger';
 
-type DutyEntry = { id: string; student_name: string; student_id: string; checked_in: boolean; checked_in_at: string|null; note: string|null; auth_uid: string; };
+type DutyEntry = {
+  id: string; student_name: string; student_id: string;
+  checked_in: boolean; checked_in_at: string | null;
+  note: string | null; auth_uid: string;
+};
 
 export default function DutyPage() {
   const { user, isMember, loading: authLoading } = useAuth();
@@ -14,8 +19,8 @@ export default function DutyPage() {
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState('');
   const [checkingIn, setCheckingIn] = useState(false);
-  const [error, setError] = useState<string|null>(null);
-  const [success, setSuccess] = useState<string|null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
   useEffect(() => { void load(); }, []);
 
@@ -29,9 +34,20 @@ export default function DutyPage() {
     setLoading(true);
     try {
       const token = await getToken();
-      const res = await fetch('/api/council/duty/today', { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-      if (res.ok) setDuties(await res.json() || []);
-    } catch {}
+      const res = await fetch('/api/council/duty/today', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+
+      if (!res.ok) {
+        void remoteLog('error', '[duty-page] failed to load duty list', {
+          httpStatus: res.status,
+        });
+      } else {
+        setDuties(await res.json() || []);
+      }
+    } catch (e: any) {
+      void remoteLog('error', '[duty-page] load error', { error: e?.message });
+    }
     setLoading(false);
   }
 
@@ -40,19 +56,45 @@ export default function DutyPage() {
 
   async function handleCheckIn() {
     setCheckingIn(true); setError(null); setSuccess(null);
+
+    void remoteLog('info', '[duty-page] checkin attempt', {
+      uid: user?.auth_uid?.slice(-6),
+      name: user?.full_name,
+    });
+
     try {
       const token = await getToken();
-      if (!token) throw new Error('กรุณาเข้าสู่ระบบก่อน');
+      if (!token) {
+        void remoteLog('error', '[duty-page] checkin: no auth token');
+        throw new Error('กรุณาเข้าสู่ระบบก่อน');
+      }
+
       const res = await fetch('/api/council/duty/checkin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ note }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'เช็คอินล้มเหลว');
+
+      if (!res.ok) {
+        void remoteLog('error', '[duty-page] checkin API error', {
+          httpStatus: res.status,
+          apiError: json.error,
+          uid: user?.auth_uid?.slice(-6),
+        });
+        throw new Error(json.error ?? 'เช็คอินล้มเหลว');
+      }
+
+      void remoteLog('info', '[duty-page] checkin success', {
+        uid: user?.auth_uid?.slice(-6),
+        name: user?.full_name,
+        hasNote: !!note,
+      });
+
       setSuccess('เช็คอินสำเร็จแล้ว ✅');
       setNote('');
       await load();
+
     } catch (e: any) {
       setError(e?.message ?? 'เกิดข้อผิดพลาด');
     } finally {
@@ -69,7 +111,6 @@ export default function DutyPage() {
         </div>
       </div>
 
-      {/* Stats */}
       <div className="grid-2" style={{ marginBottom: 18 }}>
         <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
           <div className="stat-label">เช็คอินแล้ว</div>
@@ -83,7 +124,6 @@ export default function DutyPage() {
         </div>
       </div>
 
-      {/* My check-in card */}
       {isMember && myEntry && !myEntry.checked_in && (
         <div className="card" style={{ borderLeft: '4px solid var(--brand)', marginBottom: 18 }}>
           <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>🏫 คุณมีเวรวันนี้</div>
@@ -116,7 +156,6 @@ export default function DutyPage() {
         </div>
       )}
 
-      {/* Roster table */}
       <div className="card" style={{ padding: 0 }}>
         <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontWeight: 700 }}>รายชื่อผู้ปฏิบัติหน้าที่วันนี้</span>
@@ -130,9 +169,7 @@ export default function DutyPage() {
           <div className="table-wrap" style={{ borderRadius: 0, border: 'none' }}>
             <table>
               <thead>
-                <tr>
-                  <th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>หมายเหตุ</th>
-                </tr>
+                <tr><th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>หมายเหตุ</th></tr>
               </thead>
               <tbody>
                 {duties.map((d, i) => (

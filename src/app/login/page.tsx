@@ -6,10 +6,34 @@ import { synthesizeEmail } from '@/lib/auth';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/context/AuthContext';
+import { remoteLog } from '@/lib/remoteLogger';
 
-// ── Login log (แสดงขั้นตอน สำหรับ debug) ─────────────────────────
+// ── Login log ────────────────────────────────────────────────────
 function LoginLog({ logs }: { logs: string[] }) {
+  const [copied, setCopied] = useState(false);
+
   if (!logs.length) return null;
+
+  async function copyLogs() {
+    try {
+      await navigator.clipboard.writeText(logs.join('\n'));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // fallback สำหรับ browser ที่ไม่รองรับ clipboard API
+      const ta = document.createElement('textarea');
+      ta.value = logs.join('\n');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }
+
   return (
     <details style={{ marginTop: 4 }}>
       <summary style={{
@@ -19,18 +43,44 @@ function LoginLog({ logs }: { logs: string[] }) {
       }}>
         🔍 ดู login log ({logs.length} ขั้นตอน)
       </summary>
-      <div style={{
-        marginTop: 8, padding: '10px 12px',
-        background: 'var(--surface-2)', border: '1px solid var(--border)',
-        borderRadius: 'var(--r)', fontSize: 11.5,
-        fontFamily: 'monospace', color: 'var(--text-2)',
-        display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 160, overflowY: 'auto',
-      }}>
-        {logs.map((l, i) => (
-          <div key={i} style={{ color: l.includes('❌') ? 'var(--red)' : l.includes('✅') ? 'var(--green)' : 'var(--text-3)' }}>
-            {l}
-          </div>
-        ))}
+      <div style={{ marginTop: 8, position: 'relative' }}>
+        {/* Copy button */}
+        <button
+          onClick={copyLogs}
+          title="คัดลอก log ทั้งหมด"
+          style={{
+            position: 'absolute', top: 6, right: 6, zIndex: 1,
+            background: copied ? 'var(--green)' : 'rgba(255,255,255,0.12)',
+            color: copied ? '#fff' : 'var(--text-3)',
+            border: '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 'var(--r-sm)',
+            padding: '2px 8px', fontSize: 11, fontWeight: 700,
+            cursor: 'pointer', transition: 'all 0.15s',
+            fontFamily: 'var(--font-body)',
+          }}
+        >
+          {copied ? '✅ คัดลอกแล้ว' : '📋 คัดลอก'}
+        </button>
+
+        <div style={{
+          padding: '10px 12px',
+          paddingRight: 80,
+          background: 'var(--surface-2)', border: '1px solid var(--border)',
+          borderRadius: 'var(--r)', fontSize: 11.5,
+          fontFamily: 'monospace', color: 'var(--text-2)',
+          display: 'flex', flexDirection: 'column', gap: 3,
+          maxHeight: 160, overflowY: 'auto',
+        }}>
+          {logs.map((l, i) => (
+            <div key={i} style={{
+              color: l.includes('❌') ? 'var(--red)'
+                : l.includes('✅') ? 'var(--green)'
+                : 'var(--text-3)',
+            }}>
+              {l}
+            </div>
+          ))}
+        </div>
       </div>
     </details>
   );
@@ -41,11 +91,8 @@ export default function LoginPage() {
   const { refresh } = useAuth();
   const [mode, setMode] = useState<'student' | 'other'>('student');
 
-  // Student form
   const [fullName, setFullName] = useState('');
   const [studentId, setStudentId] = useState('');
-
-  // Other form
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
@@ -55,8 +102,12 @@ export default function LoginPage() {
 
   const addLog = useCallback((msg: string) => {
     const ts = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    setLogs(p => [...p, `[${ts}] ${msg}`]);
-  }, []);
+    const line = `[${ts}] ${msg}`;
+    setLogs(p => [...p, line]);
+    // ส่งไป remote log ด้วย (level ขึ้นอยู่กับ prefix)
+    const level = msg.includes('❌') ? 'error' : msg.includes('✅') ? 'info' : 'debug';
+    void remoteLog(level, `[login] ${msg}`, { mode });
+  }, [mode]);
 
   // ── Student Login ─────────────────────────────────────────────
   async function handleStudentLogin(e: React.FormEvent) {
@@ -68,6 +119,8 @@ export default function LoginPage() {
     if (!/^\d{5}$/.test(studentId)) return setError('รหัสนักเรียนต้องเป็นตัวเลข 5 หลัก');
 
     setLoading(true);
+    void remoteLog('info', '[login] student login attempt', { studentId, fullName });
+
     try {
       const supabase = getBrowserSupabase();
       const synEmail = synthesizeEmail(studentId);
@@ -80,6 +133,11 @@ export default function LoginPage() {
 
       if (signInErr || !signInData?.user) {
         addLog(`❌ signIn ล้มเหลว: ${signInErr?.message ?? 'no user'}`);
+        void remoteLog('error', '[login] signInWithPassword failed', {
+          studentId,
+          supabaseError: signInErr?.message ?? 'no user',
+          synEmail,
+        });
         throw new Error('รหัสนักเรียนไม่ถูกต้อง หรือยังไม่มีบัญชีในระบบ');
       }
 
@@ -95,12 +153,24 @@ export default function LoginPage() {
 
       if (rowErr) {
         addLog(`❌ query council_users error: ${rowErr.message}`);
+        void remoteLog('error', '[login] council_users query error', {
+          studentId,
+          uid: signInData.user.id,
+          error: rowErr.message,
+          hint: rowErr.hint ?? null,
+          details: rowErr.details ?? null,
+          code: rowErr.code ?? null,
+        });
         await supabase.auth.signOut();
         throw new Error(`เกิดข้อผิดพลาดในการโหลดข้อมูล: ${rowErr.message}`);
       }
 
       if (!row) {
         addLog('❌ ไม่พบ row ใน council_users');
+        void remoteLog('error', '[login] council_users row not found', {
+          studentId,
+          uid: signInData.user.id,
+        });
         await supabase.auth.signOut();
         throw new Error('ไม่พบข้อมูลบัญชีในระบบ กรุณาติดต่อผู้ดูแล');
       }
@@ -108,19 +178,25 @@ export default function LoginPage() {
       addLog(`✅ พบข้อมูล: ${row.full_name} | approved=${row.approved} | disabled=${row.disabled} | role=${row.role}`);
 
       if (!row.approved) {
+        void remoteLog('warn', '[login] account not approved', { studentId });
         await supabase.auth.signOut();
         throw new Error('บัญชียังไม่ได้รับการอนุมัติจากผู้ดูแลระบบ');
       }
       if (row.disabled) {
+        void remoteLog('warn', '[login] account disabled', { studentId });
         await supabase.auth.signOut();
         throw new Error('บัญชีถูกปิดใช้งาน กรุณาติดต่อผู้ดูแล');
       }
 
-      // ตรวจชื่อ (case-insensitive, trim whitespace)
       const dbName = row.full_name.trim().toLowerCase();
       const inputName = fullName.trim().toLowerCase();
       if (dbName !== inputName) {
         addLog(`❌ ชื่อไม่ตรง: DB="${row.full_name}" input="${fullName}"`);
+        void remoteLog('warn', '[login] name mismatch', {
+          studentId,
+          dbName: row.full_name,
+          inputName: fullName,
+        });
         await supabase.auth.signOut();
         throw new Error('ชื่อ-นามสกุลไม่ตรงกับข้อมูลในระบบ (ต้องตรงทุกตัวอักษร)');
       }
@@ -128,6 +204,7 @@ export default function LoginPage() {
       addLog('✅ ชื่อตรง — กำลัง refresh context...');
       await refresh();
       addLog('✅ Login สำเร็จ กำลัง redirect...');
+      void remoteLog('info', '[login] student login success', { studentId, role: row.role });
       router.push('/');
     } catch (err: any) {
       setError(err?.message ?? 'เกิดข้อผิดพลาด');
@@ -145,6 +222,8 @@ export default function LoginPage() {
     if (!email.trim() || !password) return setError('กรุณากรอก email และรหัสผ่าน');
 
     setLoading(true);
+    void remoteLog('info', '[login] other login attempt', { email: email.trim() });
+
     try {
       const supabase = getBrowserSupabase();
       addLog(`🔐 signIn: ${email.trim()}`);
@@ -156,6 +235,10 @@ export default function LoginPage() {
 
       if (signInErr || !data?.user) {
         addLog(`❌ signIn ล้มเหลว: ${signInErr?.message ?? 'no user'}`);
+        void remoteLog('error', '[login] other signIn failed', {
+          email: email.trim(),
+          error: signInErr?.message ?? 'no user',
+        });
         throw new Error(signInErr?.message ?? 'Email หรือรหัสผ่านไม่ถูกต้อง');
       }
 
@@ -168,6 +251,19 @@ export default function LoginPage() {
         .limit(1)
         .maybeSingle();
 
+      if (rowErr) {
+        addLog(`❌ council_users error: ${rowErr.message}`);
+        void remoteLog('error', '[login] council_users query error (other)', {
+          email: email.trim(),
+          uid: data.user.id,
+          error: rowErr.message,
+          hint: rowErr.hint ?? null,
+          code: rowErr.code ?? null,
+        });
+        await supabase.auth.signOut();
+        throw new Error(`เกิดข้อผิดพลาด: ${rowErr.message}`);
+      }
+
       if (rowErr || !row) {
         addLog(`❌ council_users: ${rowErr?.message ?? 'not found'}`);
         await supabase.auth.signOut();
@@ -177,10 +273,12 @@ export default function LoginPage() {
       addLog(`✅ พบข้อมูล: approved=${row.approved} | disabled=${row.disabled} | role=${row.role}`);
 
       if (!row.approved) {
+        void remoteLog('warn', '[login] other account not approved', { email: email.trim() });
         await supabase.auth.signOut();
         throw new Error('บัญชียังไม่ได้รับการอนุมัติจากผู้ดูแลระบบ');
       }
       if (row.disabled) {
+        void remoteLog('warn', '[login] other account disabled', { email: email.trim() });
         await supabase.auth.signOut();
         throw new Error('บัญชีถูกปิดใช้งาน');
       }
@@ -190,6 +288,7 @@ export default function LoginPage() {
       }
 
       addLog('✅ Login สำเร็จ กำลัง redirect...');
+      void remoteLog('info', '[login] other login success', { email: email.trim(), role: row.role });
       await refresh();
       router.push('/');
     } catch (err: any) {
@@ -263,7 +362,6 @@ export default function LoginPage() {
                 />
               </div>
 
-              {/* Error */}
               {error && (
                 <div className="alert alert-error" style={{ fontSize: 13 }}>
                   <div>{error}</div>
@@ -284,7 +382,6 @@ export default function LoginPage() {
                 </div>
               )}
 
-              {/* Login log */}
               <LoginLog logs={logs} />
 
               <button type="submit" disabled={loading} className="btn btn-primary btn-full btn-lg">
@@ -292,7 +389,6 @@ export default function LoginPage() {
               </button>
             </form>
           ) : (
-            /* Other form */
             <form onSubmit={handleOtherLogin} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div className="form-group">
                 <label className="form-label">Email</label>

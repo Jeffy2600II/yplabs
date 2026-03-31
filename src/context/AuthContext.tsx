@@ -2,6 +2,7 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
+import { remoteLog } from '@/lib/remoteLogger';
 
 type UserProfile = {
   auth_uid: string;
@@ -46,10 +47,39 @@ async function fetchProfile(authUid: string): Promise < UserProfile | null > {
       .limit(1)
       .maybeSingle();
     
-    if (error || !row) return null;
-    if (!row.approved || row.disabled) return null;
+    if (error) {
+      void remoteLog('error', '[AuthContext] fetchProfile council_users error', {
+        uid: authUid.slice(-6),
+        error: error.message,
+        hint: error.hint ?? null,
+        details: error.details ?? null,
+        code: error.code ?? null,
+      });
+      return null;
+    }
+    
+    if (!row) {
+      void remoteLog('warn', '[AuthContext] fetchProfile: no row found', {
+        uid: authUid.slice(-6),
+      });
+      return null;
+    }
+    
+    if (!row.approved || row.disabled) {
+      void remoteLog('warn', '[AuthContext] fetchProfile: account not usable', {
+        uid: authUid.slice(-6),
+        approved: row.approved,
+        disabled: row.disabled,
+      });
+      return null;
+    }
+    
     return row as UserProfile;
-  } catch {
+  } catch (e) {
+    void remoteLog('error', '[AuthContext] fetchProfile unexpected error', {
+      uid: authUid.slice(-6),
+      error: String(e),
+    });
     return null;
   }
 }
@@ -62,16 +92,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
     const supabase = getBrowserSupabase();
     
-    // ══════════════════════════════════════════════════════════════
-    // onAuthStateChange เป็น source of truth เดียว
-    // ──────────────────────────────────────────────────────────────
-    // Supabase ยิง INITIAL_SESSION ทันทีที่ subscribe พร้อม session
-    // จาก localStorage — ไม่ต้องเรียก getSession() แยก
-    // (เรียกแยกทำให้เกิด race condition: 2 async paths set state พร้อมกัน)
-    // ══════════════════════════════════════════════════════════════
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
         if (!mounted) return;
+        
+        void remoteLog('debug', `[AuthContext] onAuthStateChange: ${event}`, {
+          hasSession: !!session,
+          uid: session?.user?.id?.slice(-6) ?? null,
+        });
         
         if (event === 'SIGNED_OUT' || !session?.user) {
           setUser(null);
@@ -79,11 +107,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return;
         }
         
-        // INITIAL_SESSION, SIGNED_IN, TOKEN_REFRESHED, USER_UPDATED
         try {
           const profile = await fetchProfile(session.user.id);
-          if (mounted) setUser(profile);
-        } catch {
+          if (mounted) {
+            setUser(profile);
+            if (!profile) {
+              void remoteLog('warn', '[AuthContext] fetchProfile returned null after auth state change', {
+                event,
+                uid: session.user.id.slice(-6),
+              });
+            }
+          }
+        } catch (e) {
+          void remoteLog('error', '[AuthContext] onAuthStateChange handler error', {
+            event,
+            uid: session?.user?.id?.slice(-6) ?? null,
+            error: String(e),
+          });
           if (mounted) setUser(null);
         } finally {
           if (mounted) setLoading(false);
@@ -97,17 +137,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
   
-  // refresh: getUser() = network call เพื่อ verify กับ Supabase server จริงๆ
-  // เรียกหลัง signInWithPassword สำเร็จ ก่อน router.push
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const supabase = getBrowserSupabase();
-      const { data: { user: authUser } } = await supabase.auth.getUser();
-      if (!authUser) { setUser(null); return; }
+      const { data: { user: authUser }, error } = await supabase.auth.getUser();
+      
+      if (error) {
+        void remoteLog('error', '[AuthContext] refresh getUser error', {
+          error: error.message,
+        });
+        setUser(null);
+        return;
+      }
+      
+      if (!authUser) {
+        setUser(null);
+        return;
+      }
+      
       const profile = await fetchProfile(authUser.id);
       setUser(profile);
-    } catch {
+      
+      if (!profile) {
+        void remoteLog('warn', '[AuthContext] refresh: fetchProfile returned null', {
+          uid: authUser.id.slice(-6),
+        });
+      }
+    } catch (e) {
+      void remoteLog('error', '[AuthContext] refresh unexpected error', { error: String(e) });
       setUser(null);
     } finally {
       setLoading(false);
@@ -117,12 +175,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
+      void remoteLog('info', '[AuthContext] signOut', {
+        uid: user?.auth_uid?.slice(-6) ?? null,
+      });
       await supabase.auth.signOut();
-    } catch { /* ignore */ }
+    } catch (e) {
+      void remoteLog('error', '[AuthContext] signOut error', { error: String(e) });
+    }
     setUser(null);
     setLoading(false);
-    resetBrowserSupabase(); // ปลอดภัยเรียกที่นี่จุดเดียว
-  }, []);
+    resetBrowserSupabase();
+  }, [user]);
   
   return (
     <AuthContext.Provider value={{

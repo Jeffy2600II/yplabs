@@ -6,45 +6,67 @@ import { getBrowserSupabase } from '@/lib/supabaseClient';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
+import { remoteLog } from '@/lib/remoteLogger';
 
-const ZONES = ['ม.1/1','ม.1/2','ม.2/1','ม.2/2','ม.3/1','ม.3/2','ม.4','ม.5','ม.6'];
-type ZStatus = 'pending'|'clean'|'dirty';
-type ZState = { status: ZStatus; note: string; file: File|null; preview: string|null; saved: boolean; };
+const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
+type ZStatus = 'pending' | 'clean' | 'dirty';
+type ZState = { status: ZStatus;note: string;file: File | null;preview: string | null;saved: boolean; };
 
-function initZones(): Record<string, ZState> {
-  const r: Record<string, ZState> = {};
+function initZones(): Record < string, ZState > {
+  const r: Record < string, ZState > = {};
   ZONES.forEach(z => { r[z] = { status: 'pending', note: '', file: null, preview: null, saved: false }; });
   return r;
 }
 
 export default function ZoneCheckPage() {
   const router = useRouter();
-  const { isMember, loading: authLoading } = useAuth();
+  const { isMember, user, loading: authLoading } = useAuth();
   const [zones, setZones] = useState(initZones);
-  const [expanded, setExpanded] = useState<string|null>(null);
+  const [expanded, setExpanded] = useState < string | null > (null);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
-  const [error, setError] = useState<string|null>(null);
-
-  function update(zone: string, patch: Partial<ZState>) {
+  const [error, setError] = useState < string | null > (null);
+  
+  function update(zone: string, patch: Partial < ZState > ) {
     setZones(p => ({ ...p, [zone]: { ...p[zone], ...patch } }));
   }
-
-  function handlePhoto(zone: string, file: File|null) {
+  
+  function handlePhoto(zone: string, file: File | null) {
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) { alert('ไฟล์ใหญ่เกิน 5MB'); return; }
+    if (file.size > 5 * 1024 * 1024) {
+      void remoteLog('warn', '[zone-check] photo too large', {
+        zone,
+        size: file.size,
+        name: file.name,
+      });
+      alert('ไฟล์ใหญ่เกิน 5MB');
+      return;
+    }
     update(zone, { file, preview: URL.createObjectURL(file) });
   }
-
+  
   async function handleSubmit() {
     const toSend = ZONES.filter(z => zones[z].status !== 'pending');
     if (!toSend.length) { setError('กรุณาตรวจอย่างน้อย 1 เขต'); return; }
-    setSubmitting(true); setError(null);
+    
+    setSubmitting(true);
+    setError(null);
+    
+    void remoteLog('info', '[zone-check] submitting', {
+      inspector: user?.full_name,
+      zones: toSend.map(z => ({ zone: z, status: zones[z].status, hasPhoto: !!zones[z].file })),
+    });
+    
     try {
       const supabase = getBrowserSupabase();
       const { data: sess } = await supabase.auth.getSession();
       const token = sess?.session?.access_token;
-      if (!token) throw new Error('กรุณาเข้าสู่ระบบก่อน');
+      
+      if (!token) {
+        void remoteLog('error', '[zone-check] no auth token');
+        throw new Error('กรุณาเข้าสู่ระบบก่อน');
+      }
+      
       for (const zone of toSend) {
         const z = zones[zone];
         const fd = new FormData();
@@ -52,21 +74,48 @@ export default function ZoneCheckPage() {
         fd.append('status', z.status);
         fd.append('note', z.note);
         if (z.file) fd.append('photo', z.file);
-        const res = await fetch('/api/council/zone-check', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd });
+        
+        const res = await fetch('/api/council/zone-check', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: fd,
+        });
         const json = await res.json();
-        if (!res.ok) throw new Error(`เขต ${zone}: ${json.error ?? 'บันทึกล้มเหลว'}`);
+        
+        if (!res.ok) {
+          void remoteLog('error', '[zone-check] save failed', {
+            zone,
+            status: z.status,
+            httpStatus: res.status,
+            apiError: json.error,
+            inspector: user?.full_name,
+          });
+          throw new Error(`เขต ${zone}: ${json.error ?? 'บันทึกล้มเหลว'}`);
+        }
+        
         update(zone, { saved: true });
+        void remoteLog('debug', '[zone-check] zone saved', { zone, status: z.status });
       }
+      
+      void remoteLog('info', '[zone-check] all zones submitted successfully', {
+        count: toSend.length,
+        inspector: user?.full_name,
+      });
       setDone(true);
+      
     } catch (e: any) {
       setError(e?.message ?? 'เกิดข้อผิดพลาด');
+      void remoteLog('error', '[zone-check] submit error', {
+        error: e?.message,
+        inspector: user?.full_name,
+      });
     } finally {
       setSubmitting(false);
     }
   }
-
+  
   const checked = ZONES.filter(z => zones[z].status !== 'pending').length;
-
+  
   if (!authLoading && !isMember) {
     return (
       <AppShell pageTitle="ตรวจเขตสะอาด">
@@ -79,7 +128,7 @@ export default function ZoneCheckPage() {
       </AppShell>
     );
   }
-
+  
   return (
     <AppShell pageTitle="ตรวจเขตสะอาด">
       <div className="page-header">
@@ -99,7 +148,6 @@ export default function ZoneCheckPage() {
         </div>
       ) : (
         <>
-          {/* Progress */}
           <div className="card" style={{ marginBottom: 16 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
               <span style={{ fontWeight: 700 }}>ความคืบหน้า</span>
@@ -110,7 +158,6 @@ export default function ZoneCheckPage() {
             </div>
           </div>
 
-          {/* Zone list */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
             {ZONES.map(zone => {
               const z = zones[zone];

@@ -5,20 +5,26 @@ import { getBrowserSupabase } from '@/lib/supabaseClient';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
+import { remoteLog } from '@/lib/remoteLogger';
 
 export default function SubmitPage() {
-  const { isMember, loading: authLoading } = useAuth();
+  const { isMember, user, loading: authLoading } = useAuth();
   const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState<number|null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
   const [fileName, setFileName] = useState('');
   const [done, setDone] = useState(false);
-  const [error, setError] = useState<string|null>(null);
-  const xhrRef = useRef<XMLHttpRequest|null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const xhrRef = useRef<XMLHttpRequest | null>(null);
 
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     setFileName(f ? f.name : '');
     if (f && f.size > 5 * 1024 * 1024) {
+      void remoteLog('warn', '[submit-page] file too large', {
+        name: f.name,
+        size: f.size,
+        user: user?.full_name,
+      });
       alert('ไฟล์ใหญ่เกิน 5MB');
       e.target.value = ''; setFileName('');
     }
@@ -31,16 +37,38 @@ export default function SubmitPage() {
       xhr.open('POST', '/api/council/submit');
       xhr.setRequestHeader('Authorization', `Bearer ${token}`);
       xhr.setRequestHeader('Accept', 'application/json');
-      xhr.upload.onprogress = ev => { if (ev.lengthComputable) setProgress(Math.round(ev.loaded / ev.total * 100)); };
+      xhr.upload.onprogress = ev => {
+        if (ev.lengthComputable) setProgress(Math.round(ev.loaded / ev.total * 100));
+      };
       xhr.timeout = 120_000;
-      xhr.ontimeout = () => rej(new Error('หมดเวลา'));
-      xhr.onerror = () => rej(new Error('เชื่อมต่อล้มเหลว'));
+      xhr.ontimeout = () => {
+        void remoteLog('error', '[submit-page] XHR timeout', { user: user?.full_name });
+        rej(new Error('หมดเวลา'));
+      };
+      xhr.onerror = () => {
+        void remoteLog('error', '[submit-page] XHR network error', { user: user?.full_name });
+        rej(new Error('เชื่อมต่อล้มเหลว'));
+      };
       xhr.onload = () => {
         try {
           const json = JSON.parse(xhr.responseText || '{}');
-          if (xhr.status >= 200 && xhr.status < 300) res(json);
-          else rej({ status: xhr.status, data: json });
-        } catch { rej(new Error('Response error')); }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            res(json);
+          } else {
+            void remoteLog('error', '[submit-page] XHR non-2xx', {
+              status: xhr.status,
+              apiError: json?.error,
+              user: user?.full_name,
+            });
+            rej({ status: xhr.status, data: json });
+          }
+        } catch {
+          void remoteLog('error', '[submit-page] XHR response parse error', {
+            responseText: xhr.responseText?.slice(0, 200),
+            user: user?.full_name,
+          });
+          rej(new Error('Response error'));
+        }
       };
       xhr.send(fd);
     });
@@ -49,21 +77,51 @@ export default function SubmitPage() {
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setLoading(true); setProgress(null); setError(null);
+
     const form = e.currentTarget;
     const fd = new FormData(form);
-    const title = String(fd.get('title') ?? '').trim();
+    const title  = String(fd.get('title') ?? '').trim();
     const detail = String(fd.get('detail') ?? '').trim();
-    if (!title) { setError('กรุณากรอกหัวข้อ'); setLoading(false); return; }
+
+    if (!title)  { setError('กรุณากรอกหัวข้อ');      setLoading(false); return; }
     if (!detail) { setError('กรุณากรอกรายละเอียด'); setLoading(false); return; }
+
+    void remoteLog('info', '[submit-page] submitting', {
+      title,
+      detailLength: detail.length,
+      hasFile: !!fileName,
+      fileName: fileName || null,
+      user: user?.full_name,
+    });
+
     try {
       const supabase = getBrowserSupabase();
       const { data: sess } = await supabase.auth.getSession();
       const token = sess?.session?.access_token;
-      if (!token) { setError('กรุณาเข้าสู่ระบบก่อน'); setLoading(false); return; }
+
+      if (!token) {
+        void remoteLog('error', '[submit-page] no auth token');
+        setError('กรุณาเข้าสู่ระบบก่อน');
+        setLoading(false);
+        return;
+      }
+
       await sendXHR(fd, token);
+
+      void remoteLog('info', '[submit-page] submitted successfully', {
+        title,
+        user: user?.full_name,
+      });
       setDone(true); setFileName(''); setProgress(null);
+
     } catch (err: any) {
-      setError(err?.data?.error ?? err?.message ?? 'เกิดข้อผิดพลาด');
+      const msg = err?.data?.error ?? err?.message ?? 'เกิดข้อผิดพลาด';
+      setError(msg);
+      void remoteLog('error', '[submit-page] submit failed', {
+        error: msg,
+        title,
+        user: user?.full_name,
+      });
     } finally {
       setLoading(false);
     }
@@ -131,7 +189,12 @@ export default function SubmitPage() {
               <button type="submit" disabled={loading} className="btn btn-primary" style={{ flex: 1, padding: '12px' }}>
                 {loading ? '🔄 กำลังส่ง...' : '📤 ส่งข้อมูล'}
               </button>
-              <button type="button" className="btn btn-ghost" onClick={() => { xhrRef.current?.abort(); setLoading(false); setProgress(null); }}>
+              <button type="button" className="btn btn-ghost" onClick={() => {
+                xhrRef.current?.abort();
+                setLoading(false);
+                setProgress(null);
+                void remoteLog('info', '[submit-page] upload cancelled', { user: user?.full_name });
+              }}>
                 ยกเลิก
               </button>
             </div>
