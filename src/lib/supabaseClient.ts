@@ -3,33 +3,49 @@ import { remoteLog } from './remoteLogger';
 
 let client: SupabaseClient | null = null;
 
-/**
- * ส่ง log ไปที่ /api/debug/log โดยตรง (ใช้เมื่อเกิดข้อผิดพลาดสำคัญ)
- * ทำแบบนี้เพื่อให้บันทึกขึ้นใน Vercel Function logs เสมอ
- */
-async function sendServerLog(level: 'info' | 'warn' | 'error' | 'debug', message: string, meta ? : any) {
+function makeTraceId() {
+  try { return (globalThis as any).crypto?.randomUUID?.() ?? `t-${Date.now()}-${Math.floor(Math.random()*1e6)}`; }
+  catch { return `t-${Date.now()}-${Math.floor(Math.random()*1e6)}`; }
+}
+
+async function sendServerLog(payload: any) {
   try {
     await fetch('/api/debug/log', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ level, message, meta }),
+      body: JSON.stringify(payload),
     });
   } catch (err) {
-    // อย่างน้อยให้เห็นใน console หาก POST ล้มเหลว
-    console.error('[sendServerLog] failed to POST', err);
+    console.error('[supabaseClient] sendServerLog failed', String(err), payload?.traceId ?? null);
+  }
+}
+
+function dumpLocalStorageSupabase() {
+  try {
+    const keys = Object.keys(localStorage).filter(k => /supabase/i.test(k));
+    const out: Record < string, string > = {};
+    for (const k of keys) {
+      try {
+        const v = localStorage.getItem(k) ?? '';
+        try {
+          const j = JSON.parse(v);
+          const tokenTail = j?.access_token ? String(j.access_token).slice(-6) : (j?.currentSession?.access_token ? String(j.currentSession.access_token).slice(-6) : null);
+          out[k] = tokenTail ? `[json] tokenTail=${tokenTail}` : `[json] ${Object.keys(j).join(',')}`;
+        } catch {
+          out[k] = String(v).slice(0, 120);
+        }
+      } catch {
+        out[k] = '<error reading>';
+      }
+    }
+    return out;
+  } catch (e) {
+    return { error: String(e) };
   }
 }
 
 /**
- * Browser-only singleton Supabase client.
- *
- * Key settings:
- *   persistSession: true
- *   autoRefreshToken: true
- *   detectSessionInUrl: false
- *
- * ฟังก์ชันนี้จะ log และ report ทุกครั้งที่เกิดปัญหาในการสร้าง client
- * หรือสำหรับเหตุการณ์ auth สำคัญที่พบผ่าน onAuthStateChange
+ * Browser-only singleton Supabase client with mandatory reporting for critical errors.
  */
 export function getBrowserSupabase(): SupabaseClient {
   if (typeof window === 'undefined') {
@@ -38,15 +54,14 @@ export function getBrowserSupabase(): SupabaseClient {
   
   if (client) return client;
   
+  const traceId = makeTraceId();
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
   
   if (!url || !anon) {
     const msg = 'Missing Supabase env vars (NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY)';
-    // Console + client-side remoteLog (จะปรากฏใน Vercel logs via console.error)
-    remoteLog('error', '[supabaseClient] missing env vars', { urlPresent: !!url, anonPresent: !!anon });
-    // ส่งไปยัง server log (บังคับ)
-    void sendServerLog('error', '[supabaseClient] missing env vars', { urlPresent: !!url, anonPresent: !!anon });
+    remoteLog('error', '[supabaseClient] missing env vars', { traceId, urlPresent: !!url, anonPresent: !!anon });
+    void sendServerLog({ traceId, level: 'error', message: '[supabaseClient] missing env vars', urlPresent: !!url, anonPresent: !!anon, localStorage: dumpLocalStorageSupabase(), ts: new Date().toISOString() });
     throw new Error(msg);
   }
   
@@ -59,41 +74,40 @@ export function getBrowserSupabase(): SupabaseClient {
       },
     });
     
-    // สมัครฟังเหตุการณ์ auth เพื่อจับกรณี recovery / token refresh failures ฯลฯ
     try {
       const { data } = client.auth.onAuthStateChange((event, session) => {
-        // log ทุก event แบบ debug
-        remoteLog('debug', `[supabaseClient] onAuthStateChange: ${event}`, {
-          hasSession: !!session,
-          uid: session?.user?.id?.slice(-6) ?? null,
-        });
+        const sessionTail = session?.access_token ? String(session.access_token).slice(-6) : null;
+        remoteLog('debug', `[supabaseClient] onAuthStateChange: ${event}`, { traceId, hasSession: !!session, uid: session?.user?.id?.slice(-6) ?? null, sessionTail });
         
-        // กรณีที่อาจจะต้องรายงานเพิ่มเติมทันทีไปยัง server logs
-        // (เช่น token refresh fail หรือ session หายอย่างไม่คาดคิด)
-        if (event === 'TOKEN_REFRESH_FAILED' || event === 'SIGNED_OUT' || event === 'USER_DELETED') {
-          void sendServerLog('warn', `[supabaseClient] auth event: ${event}`, {
+        // urgent reporting for certain events
+        if (['TOKEN_REFRESH_FAILED', 'USER_DELETED', 'PASSWORD_RECOVERY', 'SIGNED_OUT'].includes(event)) {
+          void sendServerLog({
+            traceId,
+            level: event === 'TOKEN_REFRESH_FAILED' ? 'error' : 'warn',
+            message: `[supabaseClient] auth event: ${event}`,
             event,
             uid: session?.user?.id?.slice(-6) ?? null,
+            sessionTail,
+            localStorage: dumpLocalStorageSupabase(),
+            ts: new Date().toISOString(),
           });
         }
       });
       
-      // เก็บ subscription จะไม่ใช้ในที่นี้ แต่ป้องกัน unused
-      void data;
+      void data; // avoid unused
     } catch (e) {
-      remoteLog('error', '[supabaseClient] onAuthStateChange subscription failed', { error: String(e) });
-      void sendServerLog('error', '[supabaseClient] onAuthStateChange subscription failed', { error: String(e) });
+      remoteLog('error', '[supabaseClient] onAuthStateChange subscription failed', { traceId, error: String(e) });
+      void sendServerLog({ traceId, level: 'error', message: '[supabaseClient] onAuthStateChange subscription failed', error: String(e), ts: new Date().toISOString(), localStorage: dumpLocalStorageSupabase() });
     }
   } catch (e) {
-    remoteLog('error', '[supabaseClient] createClient failed', { error: String(e) });
-    void sendServerLog('error', '[supabaseClient] createClient failed', { error: String(e) });
+    remoteLog('error', '[supabaseClient] createClient failed', { traceId, error: String(e) });
+    void sendServerLog({ traceId, level: 'error', message: '[supabaseClient] createClient failed', error: String(e), ts: new Date().toISOString(), localStorage: dumpLocalStorageSupabase() });
     throw e;
   }
   
   return client;
 }
 
-/** เรียกได้เฉพาะหลัง signOut เท่านั้น */
 export function resetBrowserSupabase(): void {
   client = null;
 }
