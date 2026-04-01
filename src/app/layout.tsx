@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import '../styles/globals.css';
 import { AuthProvider } from '@/context/AuthContext';
 import { PopupProvider } from '@/components/PopupProvider';
+import SessionRecoveryPopup from '@/components/SessionRecoveryPopup';
 
 export const metadata: Metadata = {
   title: 'YPLABS — สภานักเรียนโรงเรียนคำยางพิทยา',
@@ -25,6 +26,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <AuthProvider>
           <PopupProvider>
             {children}
+            {/* แสดง popup เมื่อ session recovery ล้มเหลว */}
+            <SessionRecoveryPopup />
           </PopupProvider>
         </AuthProvider>
       </body>

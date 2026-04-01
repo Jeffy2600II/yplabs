@@ -4,7 +4,7 @@ import React, { createContext, useContext, useEffect, useState, useCallback } fr
 import { getBrowserSupabase, resetBrowserSupabase } from '@/lib/supabaseClient';
 import { remoteLog } from '@/lib/remoteLogger';
 
-/* UserProfile type (ปรับได้ตาม schema จริง) */
+// ─── Types ────────────────────────────────────────────────────────
 type UserProfile = {
   auth_uid: string;
   full_name: string;
@@ -16,6 +16,12 @@ type UserProfile = {
   disabled?: boolean;
 };
 
+export type SessionLog = {
+  ts: string;
+  level: 'info' | 'warn' | 'error';
+  msg: string;
+};
+
 type AuthCtx = {
   loading: boolean;
   user: UserProfile | null;
@@ -23,8 +29,10 @@ type AuthCtx = {
   isMember: boolean;
   refresh: () => Promise<void>;
   signOut: () => Promise<void>;
-  recoveryError: string | null;       // NEW: ข้อความเมื่อ recovery ล้มเหลว
-  recoveryAttempts: number;          // NEW: จำนวนครั้งที่พยายามกู้ session
+  // Recovery state — used by SessionRecoveryPopup
+  recoveryFailed: boolean;
+  recoveryReason: string | null;
+  sessionLogs: SessionLog[];
 };
 
 const AuthContext = createContext<AuthCtx>({
@@ -34,15 +42,21 @@ const AuthContext = createContext<AuthCtx>({
   isMember: false,
   refresh: async () => {},
   signOut: async () => {},
-  recoveryError: null,
-  recoveryAttempts: 0,
+  recoveryFailed: false,
+  recoveryReason: null,
+  sessionLogs: [],
 });
 
 export function useAuth() {
   return useContext(AuthContext);
 }
 
-async function fetchProfile(authUid: string): Promise<UserProfile | null> {
+// ─── fetchProfile (standalone, logs passed as callback) ───────────
+async function fetchProfile(
+  authUid: string,
+  log: (level: SessionLog['level'], msg: string) => void,
+): Promise<UserProfile | null> {
+  log('info', `fetchProfile uid=...${authUid.slice(-6)}`);
   try {
     const supabase = getBrowserSupabase();
     const { data: row, error } = await supabase
@@ -53,311 +67,248 @@ async function fetchProfile(authUid: string): Promise<UserProfile | null> {
       .maybeSingle();
 
     if (error) {
-      void remoteLog('error', '[AuthContext] fetchProfile council_users error', {
+      log('error', `DB error: ${error.message} (code=${error.code ?? '?'}, hint=${error.hint ?? '-'})`);
+      void remoteLog('error', '[AuthContext] fetchProfile DB error', {
         uid: authUid.slice(-6),
-        error: error.message,
-        hint: error.hint ?? null,
-        details: error.details ?? null,
-        code: error.code ?? null,
+        message: error.message,
+        code: error.code,
+        hint: error.hint,
+        details: error.details,
       });
       return null;
     }
 
     if (!row) {
-      void remoteLog('warn', '[AuthContext] fetchProfile: no row found', {
-        uid: authUid.slice(-6),
-        row,
-      });
+      log('warn', 'council_users: ไม่พบแถวสำหรับ uid นี้');
+      void remoteLog('warn', '[AuthContext] fetchProfile: no council_users row', { uid: authUid.slice(-6) });
       return null;
     }
 
-    if (!row.approved || row.disabled) {
-      void remoteLog('warn', '[AuthContext] fetchProfile: account not usable', {
-        uid: authUid.slice(-6),
-        approved: row.approved,
-        disabled: row.disabled,
-      });
+    if (!row.approved) {
+      log('warn', `บัญชียังไม่ได้รับการอนุมัติ (approved=${row.approved})`);
       return null;
     }
 
+    if (row.disabled) {
+      log('warn', `บัญชีถูกปิด (disabled=${row.disabled})`);
+      return null;
+    }
+
+    log('info', `✅ profile: ${row.full_name} | role=${row.role} | year=${row.year}`);
     return row as UserProfile;
   } catch (e) {
-    void remoteLog('error', '[AuthContext] fetchProfile unexpected error', {
-      uid: authUid.slice(-6),
-      error: String(e),
-    });
+    log('error', `fetchProfile exception: ${String(e)}`);
+    void remoteLog('error', '[AuthContext] fetchProfile exception', { uid: authUid.slice(-6), error: String(e) });
     return null;
   }
 }
 
-/** POST ไปยัง /api/debug/log (บังคับเพื่อให้ขึ้นใน Vercel logs) */
-async function sendServerLog(level: 'info' | 'warn' | 'error' | 'debug', message: string, meta?: any) {
+// ─── Server-side log helper ───────────────────────────────────────
+async function pushServerLog(level: string, message: string, meta?: object) {
   try {
     await fetch('/api/debug/log', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ level, message, meta }),
+      body: JSON.stringify({ level, message, meta: meta ?? {}, ts: new Date().toISOString() }),
     });
-  } catch (err) {
-    console.error('[sendServerLog] failed to POST', err);
-  }
+  } catch { /* fire-and-forget */ }
 }
 
-/** debug helper: อ่าน localStorage keys ที่เกี่ยวข้องกับ supabase (redact token content) */
-function dumpLocalStorageSupabase() {
-  try {
-    const keys = Object.keys(localStorage).filter(k => /supabase/i.test(k));
-    const samples: Record<string, string> = {};
-    for (const k of keys) {
-      try {
-        const v = localStorage.getItem(k);
-        if (!v) { samples[k] = '<empty>'; continue; }
-        // หาก JSON และมี access_token ให้ redact ส่วนกลางของ token
-        try {
-          const j = JSON.parse(v);
-          if (j?.currentSession || j?.access_token || j?.user) {
-            let tokenTail = null;
-            if (j?.access_token) tokenTail = String(j.access_token).slice(-6);
-            else if (j?.currentSession?.access_token) tokenTail = String(j.currentSession.access_token).slice(-6);
-            samples[k] = `[json] tokenTail=${tokenTail}`;
-          } else {
-            samples[k] = '[json] ' + Object.keys(j).join(',');
-          }
-        } catch {
-          samples[k] = String(v).slice(0, 80);
-        }
-      } catch {
-        samples[k] = '<error reading>';
-      }
-    }
-    return samples;
-  } catch (e) {
-    return { error: String(e) };
-  }
-}
-
+// ─── AuthProvider ─────────────────────────────────────────────────
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [loading, setLoading] = useState(true);
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [recoveryError, setRecoveryError] = useState<string | null>(null);
-  const [recoveryAttempts, setRecoveryAttempts] = useState(0);
+  const [loading, setLoading]               = useState(true);
+  const [user, setUser]                     = useState<UserProfile | null>(null);
+  const [recoveryFailed, setRecoveryFailed] = useState(false);
+  const [recoveryReason, setRecoveryReason] = useState<string | null>(null);
+  const [sessionLogs, setSessionLogs]       = useState<SessionLog[]>([]);
 
+  // ── Stable log helper ─────────────────────────────────────────
+  // ใช้ append-only; ไม่ต้องเป็น useCallback เพราะใช้ใน useEffect เดียวกัน
+  function pushLog(level: SessionLog['level'], msg: string) {
+    const ts = new Date().toLocaleTimeString('th-TH', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    setSessionLogs(prev => [...prev, { ts, level, msg }]);
+  }
+
+  // ── Main auth effect — runs once on mount ─────────────────────
   useEffect(() => {
     let mounted = true;
-    let subscription: any = null;
+    let subscription: { unsubscribe: () => void } | null = null;
+
+    // Safety net: ถ้า INITIAL_SESSION ไม่ fire ภายใน 10 วินาที
+    // (เกิดได้หาก Supabase client init ค้างหรือ network timeout)
+    const safetyTimer = setTimeout(() => {
+      if (!mounted || !loading) return;
+      const reason = 'Timeout 10s: INITIAL_SESSION ไม่ตอบสนอง — อาจมีปัญหา network หรือ Supabase config';
+      pushLog('error', reason);
+      void pushServerLog('error', '[AuthContext] safety timeout', { reason });
+      setUser(null);
+      setLoading(false);
+      setRecoveryFailed(true);
+      setRecoveryReason(reason);
+    }, 10_000);
 
     try {
       const supabase = getBrowserSupabase();
+      pushLog('info', 'Supabase client ready');
 
       const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (!mounted) return;
 
-        void remoteLog('debug', `[AuthContext] onAuthStateChange: ${event}`, {
+        // บันทึกทุก event
+        pushLog('info', `event: ${event} | session: ${session ? 'YES' : 'NO'} | uid: ${session?.user?.id?.slice(-6) ?? '-'}`);
+        void remoteLog('debug', `[AuthContext] ${event}`, {
           hasSession: !!session,
-          uid: session?.user?.id?.slice(-6) ?? null,
+          uid: session?.user?.id?.slice(-6),
         });
 
-        if (event === 'SIGNED_OUT' || !session?.user) {
+        // event ใดๆ ถูก fire = Supabase init เสร็จแล้ว → ยกเลิก safety timer
+        clearTimeout(safetyTimer);
+
+        // ─── INITIAL_SESSION ────────────────────────────────────
+        // event นี้ fire ครั้งเดียวตอน mount หลัง Supabase โหลด/refresh session เสร็จ
+        // นี่คือจุดเดียวที่เราตัดสิน "มี session หรือเปล่า" ตอน page refresh
+        if (event === 'INITIAL_SESSION') {
+          if (!session?.user) {
+            pushLog('info', 'INITIAL_SESSION: ไม่มี session (ยังไม่ได้ login)');
+            setUser(null);
+            setLoading(false);
+            return;
+          }
+
+          pushLog('info', `INITIAL_SESSION: กำลังดึง profile...`);
+          const profile = await fetchProfile(session.user.id, pushLog);
+
+          if (!mounted) return;
+
+          if (profile) {
+            setUser(profile);
+            setRecoveryFailed(false);
+            setRecoveryReason(null);
+            pushLog('info', `✅ Session กู้คืนสำเร็จ: ${profile.full_name}`);
+            void pushServerLog('info', '[AuthContext] INITIAL_SESSION restored', {
+              uid: session.user.id.slice(-6),
+              name: profile.full_name,
+              role: profile.role,
+            });
+          } else {
+            setUser(null);
+            setRecoveryFailed(true);
+            const reason = 'ไม่พบข้อมูลโปรไฟล์ หรือบัญชีถูกปิดใช้งาน';
+            setRecoveryReason(reason);
+            pushLog('error', `❌ INITIAL_SESSION: ${reason}`);
+            void pushServerLog('error', '[AuthContext] INITIAL_SESSION: fetchProfile failed', {
+              uid: session.user.id.slice(-6),
+            });
+          }
+
+          setLoading(false);
+          return;
+        }
+
+        // ─── SIGNED_IN / TOKEN_REFRESHED / USER_UPDATED ─────────
+        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+          if (!session?.user) return;
+          const profile = await fetchProfile(session.user.id, pushLog);
+          if (!mounted) return;
+          setUser(profile);
+          setRecoveryFailed(false);
+          setRecoveryReason(null);
+          setLoading(false);
+          return;
+        }
+
+        // ─── SIGNED_OUT ──────────────────────────────────────────
+        if (event === 'SIGNED_OUT') {
           setUser(null);
           setLoading(false);
           return;
         }
 
-        try {
-          const profile = await fetchProfile(session.user.id);
-          if (mounted) {
-            setUser(profile);
-            if (!profile) {
-              void remoteLog('warn', '[AuthContext] fetchProfile returned null after auth state change', {
-                event,
-                uid: session.user.id.slice(-6),
-              });
-              await sendServerLog('warn', '[AuthContext] fetchProfile returned null after auth state change', {
-                event,
-                uid: session.user.id.slice(-6),
-              });
-            }
-          }
-        } catch (e) {
-          void remoteLog('error', '[AuthContext] onAuthStateChange handler error', {
-            event,
-            uid: session?.user?.id?.slice(-6) ?? null,
-            error: String(e),
+        // ─── TOKEN_REFRESH_FAILED ────────────────────────────────
+        if (event === 'TOKEN_REFRESH_FAILED') {
+          const reason = 'Token refresh ล้มเหลว — session อาจหมดอายุ กรุณาเข้าสู่ระบบใหม่';
+          pushLog('error', reason);
+          void pushServerLog('error', '[AuthContext] TOKEN_REFRESH_FAILED', {
+            uid: session?.user?.id?.slice(-6),
           });
-          await sendServerLog('error', '[AuthContext] onAuthStateChange handler error', {
-            event,
-            uid: session?.user?.id?.slice(-6) ?? null,
-            error: String(e),
-          });
-          if (mounted) setUser(null);
-        } finally {
-          if (mounted) setLoading(false);
+          setUser(null);
+          setLoading(false);
+          setRecoveryFailed(true);
+          setRecoveryReason(reason);
+          return;
         }
       });
 
       subscription = data.subscription;
 
-      // ----- Initial recovery: retry ดึง session หลายครั้ง -----
-      (async () => {
-        const maxAttempts = 3;
-        let foundSession = null;
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          setRecoveryAttempts(attempt);
-          try {
-            const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
-            if (sessionErr) {
-              void remoteLog('error', `[AuthContext] initial getSession error (attempt ${attempt})`, { error: sessionErr.message });
-              await sendServerLog('error', `[AuthContext] initial getSession error (attempt ${attempt})`, { error: sessionErr.message });
-            } else {
-              const session = sessionData.session;
-              // Log session details (redact token except tail)
-              void remoteLog('debug', `[AuthContext] initial getSession (attempt ${attempt})`, {
-                hasSession: !!session,
-                uid: session?.user?.id?.slice(-6) ?? null,
-                access_token_tail: session?.access_token ? String(session.access_token).slice(-6) : null,
-                expires_at: session?.expires_at ?? null,
-                localStorage: dumpLocalStorageSupabase(),
-              });
-              await sendServerLog('debug', `[AuthContext] initial getSession (attempt ${attempt})`, {
-                hasSession: !!session,
-                uid: session?.user?.id?.slice(-6) ?? null,
-                access_token_tail: session?.access_token ? String(session.access_token).slice(-6) : null,
-                expires_at: session?.expires_at ?? null,
-                localStorage: dumpLocalStorageSupabase(),
-              });
-
-              if (session?.user) {
-                foundSession = session;
-                break;
-              }
-            }
-          } catch (e) {
-            void remoteLog('error', `[AuthContext] initial recovery unexpected error (attempt ${attempt})`, { error: String(e) });
-            await sendServerLog('error', `[AuthContext] initial recovery unexpected error (attempt ${attempt})`, { error: String(e) });
-          }
-
-          // ถ้ายังไม่เจอ session ให้รอแล้วลองอีกครั้ง
-          if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 250));
-        }
-
-        if (!foundSession) {
-          // recovery failed หลังจากพยายามหลายครั้ง — แจ้งให้ UI และ logs
-          if (mounted) {
-            setUser(null);
-            setLoading(false);
-            setRecoveryError('Session recovery failed');
-          }
-          await sendServerLog('error', '[AuthContext] initial recovery failed after attempts', {
-            attempts: maxAttempts,
-            localStorage: dumpLocalStorageSupabase(),
-          });
-          return;
-        }
-
-        // หากเจอ session -> ดึง profile
-        try {
-          const profile = await fetchProfile(foundSession.user.id);
-          if (!profile) {
-            void remoteLog('warn', '[AuthContext] initial fetchProfile returned null', { uid: foundSession.user.id.slice(-6) });
-            await sendServerLog('warn', '[AuthContext] initial fetchProfile returned null', { uid: foundSession.user.id.slice(-6) });
-            if (mounted) {
-              setUser(null);
-              setLoading(false);
-              setRecoveryError('Profile not found or not approved');
-            }
-            return;
-          }
-          if (mounted) {
-            setUser(profile);
-            setLoading(false);
-            setRecoveryError(null);
-            void remoteLog('debug', '[AuthContext] initial session recovered', { uid: foundSession.user.id.slice(-6) });
-            await sendServerLog('debug', '[AuthContext] initial session recovered', { uid: foundSession.user.id.slice(-6) });
-          }
-        } catch (e) {
-          void remoteLog('error', '[AuthContext] initial fetchProfile unexpected error', { error: String(e) });
-          await sendServerLog('error', '[AuthContext] initial fetchProfile unexpected error', { error: String(e) });
-          if (mounted) {
-            setUser(null);
-            setLoading(false);
-            setRecoveryError('Profile fetch error');
-          }
-        }
-      })();
     } catch (e) {
-      void remoteLog('error', '[AuthContext] getBrowserSupabase failed', { error: String(e) });
-      void sendServerLog('error', '[AuthContext] getBrowserSupabase failed', { error: String(e) });
+      clearTimeout(safetyTimer);
+      const reason = `Supabase client init error: ${String(e)}`;
+      pushLog('error', reason);
+      void pushServerLog('error', '[AuthContext] getBrowserSupabase threw', { error: String(e) });
       if (mounted) {
         setUser(null);
         setLoading(false);
-        setRecoveryError('Supabase client initialization failed');
+        setRecoveryFailed(true);
+        setRecoveryReason(reason);
       }
     }
 
     return () => {
       mounted = false;
-      try { subscription?.unsubscribe?.(); } catch { /* ignore */ }
+      clearTimeout(safetyTimer);
+      try { subscription?.unsubscribe(); } catch { /* ignore */ }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ─── refresh (เรียกหลัง login เพื่ออัปเดต context) ───────────
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const supabase = getBrowserSupabase();
       const { data: { user: authUser }, error } = await supabase.auth.getUser();
-
-      if (error) {
-        void remoteLog('error', '[AuthContext] refresh getUser error', { error: error.message });
-        await sendServerLog('error', '[AuthContext] refresh getUser error', { error: error.message });
-        setUser(null);
-        return;
-      }
-
-      if (!authUser) {
-        setUser(null);
-        return;
-      }
-
-      const profile = await fetchProfile(authUser.id);
+      if (error || !authUser) { setUser(null); return; }
+      const profile = await fetchProfile(authUser.id, () => {});
       setUser(profile);
-
-      if (!profile) {
-        void remoteLog('warn', '[AuthContext] refresh: fetchProfile returned null', { uid: authUser.id.slice(-6) });
-        await sendServerLog('warn', '[AuthContext] refresh: fetchProfile returned null', { uid: authUser.id.slice(-6) });
-      }
-    } catch (e) {
-      void remoteLog('error', '[AuthContext] refresh unexpected error', { error: String(e) });
-      await sendServerLog('error', '[AuthContext] refresh unexpected error', { error: String(e) });
+    } catch {
       setUser(null);
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // ─── signOut ──────────────────────────────────────────────────
   const signOut = useCallback(async () => {
     try {
       const supabase = getBrowserSupabase();
-      void remoteLog('info', '[AuthContext] signOut', { uid: user?.auth_uid?.slice(-6) ?? null });
+      void remoteLog('info', '[AuthContext] signOut', { uid: user?.auth_uid?.slice(-6) });
       await supabase.auth.signOut();
     } catch (e) {
       void remoteLog('error', '[AuthContext] signOut error', { error: String(e) });
-      await sendServerLog('error', '[AuthContext] signOut error', { error: String(e) });
     }
     setUser(null);
     setLoading(false);
+    setRecoveryFailed(false);
+    setRecoveryReason(null);
+    setSessionLogs([]);
     resetBrowserSupabase();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   return (
     <AuthContext.Provider value={{
       loading,
       user,
-      isAdmin: !!(user?.role === 'admin'),
+      isAdmin: user?.role === 'admin',
       isMember: !!user,
       refresh,
       signOut,
-      recoveryError,
-      recoveryAttempts,
+      recoveryFailed,
+      recoveryReason,
+      sessionLogs,
     }}>
       {children}
     </AuthContext.Provider>
