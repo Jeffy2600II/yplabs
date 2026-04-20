@@ -1,53 +1,40 @@
 'use client';
 
 /**
- * AuthContext.tsx (v3 — optimized)
+ * AuthContext.tsx  v4 — ZERO-WAIT instant restore
  * ─────────────────────────────────────────────────────────────────
- * การปรับปรุงหลักเพื่อความเร็ว:
+ * หลักการ "instant restore":
  *
- *  1. INSTANT RESTORE จาก cookie
- *     - INITIAL_SESSION มี session → อ่าน cookie ทันที
- *     - ถ้า cookie ตรง auth_uid + ยังไม่หมดอายุ → setUser + setLoading(false) ทันที
- *     - ไม่รอ DB query เลย (ผู้ใช้เห็น UI ได้ทันที)
+ *   useState(() => getCachedProfileSync())
+ *   └─ อ่าน cookie/sessionStorage แบบ synchronous ตอน render ครั้งแรก
+ *   └─ ถ้ามี cache → loading=false + user=profile ทันทีเลย (0ms)
+ *   └─ ผู้ใช้เห็น UI ได้ทันที ไม่มี spinner
  *
- *  2. BACKGROUND RE-VALIDATION
- *     - หลัง instant restore → validate DB ใน background (timeout 5s)
- *     - ถ้า DB ยืนยัน → ต่ออายุ cookie
- *     - ถ้า DB คืน null (ถูก disable ฯลฯ) → clear user + cookie
+ * Background validation (ไม่ block UI):
+ *   INITIAL_SESSION มี token → validate token จริง + re-fetch DB
+ *   ถ้า token หมดอายุ / DB บอก disable → signOut + clear cache
  *
- *  3. TIMEOUTS สั้นลง
- *     - fetchProfile: 5s (จาก 8s)
- *     - Safety timer: 10s (จาก 15s)
- *     - INITIAL_SESSION handler: 6s (จาก 9s)
- *
- *  4. TOKEN REFRESH อัตโนมัติ
- *     - TOKEN_REFRESHED event → ต่ออายุ cookie อัตโนมัติ
+ * Token refresh:
+ *   TOKEN_REFRESHED → refreshCookieTTL() เท่านั้น ไม่ query DB
  * ─────────────────────────────────────────────────────────────────
  */
 
 import React, {
-  createContext, useContext, useEffect, useState, useCallback,
+  createContext, useContext, useEffect, useState, useCallback, useRef,
 } from 'react';
 import { getBrowserSupabase } from '@/lib/supabaseClient';
 import { remoteLog } from '@/lib/remoteLogger';
 import {
+  getCachedProfileSync,
   getCachedProfile,
   setCachedProfile,
   clearCachedProfile,
   refreshCookieTTL,
+  type CachedProfile,
 } from '@/lib/profileCache';
 
 // ─── Types ────────────────────────────────────────────────────────
-type UserProfile = {
-  auth_uid:      string;
-  full_name:     string;
-  student_id?:   string | null;
-  year?:         number;
-  role?:         string;
-  account_type?: string;
-  approved?:     boolean;
-  disabled?:     boolean;
-};
+type UserProfile = CachedProfile;
 
 export type SessionLog = {
   ts:    string;
@@ -82,245 +69,230 @@ const AuthContext = createContext<AuthCtx>({
 export function useAuth() { return useContext(AuthContext); }
 
 // ─── Helpers ──────────────────────────────────────────────────────
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     p,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`Timeout ${ms}ms: ${label}`)), ms)
-    ),
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timeout ${ms}ms`)), ms)),
   ]);
 }
 
-/** Query council_users DB — ใช้ timeout 5s */
-async function fetchProfileFromDB(
-  authUid: string,
-  log: (level: SessionLog['level'], msg: string) => void,
-): Promise<UserProfile | null> {
+async function fetchProfileDB(uid: string): Promise<UserProfile | null> {
   try {
-    const supabase = getBrowserSupabase();
-    const { data: row, error } = await withTimeout(
-      supabase
-        .from('council_users')
+    const sb = getBrowserSupabase();
+    const { data, error } = await withTimeout(
+      sb.from('council_users')
         .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
-        .eq('auth_uid', authUid)
+        .eq('auth_uid', uid)
         .limit(1)
         .maybeSingle(),
-      5_000,
-      'fetchProfileFromDB'
+      5_000
     );
-
-    if (error) {
-      log('error', `DB error: ${error.message} (code=${error.code ?? '?'})`);
-      void remoteLog('error', '[AuthContext] fetchProfile DB error', {
-        uid: authUid.slice(-6), message: error.message, code: error.code,
-      });
-      return null;
-    }
-
-    if (!row) {
-      log('warn', 'council_users: ไม่พบแถว');
-      return null;
-    }
-    if (!row.approved) { log('warn', 'บัญชียังไม่ได้รับการอนุมัติ'); return null; }
-    if (row.disabled)  { log('warn', 'บัญชีถูกปิด'); return null; }
-
-    return row as UserProfile;
-  } catch (e: any) {
-    log('error', `fetchProfile error: ${e?.message ?? String(e)}`);
-    void remoteLog('error', '[AuthContext] fetchProfile exception', {
-      uid: authUid.slice(-6), error: String(e),
-    });
+    if (error || !data) return null;
+    if (!data.approved || data.disabled) return null;
+    return data as UserProfile;
+  } catch {
     return null;
   }
 }
 
 // ─── AuthProvider ─────────────────────────────────────────────────
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [loading, setLoading]               = useState(true);
-  const [user, setUser]                     = useState<UserProfile | null>(null);
+
+  // ★ INSTANT RESTORE — synchronous ใน initializer ทำงานก่อน render ครั้งแรก
+  const [user, setUser] = useState<UserProfile | null>(() => getCachedProfileSync());
+  const [loading, setLoading] = useState<boolean>(() => getCachedProfileSync() === null);
+
   const [recoveryFailed, setRecoveryFailed] = useState(false);
   const [recoveryReason, setRecoveryReason] = useState<string | null>(null);
   const [sessionLogs, setSessionLogs]       = useState<SessionLog[]>([]);
+
+  // ป้องกัน background validate ซ้ำ
+  const validating = useRef(false);
 
   function pushLog(level: SessionLog['level'], msg: string) {
     const ts = new Date().toLocaleTimeString('th-TH', {
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
-    setSessionLogs(prev => [...prev, { ts, level, msg }]);
+    setSessionLogs(p => [...p, { ts, level, msg }]);
   }
 
-  // ── Main auth effect ───────────────────────────────────────────
+  // ── Background validator ───────────────────────────────────────
+  // เรียกหลัง instant restore เพื่อยืนยันว่า token + DB ยังถูกต้อง
+  // ไม่ block UI เด็ดขาด
+  async function backgroundValidate(uid: string) {
+    if (validating.current) return;
+    validating.current = true;
+    try {
+      const profile = await fetchProfileDB(uid);
+      if (profile) {
+        // ข้อมูลยังถูกต้อง → update cache + user (เผื่อข้อมูลเปลี่ยน)
+        setCachedProfile(profile);
+        setUser(profile);
+        pushLog('info', `✅ BG validate OK: ${profile.full_name}`);
+      } else {
+        // ถูก disable หรือลบออก → force logout
+        pushLog('warn', 'BG validate: ไม่พบหรือถูก disable → signOut');
+        clearCachedProfile();
+        setUser(null);
+        setRecoveryFailed(true);
+        setRecoveryReason('บัญชีถูกปิดหรือไม่พบในระบบ');
+        try { await getBrowserSupabase().auth.signOut(); } catch {}
+      }
+    } catch {
+      // network error ระหว่าง background validate → ไม่ logout (เผื่อ offline)
+      pushLog('warn', 'BG validate: network error — keeping cached state');
+    } finally {
+      validating.current = false;
+    }
+  }
+
+  // ── Supabase auth subscription ─────────────────────────────────
   useEffect(() => {
     let mounted = true;
-    let subscription: { unsubscribe: () => void } | null = null;
 
-    // Safety timer 10s (สั้นลงจาก 15s)
-    const safetyTimer = setTimeout(() => {
-      if (!mounted || !loading) return;
-      const reason = 'Timeout 10s: INITIAL_SESSION ไม่ตอบสนอง';
-      pushLog('error', reason);
-      void remoteLog('error', '[AuthContext] safety timeout', { reason });
+    // Safety timer สำหรับกรณีที่ไม่มี cache (loading=true ค้างอยู่)
+    // ถ้ามี cache loading=false แล้ว timer นี้แทบไม่มีผล
+    const safetyTimer = loading ? setTimeout(() => {
+      if (!mounted) return;
+      pushLog('error', 'Safety timeout 8s');
+      void remoteLog('error', '[AuthContext] safety timeout');
       setUser(null);
       setLoading(false);
       setRecoveryFailed(true);
-      setRecoveryReason(reason);
-    }, 10_000);
+      setRecoveryReason('โหลดข้อมูลไม่สำเร็จ กรุณาเข้าสู่ระบบใหม่');
+    }, 8_000) : null;
+
+    let sub: { unsubscribe: () => void } | null = null;
 
     try {
-      const supabase = getBrowserSupabase();
+      const sb = getBrowserSupabase();
 
-      const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
+      const { data } = sb.auth.onAuthStateChange(async (event, session) => {
         if (!mounted) return;
-        clearTimeout(safetyTimer);
+        if (safetyTimer) clearTimeout(safetyTimer);
 
-        pushLog('info', `event="${event}" uid=${session?.user?.id?.slice(-6) ?? 'none'}`);
+        pushLog('info', `▶ ${event} uid=${session?.user?.id?.slice(-6) ?? 'none'}`);
 
-        // ── INITIAL_SESSION ──────────────────────────────────────
+        // ── INITIAL_SESSION ────────────────────────────────────────
         if (event === 'INITIAL_SESSION') {
           if (!session?.user) {
-            setUser(null);
+            // ไม่มี session จริงๆ → ล้าง cache ถ้ามี
+            if (user) {
+              pushLog('warn', 'INITIAL_SESSION: ไม่มี session → clear cache');
+              clearCachedProfile();
+              setUser(null);
+            }
             setLoading(false);
             return;
           }
 
           const uid = session.user.id;
-
-          // ★ ลองอ่านจาก cookie ก่อน — ถ้าตรงให้ set ทันที
           const cached = getCachedProfile(uid);
-          if (cached) {
-            pushLog('info', `✅ Cookie cache hit: ${cached.full_name} → instant restore`);
-            const { exp: _exp, ...profileData } = cached;
-            setUser(profileData);
-            setRecoveryFailed(false);
-            setRecoveryReason(null);
-            setLoading(false);
 
-            // Background re-validate (ไม่ block UI)
-            void (async () => {
-              const fresh = await fetchProfileFromDB(uid, () => {});
+          if (cached) {
+            // Cache ตรง uid → ยืนยันแล้วว่าเป็นคนเดิม
+            // (user ถูก set แล้วจาก useState initializer)
+            // เพียงแต่ต้องตรวจว่า uid ตรง — ป้องกันกรณี user เปลี่ยน device
+            if (user?.auth_uid !== uid) {
+              setUser(cached);
+            }
+            setLoading(false);
+            pushLog('info', `⚡ Instant restore: ${cached.full_name} (from cache)`);
+            // Background validate ไม่ block UI
+            void backgroundValidate(uid);
+          } else {
+            // ไม่มี cache → query DB (กรณี login ครั้งแรก หรือ cache หมดอายุ)
+            pushLog('info', 'Cache miss → DB query...');
+            try {
+              const profile = await withTimeout(fetchProfileDB(uid), 6_000);
               if (!mounted) return;
-              if (fresh) {
-                // อัปเดต user ถ้าข้อมูลเปลี่ยน + ต่ออายุ cookie
-                setUser(fresh);
-                setCachedProfile(fresh);
-                pushLog('info', 'Background DB validate: OK');
+              if (profile) {
+                setCachedProfile(profile);
+                setUser(profile);
+                setRecoveryFailed(false);
+                setRecoveryReason(null);
+                pushLog('info', `✅ DB restore: ${profile.full_name}`);
+                void remoteLog('info', '[AuthContext] INITIAL_SESSION restored (DB)', {
+                  uid: uid.slice(-6), name: profile.full_name,
+                });
               } else {
-                // ถูก disable หรือข้อมูลหาย — force logout
-                pushLog('warn', 'Background DB validate: ไม่พบหรือถูก disable → clear session');
                 clearCachedProfile();
                 setUser(null);
                 setRecoveryFailed(true);
-                setRecoveryReason('บัญชีถูกปิดหรือไม่พบข้อมูลในระบบ');
-                try { await supabase.auth.signOut(); } catch {}
+                setRecoveryReason('ไม่พบข้อมูลโปรไฟล์ หรือบัญชีถูกปิด');
+                pushLog('error', '❌ DB: ไม่พบหรือถูก disable');
               }
-            })();
-            return;
-          }
-
-          // Cache miss → query DB (timeout 6s)
-          pushLog('info', 'Cache miss → fetching DB...');
-          try {
-            const profile = await withTimeout(
-              fetchProfileFromDB(uid, pushLog),
-              6_000,
-              'INITIAL_SESSION fetchProfile'
-            );
-
-            if (!mounted) return;
-
-            if (profile) {
-              setCachedProfile(profile);
-              setUser(profile);
-              setRecoveryFailed(false);
-              setRecoveryReason(null);
-              pushLog('info', `✅ Session restored: ${profile.full_name}`);
-              void remoteLog('info', '[AuthContext] INITIAL_SESSION restored (DB)', {
-                uid: uid.slice(-6), name: profile.full_name,
-              });
-            } else {
+            } catch (e: any) {
+              if (!mounted) return;
               setUser(null);
               setRecoveryFailed(true);
-              const reason = 'ไม่พบข้อมูลโปรไฟล์ หรือบัญชีถูกปิดใช้งาน';
-              setRecoveryReason(reason);
-              pushLog('error', `❌ ${reason}`);
+              setRecoveryReason(`โหลดข้อมูลล้มเหลว: ${e?.message}`);
+              pushLog('error', `❌ DB error: ${e?.message}`);
             }
-          } catch (e: any) {
-            if (!mounted) return;
-            const reason = `ไม่สามารถโหลดข้อมูลได้: ${e?.message}`;
-            pushLog('error', `❌ ${reason}`);
-            setUser(null);
-            setRecoveryFailed(true);
-            setRecoveryReason(reason);
+            if (mounted) setLoading(false);
           }
-
-          if (mounted) setLoading(false);
           return;
         }
 
-        // ── SIGNED_IN ────────────────────────────────────────────
+        // ── SIGNED_IN ──────────────────────────────────────────────
         if (event === 'SIGNED_IN') {
           if (!session?.user) return;
-          try {
-            const profile = await withTimeout(
-              fetchProfileFromDB(session.user.id, pushLog),
-              6_000,
-              'SIGNED_IN fetchProfile'
-            );
-            if (!mounted) return;
-            if (profile) {
-              setCachedProfile(profile);
-              setUser(profile);
-            } else {
-              setUser(null);
-            }
-            setRecoveryFailed(false);
-            setRecoveryReason(null);
-          } catch (e: any) {
-            pushLog('error', `SIGNED_IN error: ${e?.message}`);
+          // login เพิ่งเสร็จ — AuthContext.login page บันทึก cache ให้แล้ว
+          // แต่ถ้า cache ยังไม่มี (เช่น login ผ่าน OAuth) ให้ query DB
+          const uid = session.user.id;
+          const cached = getCachedProfile(uid);
+          if (cached) {
+            setUser(cached);
+          } else {
+            try {
+              const profile = await withTimeout(fetchProfileDB(uid), 6_000);
+              if (!mounted) return;
+              if (profile) { setCachedProfile(profile); setUser(profile); }
+              else setUser(null);
+            } catch {}
           }
+          setRecoveryFailed(false);
+          setRecoveryReason(null);
           if (mounted) setLoading(false);
           return;
         }
 
-        // ── TOKEN_REFRESHED ──────────────────────────────────────
-        // Token ถูก refresh อัตโนมัติ → ต่ออายุ cookie เท่านั้น ไม่ query DB ใหม่
+        // ── TOKEN_REFRESHED ────────────────────────────────────────
+        // ไม่ query DB ซ้ำ เพียงต่ออายุ cache
         if (event === 'TOKEN_REFRESHED') {
           if (session?.user?.id) {
             refreshCookieTTL(session.user.id);
-            pushLog('info', 'Token refreshed → cookie TTL extended');
+            pushLog('info', 'Token refreshed → cache TTL extended');
           }
           if (mounted) setLoading(false);
           return;
         }
 
-        // ── USER_UPDATED ─────────────────────────────────────────
-        if (event === 'USER_UPDATED') {
-          if (!session?.user) return;
+        // ── USER_UPDATED ───────────────────────────────────────────
+        if (event === 'USER_UPDATED' && session?.user) {
           try {
-            const profile = await withTimeout(
-              fetchProfileFromDB(session.user.id, pushLog),
-              5_000,
-              'USER_UPDATED fetchProfile'
-            );
+            const p = await withTimeout(fetchProfileDB(session.user.id), 5_000);
             if (!mounted) return;
-            if (profile) { setCachedProfile(profile); setUser(profile); }
+            if (p) { setCachedProfile(p); setUser(p); }
           } catch {}
           if (mounted) setLoading(false);
           return;
         }
 
-        // ── SIGNED_OUT ───────────────────────────────────────────
+        // ── SIGNED_OUT ─────────────────────────────────────────────
         if (event === 'SIGNED_OUT') {
           clearCachedProfile();
           setUser(null);
           setLoading(false);
           setRecoveryFailed(false);
           setRecoveryReason(null);
-          pushLog('info', 'Signed out — cookie & state cleared');
+          pushLog('info', 'Signed out');
           return;
         }
 
-        // ── TOKEN_REFRESH_FAILED ─────────────────────────────────
+        // ── TOKEN_REFRESH_FAILED ───────────────────────────────────
         if (event === 'TOKEN_REFRESH_FAILED') {
           clearCachedProfile();
           const reason = 'Token หมดอายุ — กรุณาเข้าสู่ระบบใหม่';
@@ -333,10 +305,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       });
 
-      subscription = data.subscription;
+      sub = data.subscription;
 
     } catch (e: any) {
-      clearTimeout(safetyTimer);
+      if (safetyTimer) clearTimeout(safetyTimer);
       const reason = `Supabase init error: ${String(e)}`;
       pushLog('error', reason);
       void remoteLog('error', '[AuthContext] init error', { error: String(e) });
@@ -350,8 +322,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       mounted = false;
-      clearTimeout(safetyTimer);
-      try { subscription?.unsubscribe(); } catch {}
+      if (safetyTimer) clearTimeout(safetyTimer);
+      try { sub?.unsubscribe(); } catch {}
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -360,16 +332,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const supabase = getBrowserSupabase();
-      const { data: { user: authUser }, error } = await supabase.auth.getUser();
-      if (error || !authUser) { setUser(null); clearCachedProfile(); return; }
-
-      const profile = await withTimeout(
-        fetchProfileFromDB(authUser.id, () => {}),
-        5_000,
-        'refresh fetchProfile'
-      );
-      if (profile) { setCachedProfile(profile); setUser(profile); }
+      const sb = getBrowserSupabase();
+      const { data: { user: au } } = await sb.auth.getUser();
+      if (!au) { setUser(null); clearCachedProfile(); return; }
+      const p = await withTimeout(fetchProfileDB(au.id), 5_000);
+      if (p) { setCachedProfile(p); setUser(p); }
       else { setUser(null); clearCachedProfile(); }
     } catch {
       setUser(null);
@@ -383,9 +350,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearCachedProfile();
     setSessionLogs([]);
     try {
-      const supabase = getBrowserSupabase();
+      const sb = getBrowserSupabase();
       void remoteLog('info', '[AuthContext] signOut', { uid: user?.auth_uid?.slice(-6) });
-      await supabase.auth.signOut();
+      await sb.auth.signOut();
     } catch (e) {
       void remoteLog('error', '[AuthContext] signOut error', { error: String(e) });
       setUser(null);

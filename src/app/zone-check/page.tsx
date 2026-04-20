@@ -1,16 +1,15 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { remoteLog } from '@/lib/remoteLogger';
-import { getFreshToken } from '@/lib/sessionUtils';
+import { fetchWithAuth } from '@/lib/sessionUtils';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
 type ZStatus = 'pending' | 'clean' | 'dirty';
-type ZState = { status: ZStatus; note: string; file: File | null; preview: string | null; saved: boolean; };
+type ZState = { status: ZStatus; note: string; file: File | null; preview: string | null; saved: boolean };
 
 function initZones(): Record<string, ZState> {
   const r: Record<string, ZState> = {};
@@ -19,7 +18,6 @@ function initZones(): Record<string, ZState> {
 }
 
 export default function ZoneCheckPage() {
-  const router = useRouter();
   const { isMember, user, loading: authLoading } = useAuth();
   const [zones, setZones] = useState(initZones);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -45,22 +43,9 @@ export default function ZoneCheckPage() {
     const toSend = ZONES.filter(z => zones[z].status !== 'pending');
     if (!toSend.length) { setError('กรุณาตรวจอย่างน้อย 1 เขต'); return; }
 
-    setSubmitting(true);
-    setError(null);
-
-    void remoteLog('info', '[zone-check] submitting', {
-      inspector: user?.full_name,
-      zones: toSend.map(z => ({ zone: z, status: zones[z].status })),
-    });
+    setSubmitting(true); setError(null);
 
     try {
-      // ★ ใช้ getFreshToken แทน getSession — ป้องกัน token หมดอายุตอน upload
-      const token = await getFreshToken();
-      if (!token) {
-        void remoteLog('error', '[zone-check] no auth token');
-        throw new Error('กรุณาเข้าสู่ระบบก่อน');
-      }
-
       for (const zone of toSend) {
         const z = zones[zone];
         const fd = new FormData();
@@ -69,20 +54,15 @@ export default function ZoneCheckPage() {
         fd.append('note', z.note);
         if (z.file) fd.append('photo', z.file);
 
-        const res = await fetch('/api/council/zone-check', {
+        // ★ fetchWithAuth: token fresh อัตโนมัติ + retry 401
+        const res = await fetchWithAuth('/api/council/zone-check', {
           method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
           body: fd,
+          noContentType: true, // ไม่ set Content-Type ให้ browser จัดการ boundary เอง
         });
         const json = await res.json();
 
-        if (!res.ok) {
-          void remoteLog('error', '[zone-check] save failed', {
-            zone, httpStatus: res.status, apiError: json.error,
-          });
-          throw new Error(`เขต ${zone}: ${json.error ?? 'บันทึกล้มเหลว'}`);
-        }
-
+        if (!res.ok) throw new Error(`เขต ${zone}: ${json.error ?? 'บันทึกล้มเหลว'}`);
         update(zone, { saved: true });
       }
 
@@ -106,7 +86,7 @@ export default function ZoneCheckPage() {
         <div className="card" style={{ textAlign: 'center', padding: '48px 24px' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>🔒</div>
           <h2 style={{ marginBottom: 8 }}>ต้องเข้าสู่ระบบก่อน</h2>
-          <p style={{ color: 'var(--text-3)', marginBottom: 20 }}>เฉพาะสมาชิกสภาเท่านั้นที่สามารถบันทึกผลการตรวจได้</p>
+          <p style={{ color: 'var(--text-3)', marginBottom: 20 }}>เฉพาะสมาชิกสภาเท่านั้น</p>
           <Link href="/login" className="btn btn-primary">เข้าสู่ระบบ</Link>
         </div>
       </AppShell>
@@ -146,31 +126,20 @@ export default function ZoneCheckPage() {
             {ZONES.map(zone => {
               const z = zones[zone];
               const isOpen = expanded === zone;
-              const borderCol = z.status === 'clean' ? '#86efac' : z.status === 'dirty' ? '#fca5a5' : 'var(--border)';
-              const bgCol = z.status === 'clean' ? 'var(--green-bg)' : z.status === 'dirty' ? 'var(--red-bg)' : 'var(--surface)';
+              const brd = z.status === 'clean' ? '#86efac' : z.status === 'dirty' ? '#fca5a5' : 'var(--border)';
+              const bg  = z.status === 'clean' ? 'var(--green-bg)' : z.status === 'dirty' ? 'var(--red-bg)' : 'var(--surface)';
               return (
-                <div key={zone} style={{ background: bgCol, border: `1.5px solid ${borderCol}`, borderRadius: 'var(--r-lg)', overflow: 'hidden', transition: 'all 0.18s' }}>
-                  <div
-                    onClick={() => setExpanded(isOpen ? null : zone)}
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 16px', cursor: 'pointer', userSelect: 'none', gap: 10 }}
-                  >
+                <div key={zone} style={{ background: bg, border: `1.5px solid ${brd}`, borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+                  <div onClick={() => setExpanded(isOpen ? null : zone)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 16px', cursor: 'pointer', userSelect: 'none', gap: 10 }}>
                     <span style={{ fontWeight: 700, fontSize: 15, minWidth: 60 }}>{zone}</span>
                     <div style={{ display: 'flex', gap: 6, flex: 1, justifyContent: 'center' }}>
-                      <button
-                        onClick={e => { e.stopPropagation(); update(zone, { status: 'clean' }); }}
-                        className="btn btn-sm"
-                        style={{ background: z.status === 'clean' ? 'var(--green)' : 'rgba(22,163,74,0.10)', color: z.status === 'clean' ? '#fff' : 'var(--green)', border: 'none', padding: '5px 14px' }}
-                      >✅ สะอาด</button>
-                      <button
-                        onClick={e => { e.stopPropagation(); update(zone, { status: 'dirty' }); }}
-                        className="btn btn-sm"
-                        style={{ background: z.status === 'dirty' ? 'var(--red)' : 'rgba(220,38,38,0.08)', color: z.status === 'dirty' ? '#fff' : 'var(--red)', border: 'none', padding: '5px 14px' }}
-                      >❌ ไม่สะอาด</button>
+                      <button onClick={e => { e.stopPropagation(); update(zone, { status: 'clean' }); }} className="btn btn-sm" style={{ background: z.status === 'clean' ? 'var(--green)' : 'rgba(22,163,74,0.10)', color: z.status === 'clean' ? '#fff' : 'var(--green)', border: 'none', padding: '5px 14px' }}>✅ สะอาด</button>
+                      <button onClick={e => { e.stopPropagation(); update(zone, { status: 'dirty' }); }} className="btn btn-sm" style={{ background: z.status === 'dirty' ? 'var(--red)' : 'rgba(220,38,38,0.08)', color: z.status === 'dirty' ? '#fff' : 'var(--red)', border: 'none', padding: '5px 14px' }}>❌ ไม่สะอาด</button>
                     </div>
-                    <span style={{ color: 'var(--text-3)', fontSize: 11, transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }}>▼</span>
+                    <span style={{ color: 'var(--text-3)', fontSize: 11, transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>▼</span>
                   </div>
                   {isOpen && (
-                    <div style={{ borderTop: `1px solid ${borderCol}`, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ borderTop: `1px solid ${brd}`, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
                       <div className="form-group">
                         <label className="form-label">หมายเหตุ</label>
                         <input value={z.note} onChange={e => update(zone, { note: e.target.value })} placeholder="เช่น พบขยะในห้องน้ำ..." />
@@ -189,11 +158,7 @@ export default function ZoneCheckPage() {
 
           {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
 
-          <button
-            onClick={handleSubmit}
-            disabled={submitting || checked === 0}
-            className="btn btn-primary btn-full btn-lg"
-          >
+          <button onClick={handleSubmit} disabled={submitting || checked === 0} className="btn btn-primary btn-full btn-lg">
             {submitting ? '🔄 กำลังบันทึก...' : `📤 บันทึกผลตรวจ (${checked} เขต)`}
           </button>
         </>
