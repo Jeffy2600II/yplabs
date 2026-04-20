@@ -1,11 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { getBrowserSupabase } from '@/lib/supabaseClient';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { remoteLog } from '@/lib/remoteLogger';
+import { getFreshToken } from '@/lib/sessionUtils';
 
 type DutyEntry = {
   id: string; student_name: string; student_id: string;
@@ -24,27 +24,12 @@ export default function DutyPage() {
 
   useEffect(() => { void load(); }, []);
 
-  async function getToken() {
-    const supabase = getBrowserSupabase();
-    const { data } = await supabase.auth.getSession();
-    return data?.session?.access_token ?? null;
-  }
-
   async function load() {
     setLoading(true);
     try {
-      const token = await getToken();
-      const res = await fetch('/api/council/duty/today', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-
-      if (!res.ok) {
-        void remoteLog('error', '[duty-page] failed to load duty list', {
-          httpStatus: res.status,
-        });
-      } else {
-        setDuties(await res.json() || []);
-      }
+      // public endpoint ไม่ต้องการ token
+      const res = await fetch('/api/public/duty/today');
+      if (res.ok) setDuties(await res.json() || []);
     } catch (e: any) {
       void remoteLog('error', '[duty-page] load error', { error: e?.message });
     }
@@ -57,17 +42,10 @@ export default function DutyPage() {
   async function handleCheckIn() {
     setCheckingIn(true); setError(null); setSuccess(null);
 
-    void remoteLog('info', '[duty-page] checkin attempt', {
-      uid: user?.auth_uid?.slice(-6),
-      name: user?.full_name,
-    });
-
     try {
-      const token = await getToken();
-      if (!token) {
-        void remoteLog('error', '[duty-page] checkin: no auth token');
-        throw new Error('กรุณาเข้าสู่ระบบก่อน');
-      }
+      // ★ getFreshToken — ป้องกัน token หมดอายุระหว่างกดเช็คอิน
+      const token = await getFreshToken();
+      if (!token) throw new Error('กรุณาเข้าสู่ระบบก่อน');
 
       const res = await fetch('/api/council/duty/checkin', {
         method: 'POST',
@@ -75,21 +53,7 @@ export default function DutyPage() {
         body: JSON.stringify({ note }),
       });
       const json = await res.json();
-
-      if (!res.ok) {
-        void remoteLog('error', '[duty-page] checkin API error', {
-          httpStatus: res.status,
-          apiError: json.error,
-          uid: user?.auth_uid?.slice(-6),
-        });
-        throw new Error(json.error ?? 'เช็คอินล้มเหลว');
-      }
-
-      void remoteLog('info', '[duty-page] checkin success', {
-        uid: user?.auth_uid?.slice(-6),
-        name: user?.full_name,
-        hasNote: !!note,
-      });
+      if (!res.ok) throw new Error(json.error ?? 'เช็คอินล้มเหลว');
 
       setSuccess('เช็คอินสำเร็จแล้ว ✅');
       setNote('');

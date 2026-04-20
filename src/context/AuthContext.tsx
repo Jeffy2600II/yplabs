@@ -1,13 +1,27 @@
 'use client';
 
 /**
- * AuthContext.tsx (fixed)
+ * AuthContext.tsx (v3 — optimized)
  * ─────────────────────────────────────────────────────────────────
- * การแก้ไขหลัก:
- *  1. fetchProfile มี timeout 8 วินาที ป้องกัน hang ถาวร
- *  2. ไม่เรียก resetBrowserSupabase() — ทำให้เกิด lock conflict
- *  3. Safety timer ยาวขึ้นเป็น 15s และ clear ทุก event ไม่ใช่แค่ INITIAL_SESSION
- *  4. SIGNED_IN handler ไม่ setLoading(false) ซ้ำ (จัดการโดย INITIAL_SESSION แล้ว)
+ * การปรับปรุงหลักเพื่อความเร็ว:
+ *
+ *  1. INSTANT RESTORE จาก cookie
+ *     - INITIAL_SESSION มี session → อ่าน cookie ทันที
+ *     - ถ้า cookie ตรง auth_uid + ยังไม่หมดอายุ → setUser + setLoading(false) ทันที
+ *     - ไม่รอ DB query เลย (ผู้ใช้เห็น UI ได้ทันที)
+ *
+ *  2. BACKGROUND RE-VALIDATION
+ *     - หลัง instant restore → validate DB ใน background (timeout 5s)
+ *     - ถ้า DB ยืนยัน → ต่ออายุ cookie
+ *     - ถ้า DB คืน null (ถูก disable ฯลฯ) → clear user + cookie
+ *
+ *  3. TIMEOUTS สั้นลง
+ *     - fetchProfile: 5s (จาก 8s)
+ *     - Safety timer: 10s (จาก 15s)
+ *     - INITIAL_SESSION handler: 6s (จาก 9s)
+ *
+ *  4. TOKEN REFRESH อัตโนมัติ
+ *     - TOKEN_REFRESHED event → ต่ออายุ cookie อัตโนมัติ
  * ─────────────────────────────────────────────────────────────────
  */
 
@@ -16,17 +30,23 @@ import React, {
 } from 'react';
 import { getBrowserSupabase } from '@/lib/supabaseClient';
 import { remoteLog } from '@/lib/remoteLogger';
+import {
+  getCachedProfile,
+  setCachedProfile,
+  clearCachedProfile,
+  refreshCookieTTL,
+} from '@/lib/profileCache';
 
 // ─── Types ────────────────────────────────────────────────────────
 type UserProfile = {
-  auth_uid:     string;
-  full_name:    string;
-  student_id?:  string;
-  year?:        number;
-  role?:        string;
+  auth_uid:      string;
+  full_name:     string;
+  student_id?:   string | null;
+  year?:         number;
+  role?:         string;
   account_type?: string;
-  approved?:    boolean;
-  disabled?:    boolean;
+  approved?:     boolean;
+  disabled?:     boolean;
 };
 
 export type SessionLog = {
@@ -59,11 +79,9 @@ const AuthContext = createContext<AuthCtx>({
   sessionLogs: [],
 });
 
-export function useAuth() {
-  return useContext(AuthContext);
-}
+export function useAuth() { return useContext(AuthContext); }
 
-// ─── withTimeout ──────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     p,
@@ -73,61 +91,44 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   ]);
 }
 
-// ─── fetchProfile ─────────────────────────────────────────────────
-async function fetchProfile(
+/** Query council_users DB — ใช้ timeout 5s */
+async function fetchProfileFromDB(
   authUid: string,
   log: (level: SessionLog['level'], msg: string) => void,
 ): Promise<UserProfile | null> {
-  log('info', `fetchProfile uid=...${authUid.slice(-6)}`);
   try {
     const supabase = getBrowserSupabase();
-
-    const query = supabase
-      .from('council_users')
-      .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
-      .eq('auth_uid', authUid)
-      .limit(1)
-      .maybeSingle();
-
-    // ✅ timeout ป้องกัน hang ถาวร
-    const { data: row, error } = await withTimeout(query, 8_000, 'fetchProfile DB query');
+    const { data: row, error } = await withTimeout(
+      supabase
+        .from('council_users')
+        .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
+        .eq('auth_uid', authUid)
+        .limit(1)
+        .maybeSingle(),
+      5_000,
+      'fetchProfileFromDB'
+    );
 
     if (error) {
       log('error', `DB error: ${error.message} (code=${error.code ?? '?'})`);
       void remoteLog('error', '[AuthContext] fetchProfile DB error', {
-        uid: authUid.slice(-6),
-        message: error.message,
-        code: error.code,
+        uid: authUid.slice(-6), message: error.message, code: error.code,
       });
       return null;
     }
 
     if (!row) {
-      log('warn', 'council_users: ไม่พบแถวสำหรับ uid นี้');
-      void remoteLog('warn', '[AuthContext] fetchProfile: no council_users row', {
-        uid: authUid.slice(-6),
-      });
+      log('warn', 'council_users: ไม่พบแถว');
       return null;
     }
+    if (!row.approved) { log('warn', 'บัญชียังไม่ได้รับการอนุมัติ'); return null; }
+    if (row.disabled)  { log('warn', 'บัญชีถูกปิด'); return null; }
 
-    if (!row.approved) {
-      log('warn', `บัญชียังไม่ได้รับการอนุมัติ (approved=${row.approved})`);
-      return null;
-    }
-
-    if (row.disabled) {
-      log('warn', `บัญชีถูกปิด (disabled=${row.disabled})`);
-      return null;
-    }
-
-    log('info', `✅ profile: ${row.full_name} | role=${row.role} | year=${row.year}`);
     return row as UserProfile;
-
   } catch (e: any) {
-    log('error', `fetchProfile exception: ${e?.message ?? String(e)}`);
+    log('error', `fetchProfile error: ${e?.message ?? String(e)}`);
     void remoteLog('error', '[AuthContext] fetchProfile exception', {
-      uid: authUid.slice(-6),
-      error: String(e),
+      uid: authUid.slice(-6), error: String(e),
     });
     return null;
   }
@@ -153,141 +154,182 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
     let subscription: { unsubscribe: () => void } | null = null;
 
-    // Safety timer — ป้องกัน hang ถ้า INITIAL_SESSION ไม่ยิงเลย
-    // ยาวขึ้นเป็น 15s เพราะ mobile / slow network อาจช้ากว่านั้น
+    // Safety timer 10s (สั้นลงจาก 15s)
     const safetyTimer = setTimeout(() => {
       if (!mounted || !loading) return;
-      const reason = 'Timeout 15s: INITIAL_SESSION ไม่ตอบสนอง — ตรวจสอบ network หรือ Supabase config';
+      const reason = 'Timeout 10s: INITIAL_SESSION ไม่ตอบสนอง';
       pushLog('error', reason);
       void remoteLog('error', '[AuthContext] safety timeout', { reason });
       setUser(null);
       setLoading(false);
       setRecoveryFailed(true);
       setRecoveryReason(reason);
-    }, 15_000);
+    }, 10_000);
 
     try {
       const supabase = getBrowserSupabase();
-      pushLog('info', 'Supabase client ready');
 
       const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
         if (!mounted) return;
-
-        pushLog('info', `event="${event}" | session=${session ? 'YES uid=...'+session.user.id.slice(-6) : 'NO'}`);
-        void remoteLog('debug', `[AuthContext] ${event}`, {
-          hasSession: !!session,
-          uid: session?.user?.id?.slice(-6),
-        });
-
-        // ✅ ทุก event ที่ยิงแล้วต้อง clear safety timer
         clearTimeout(safetyTimer);
+
+        pushLog('info', `event="${event}" uid=${session?.user?.id?.slice(-6) ?? 'none'}`);
 
         // ── INITIAL_SESSION ──────────────────────────────────────
         if (event === 'INITIAL_SESSION') {
           if (!session?.user) {
-            pushLog('info', 'INITIAL_SESSION: ไม่มี session (ยังไม่ได้ login)');
             setUser(null);
             setLoading(false);
             return;
           }
 
-          pushLog('info', 'INITIAL_SESSION: มี session → fetchProfile...');
+          const uid = session.user.id;
 
+          // ★ ลองอ่านจาก cookie ก่อน — ถ้าตรงให้ set ทันที
+          const cached = getCachedProfile(uid);
+          if (cached) {
+            pushLog('info', `✅ Cookie cache hit: ${cached.full_name} → instant restore`);
+            const { exp: _exp, ...profileData } = cached;
+            setUser(profileData);
+            setRecoveryFailed(false);
+            setRecoveryReason(null);
+            setLoading(false);
+
+            // Background re-validate (ไม่ block UI)
+            void (async () => {
+              const fresh = await fetchProfileFromDB(uid, () => {});
+              if (!mounted) return;
+              if (fresh) {
+                // อัปเดต user ถ้าข้อมูลเปลี่ยน + ต่ออายุ cookie
+                setUser(fresh);
+                setCachedProfile(fresh);
+                pushLog('info', 'Background DB validate: OK');
+              } else {
+                // ถูก disable หรือข้อมูลหาย — force logout
+                pushLog('warn', 'Background DB validate: ไม่พบหรือถูก disable → clear session');
+                clearCachedProfile();
+                setUser(null);
+                setRecoveryFailed(true);
+                setRecoveryReason('บัญชีถูกปิดหรือไม่พบข้อมูลในระบบ');
+                try { await supabase.auth.signOut(); } catch {}
+              }
+            })();
+            return;
+          }
+
+          // Cache miss → query DB (timeout 6s)
+          pushLog('info', 'Cache miss → fetching DB...');
           try {
             const profile = await withTimeout(
-              fetchProfile(session.user.id, pushLog),
-              9_000,
+              fetchProfileFromDB(uid, pushLog),
+              6_000,
               'INITIAL_SESSION fetchProfile'
             );
 
             if (!mounted) return;
 
             if (profile) {
+              setCachedProfile(profile);
               setUser(profile);
               setRecoveryFailed(false);
               setRecoveryReason(null);
-              pushLog('info', `✅ Session กู้คืนสำเร็จ: ${profile.full_name}`);
-              void remoteLog('info', '[AuthContext] INITIAL_SESSION restored', {
-                uid: session.user.id.slice(-6),
-                name: profile.full_name,
+              pushLog('info', `✅ Session restored: ${profile.full_name}`);
+              void remoteLog('info', '[AuthContext] INITIAL_SESSION restored (DB)', {
+                uid: uid.slice(-6), name: profile.full_name,
               });
             } else {
               setUser(null);
               setRecoveryFailed(true);
               const reason = 'ไม่พบข้อมูลโปรไฟล์ หรือบัญชีถูกปิดใช้งาน';
               setRecoveryReason(reason);
-              pushLog('error', `❌ INITIAL_SESSION: ${reason}`);
-              void remoteLog('error', '[AuthContext] INITIAL_SESSION: fetchProfile failed', {
-                uid: session.user.id.slice(-6),
-              });
+              pushLog('error', `❌ ${reason}`);
             }
           } catch (e: any) {
             if (!mounted) return;
-            const reason = `fetchProfile timeout/error: ${e?.message}`;
-            pushLog('error', `❌ INITIAL_SESSION: ${reason}`);
+            const reason = `ไม่สามารถโหลดข้อมูลได้: ${e?.message}`;
+            pushLog('error', `❌ ${reason}`);
             setUser(null);
             setRecoveryFailed(true);
             setRecoveryReason(reason);
-            void remoteLog('error', '[AuthContext] INITIAL_SESSION fetchProfile threw', {
-              uid: session.user.id.slice(-6),
-              error: e?.message,
-            });
           }
 
-          // ✅ setLoading(false) เสมอหลัง INITIAL_SESSION จบ
           if (mounted) setLoading(false);
           return;
         }
 
-        // ── SIGNED_IN / TOKEN_REFRESHED / USER_UPDATED ───────────
-        if (
-          event === 'SIGNED_IN' ||
-          event === 'TOKEN_REFRESHED' ||
-          event === 'USER_UPDATED'
-        ) {
+        // ── SIGNED_IN ────────────────────────────────────────────
+        if (event === 'SIGNED_IN') {
           if (!session?.user) return;
           try {
             const profile = await withTimeout(
-              fetchProfile(session.user.id, pushLog),
-              9_000,
-              `${event} fetchProfile`
+              fetchProfileFromDB(session.user.id, pushLog),
+              6_000,
+              'SIGNED_IN fetchProfile'
             );
             if (!mounted) return;
-            setUser(profile);
+            if (profile) {
+              setCachedProfile(profile);
+              setUser(profile);
+            } else {
+              setUser(null);
+            }
             setRecoveryFailed(false);
             setRecoveryReason(null);
-            // ✅ setLoading false เฉพาะตอนที่ loading ยังเป็น true
-            // (กรณี INITIAL_SESSION ไม่เคย fire แต่ SIGNED_IN fire แทน)
-            setLoading(false);
           } catch (e: any) {
-            pushLog('error', `${event} fetchProfile timeout: ${e?.message}`);
-            if (mounted) setLoading(false);
+            pushLog('error', `SIGNED_IN error: ${e?.message}`);
           }
+          if (mounted) setLoading(false);
+          return;
+        }
+
+        // ── TOKEN_REFRESHED ──────────────────────────────────────
+        // Token ถูก refresh อัตโนมัติ → ต่ออายุ cookie เท่านั้น ไม่ query DB ใหม่
+        if (event === 'TOKEN_REFRESHED') {
+          if (session?.user?.id) {
+            refreshCookieTTL(session.user.id);
+            pushLog('info', 'Token refreshed → cookie TTL extended');
+          }
+          if (mounted) setLoading(false);
+          return;
+        }
+
+        // ── USER_UPDATED ─────────────────────────────────────────
+        if (event === 'USER_UPDATED') {
+          if (!session?.user) return;
+          try {
+            const profile = await withTimeout(
+              fetchProfileFromDB(session.user.id, pushLog),
+              5_000,
+              'USER_UPDATED fetchProfile'
+            );
+            if (!mounted) return;
+            if (profile) { setCachedProfile(profile); setUser(profile); }
+          } catch {}
+          if (mounted) setLoading(false);
           return;
         }
 
         // ── SIGNED_OUT ───────────────────────────────────────────
         if (event === 'SIGNED_OUT') {
+          clearCachedProfile();
           setUser(null);
           setLoading(false);
           setRecoveryFailed(false);
           setRecoveryReason(null);
-          pushLog('info', 'SIGNED_OUT — session cleared');
+          pushLog('info', 'Signed out — cookie & state cleared');
           return;
         }
 
         // ── TOKEN_REFRESH_FAILED ─────────────────────────────────
         if (event === 'TOKEN_REFRESH_FAILED') {
-          const reason = 'Token refresh ล้มเหลว — กรุณาเข้าสู่ระบบใหม่';
+          clearCachedProfile();
+          const reason = 'Token หมดอายุ — กรุณาเข้าสู่ระบบใหม่';
           pushLog('error', reason);
-          void remoteLog('error', '[AuthContext] TOKEN_REFRESH_FAILED', {
-            uid: session?.user?.id?.slice(-6),
-          });
+          void remoteLog('error', '[AuthContext] TOKEN_REFRESH_FAILED');
           setUser(null);
           setLoading(false);
           setRecoveryFailed(true);
           setRecoveryReason(reason);
-          return;
         }
       });
 
@@ -297,7 +339,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clearTimeout(safetyTimer);
       const reason = `Supabase init error: ${String(e)}`;
       pushLog('error', reason);
-      void remoteLog('error', '[AuthContext] getBrowserSupabase threw', { error: String(e) });
+      void remoteLog('error', '[AuthContext] init error', { error: String(e) });
       if (mounted) {
         setUser(null);
         setLoading(false);
@@ -309,7 +351,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       mounted = false;
       clearTimeout(safetyTimer);
-      try { subscription?.unsubscribe(); } catch { /* ignore */ }
+      try { subscription?.unsubscribe(); } catch {}
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -320,13 +362,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const supabase = getBrowserSupabase();
       const { data: { user: authUser }, error } = await supabase.auth.getUser();
-      if (error || !authUser) { setUser(null); return; }
+      if (error || !authUser) { setUser(null); clearCachedProfile(); return; }
+
       const profile = await withTimeout(
-        fetchProfile(authUser.id, () => {}),
-        8_000,
+        fetchProfileFromDB(authUser.id, () => {}),
+        5_000,
         'refresh fetchProfile'
       );
-      setUser(profile);
+      if (profile) { setCachedProfile(profile); setUser(profile); }
+      else { setUser(null); clearCachedProfile(); }
     } catch {
       setUser(null);
     } finally {
@@ -336,19 +380,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // ── signOut ────────────────────────────────────────────────────
   const signOut = useCallback(async () => {
+    clearCachedProfile();
+    setSessionLogs([]);
     try {
       const supabase = getBrowserSupabase();
       void remoteLog('info', '[AuthContext] signOut', { uid: user?.auth_uid?.slice(-6) });
       await supabase.auth.signOut();
-      // ✅ ไม่เรียก resetBrowserSupabase() — ทำให้ lock conflict
-      // SIGNED_OUT event จะ clear state เอง
     } catch (e) {
       void remoteLog('error', '[AuthContext] signOut error', { error: String(e) });
-      // force clear ถ้า signOut error
       setUser(null);
       setLoading(false);
     }
-    setSessionLogs([]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
