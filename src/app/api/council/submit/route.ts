@@ -8,47 +8,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { appendSubmission } from '@/lib/sheets';
 import { uploadFile } from '@/lib/drive';
-import { getSupabaseAdmin } from '@/lib/supabaseAdmin';
+import { verifyMember } from '@/lib/apiHelper';
 import { createLogger } from '@/lib/serverLogger';
 
 const logger = createLogger('api/council/submit');
 
 const MAX_FILE_MB = 5;
 
-// ─── Auth helper ──────────────────────────────────────────────────
-
-async function requireMember(req: NextRequest) {
-  const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  if (!token) throw Object.assign(new Error('Unauthorized'), { status: 401 });
-  
-  const supabase = getSupabaseAdmin();
-  const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
-  if (authErr || !user) throw Object.assign(new Error('Invalid session'), { status: 401 });
-  
-  const { data: row } = await supabase
-    .from('council_users')
-    .select('auth_uid, full_name, student_id, approved, disabled')
-    .eq('auth_uid', user.id)
-    .limit(1)
-    .maybeSingle();
-  
-  if (!row) throw Object.assign(new Error('บัญชียังไม่ได้ลงทะเบียน'), { status: 403 });
-  if (!row.approved) throw Object.assign(new Error('บัญชียังไม่ได้รับการอนุมัติ'), { status: 403 });
-  if (row.disabled) throw Object.assign(new Error('บัญชีถูกปิดใช้งาน'), { status: 403 });
-  
-  return { userId: user.id, row };
-}
-
-// ─── Route handler ────────────────────────────────────────────────
-
 export async function POST(req: NextRequest) {
   logger.request('POST');
   
-  let userId: string, row: any;
-  try {
-    ({ userId, row } = await requireMember(req));
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: e.status ?? 401 });
+  const member = await verifyMember(req.headers.get('authorization'));
+  if (!member) {
+    return NextResponse.json({ error: 'กรุณาเข้าสู่ระบบก่อน หรือบัญชียังไม่ได้รับการอนุมัติ' }, { status: 401 });
   }
   
   let formData: FormData;
@@ -87,8 +59,8 @@ export async function POST(req: NextRequest) {
   try {
     await appendSubmission({
       timestamp: new Date().toISOString(),
-      userId,
-      studentId: row.student_id ?? '',
+      userId: member.id,
+      studentId: member.student_id ?? '',
       title,
       detail,
       attachments,
@@ -98,6 +70,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `บันทึก Sheets ล้มเหลว: ${e?.message}` }, { status: 500 });
   }
   
-  logger.info('submit OK', { userId: userId.slice(-6), title });
+  logger.info('submit OK', { userId: member.id.slice(-6), title });
   return NextResponse.json({ success: true });
 }
