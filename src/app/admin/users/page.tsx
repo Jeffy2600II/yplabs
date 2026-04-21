@@ -12,13 +12,13 @@ type UserRow = {
   auth_uid: string;
   full_name: string;
   student_id: string | null;
+  email: string | null;
   year: number;
   role: string;
   approved: boolean;
   disabled: boolean;
   account_type: string;
   created_at: string;
-  email ? : string | null;
 };
 
 export default function AdminUsersPage() {
@@ -30,10 +30,12 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState < string | null > (null);
   const [search, setSearch] = useState('');
+  const [addingYear, setAddingYear] = useState(false);
+  const [newYearInput, setNewYearInput] = useState('');
   
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
-  }, [authLoading, isAdmin]);
+  }, [authLoading, isAdmin, router]);
   
   useEffect(() => {
     if (isAdmin) void loadYears();
@@ -44,8 +46,7 @@ export default function AdminUsersPage() {
   }, [selectedYear]);
   
   async function getToken() {
-    const supabase = getBrowserSupabase();
-    const { data } = await supabase.auth.getSession();
+    const { data } = await getBrowserSupabase().auth.getSession();
     return data?.session?.access_token ?? null;
   }
   
@@ -64,7 +65,9 @@ export default function AdminUsersPage() {
     setLoading(true);
     try {
       const token = await getToken();
-      const res = await fetch(`/api/admin/users?year=${year}`, { headers: { Authorization: `Bearer ${token ?? ''}` } });
+      const res = await fetch(`/api/admin/users?year=${year}`, {
+        headers: { Authorization: `Bearer ${token ?? ''}` },
+      });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? 'Failed');
       setUsers(json || []);
@@ -120,6 +123,26 @@ export default function AdminUsersPage() {
     finally { setActionId(null); }
   }
   
+  // ★ Fixed: async token properly awaited (เดิม bug — token อยู่ใน template string)
+  async function handleAddYear() {
+    const y = Number(newYearInput.trim());
+    if (!y || !Number.isInteger(y)) { alert('กรอกเลขปีที่ถูกต้อง'); return; }
+    setAddingYear(true);
+    try {
+      const token = await getToken();
+      const res = await fetch('/api/admin/years', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
+        body: JSON.stringify({ year: y }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error ?? 'Failed');
+      setNewYearInput('');
+      await loadYears();
+    } catch (e: any) { alert(e?.message ?? 'เพิ่มปีล้มเหลว'); }
+    finally { setAddingYear(false); }
+  }
+  
   const filtered = users.filter(u =>
     !search ||
     u.full_name.toLowerCase().includes(search.toLowerCase()) ||
@@ -137,7 +160,23 @@ export default function AdminUsersPage() {
           <div className="page-title">จัดการบัญชีสมาชิก</div>
           <div className="page-subtitle">ดู แก้ไข เปลี่ยน Role และจัดการบัญชีทั้งหมด</div>
         </div>
-        <Link href="/admin/users/new" className="btn btn-primary">＋ เพิ่มบัญชีใหม่</Link>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {/* Add Year — properly async */}
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={newYearInput}
+              onChange={e => setNewYearInput(e.target.value)}
+              placeholder="ปีใหม่ เช่น 68"
+              inputMode="numeric"
+              style={{ width: 100 }}
+              onKeyDown={e => e.key === 'Enter' && handleAddYear()}
+            />
+            <button onClick={handleAddYear} disabled={addingYear || !newYearInput} className="btn btn-ghost">
+              {addingYear ? '...' : '+ ปี'}
+            </button>
+          </div>
+          <Link href="/admin/users/new" className="btn btn-primary">＋ เพิ่มบัญชีใหม่</Link>
+        </div>
       </div>
 
       {/* Filters */}
@@ -157,7 +196,6 @@ export default function AdminUsersPage() {
         </div>
       </div>
 
-      {/* Table */}
       <div className="table-wrap">
         {loading ? (
           <div className="loading-center"><div className="spinner" /></div>
