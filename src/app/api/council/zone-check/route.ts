@@ -1,16 +1,13 @@
 /**
  * /api/council/zone-check/route.ts
- * ─────────────────────────────────────────────────────────────────
- * บันทึกผลตรวจเขตสะอาด
- * - สมาชิกที่ login แล้วเท่านั้น
- * - อัปโหลดรูปผ่าน uploadFile() จาก lib/drive.ts → getAuthClient()
- *   (ยึด token pattern เดิม: OAuth2 refresh token หรือ service account JWT)
+ * แก้ไข: ใช้ getTodayTH() แทน UTC date เพื่อให้ check_date ตรงกับวันที่ไทย
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase, verifyMember } from '@/lib/apiHelper';
 import { uploadFile } from '@/lib/drive';
 import { createLogger } from '@/lib/serverLogger';
+import { getTodayTH } from '@/lib/dateUtils';
 
 const logger = createLogger('api/council/zone-check');
 
@@ -55,7 +52,6 @@ export async function POST(req: NextRequest) {
     hasPhoto: !!(photo && photo.size > 0),
   });
 
-  // อัปโหลดรูปผ่าน drive.ts → getAuthClient() (ไม่สร้าง auth ใหม่)
   let photo_url: string | null = null;
   if (photo && photo.size > 0) {
     try {
@@ -65,7 +61,6 @@ export async function POST(req: NextRequest) {
       const safeName = inspector.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_ก-ฮ]/g, '');
       const ext = photo.name.split('.').pop() ?? 'jpg';
 
-      // สร้าง File ใหม่ที่มีชื่อตามรูปแบบที่ต้องการ
       const renamedFile = new File([await photo.arrayBuffer()], `zone-check_${safeZone}_${ts}_${safeName}.${ext}`, {
         type: photo.type,
       });
@@ -74,12 +69,12 @@ export async function POST(req: NextRequest) {
       photo_url = result.photoUrl ?? result.webViewLink;
       logger.info('photo uploaded', { zone, fileId: result.id });
     } catch (e: any) {
-      // อัปโหลดรูปล้มเหลว — log แต่ยังบันทึกผลได้ (รูปเป็น optional)
       logger.error('Drive upload failed (non-fatal)', { error: e?.message, zone });
     }
   }
 
-  const today = new Date().toISOString().split('T')[0];
+  // ★ ใช้วันที่ไทย (UTC+7) แทน UTC
+  const today = getTodayTH();
 
   const { error } = await supabase.from('council_zone_checks').insert({
     zone,
@@ -95,6 +90,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  logger.info('zone check saved', { zone, status, inspector: (member as any).full_name, hasPhoto: !!photo_url });
+  logger.info('zone check saved', { zone, status, inspector: (member as any).full_name, today });
   return NextResponse.json({ ok: true, photo_url });
 }

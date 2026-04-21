@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { getTodayTH } from '@/lib/dateUtils';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -7,7 +8,9 @@ const supabase = createClient(
 );
 
 export async function GET() {
-  const today = new Date().toISOString().split('T')[0];
+  // ★ ใช้วันที่ไทย (UTC+7) แทน UTC
+  const today = getTodayTH();
+  
   const { data } = await supabase
     .from('council_duty')
     .select('id, student_name, student_id, checked_in, checked_in_at, auth_uid')

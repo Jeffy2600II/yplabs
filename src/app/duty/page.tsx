@@ -1,8 +1,8 @@
 'use client';
 
 /**
- * /duty/page.tsx
- * เวรยืนหน้าโรงเรียน — มี Supabase Realtime ที่แสดงผลทันที
+ * /duty/page.tsx — เวรยืนหน้าโรงเรียน
+ * แก้ไข: ใช้ไทมโซนไทย (UTC+7) สำหรับ TODAY
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -23,7 +23,8 @@ type DutyEntry = {
   auth_uid: string;
 };
 
-const TODAY = new Date().toISOString().split('T')[0];
+// ★ ใช้วันที่ไทย (UTC+7) แทน UTC
+const TODAY = new Date(Date.now() + 7 * 3600 * 1000).toISOString().split('T')[0];
 
 export default function DutyPage() {
   const { user, isMember, loading: authLoading } = useAuth();
@@ -46,21 +47,18 @@ export default function DutyPage() {
 
   useEffect(() => { void load(); }, [load]);
 
-  // ★ Realtime — รีเฟรชอัตโนมัติเมื่อมีการเปลี่ยนแปลง
   useRealtime({
     table: 'council_duty',
     filter: `duty_date=eq.${TODAY}`,
     onData: () => { void load(); },
   });
 
-  const myEntry = user ? duties.find(d => d.auth_uid === user.auth_uid) : null;
+  const myEntry     = user ? duties.find(d => d.auth_uid === user.auth_uid) : null;
   const checkedCount = duties.filter(d => d.checked_in).length;
   const pendingCount = duties.length - checkedCount;
 
   async function handleCheckIn() {
-    setCheckingIn(true);
-    setError(null);
-    setSuccess(null);
+    setCheckingIn(true); setError(null); setSuccess(null);
     try {
       const token = await getFreshToken();
       if (!token) throw new Error('กรุณาเข้าสู่ระบบก่อน');
@@ -73,7 +71,6 @@ export default function DutyPage() {
       if (!res.ok) throw new Error(json.error ?? 'เช็คอินล้มเหลว');
       setSuccess('เช็คอินสำเร็จแล้ว ✅');
       setNote('');
-      // Realtime จะ trigger load() อัตโนมัติ แต่ load เลยเพื่อ UX ที่เร็วขึ้น
       await load();
     } catch (e: any) {
       setError(e?.message ?? 'เกิดข้อผิดพลาด');
@@ -94,8 +91,8 @@ export default function DutyPage() {
             <div className="page-title">🏫 เวรยืนหน้าโรงเรียน</div>
             <div className="page-subtitle">{todayTH}</div>
           </div>
-          <span style={{ fontSize: 11, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', animation: 'pulse 2s infinite' }} />
+          <span style={{ fontSize: 11, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', animation: 'pulse 2s infinite' }} />
             อัปเดตอัตโนมัติ
           </span>
         </div>
@@ -115,14 +112,14 @@ export default function DutyPage() {
         </div>
       </div>
 
-      {/* Check-in card (ถ้ามีเวรวันนี้) */}
+      {/* Check-in card */}
       {isMember && myEntry && !myEntry.checked_in && (
         <div className="card" style={{ borderLeft: '4px solid var(--brand)', marginBottom: 18 }}>
-          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>🏫 คุณมีเวรวันนี้</div>
-          <p style={{ color: 'var(--text-3)', fontSize: 13.5, marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 5 }}>🏫 คุณมีเวรวันนี้</div>
+          <p style={{ color: 'var(--text-3)', fontSize: 13.5, marginBottom: 16 }}>
             กดเช็คอินเมื่อมาถึงหน้าโรงเรียนแล้ว
           </p>
-          <div className="form-group" style={{ marginBottom: 12 }}>
+          <div className="form-group" style={{ marginBottom: 14 }}>
             <label className="form-label">หมายเหตุ (ไม่บังคับ)</label>
             <input
               value={note}
@@ -130,7 +127,7 @@ export default function DutyPage() {
               placeholder="เช่น มาถึงแล้ว พร้อมปฏิบัติหน้าที่"
             />
           </div>
-          {error && <div className="alert alert-error" style={{ marginBottom: 10 }}>{error}</div>}
+          {error   && <div className="alert alert-error"   style={{ marginBottom: 10 }}>{error}</div>}
           {success && <div className="alert alert-success" style={{ marginBottom: 10 }}>{success}</div>}
           <button
             onClick={handleCheckIn}
@@ -142,18 +139,16 @@ export default function DutyPage() {
         </div>
       )}
 
-      {/* เช็คอินแล้ว */}
       {isMember && myEntry?.checked_in && (
         <div className="alert alert-success" style={{ marginBottom: 18, fontSize: 14 }}>
           ✅ คุณเช็คอินแล้วเมื่อ{' '}
           {myEntry.checked_in_at
             ? new Date(myEntry.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.'
             : ''}
-          {myEntry.note && <span style={{ color: '#15803d', marginLeft: 8 }}>· {myEntry.note}</span>}
+          {myEntry.note && <span style={{ marginLeft: 8 }}>· {myEntry.note}</span>}
         </div>
       )}
 
-      {/* ไม่ได้ login */}
       {!isMember && !authLoading && (
         <div className="alert alert-info" style={{ marginBottom: 18 }}>
           ℹ️ เข้าสู่ระบบเพื่อเช็คอินเวร —{' '}
@@ -161,14 +156,14 @@ export default function DutyPage() {
         </div>
       )}
 
-      {/* รายชื่อ */}
+      {/* Duty list */}
       <div className="table-wrap">
         <div style={{
           padding: '12px 18px', background: 'var(--surface-2)',
           borderBottom: '1px solid var(--border)',
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         }}>
-          <span style={{ fontWeight: 700 }}>รายชื่อผู้ปฏิบัติหน้าที่วันนี้</span>
+          <span style={{ fontWeight: 700, fontSize: 14 }}>รายชื่อผู้ปฏิบัติหน้าที่วันนี้</span>
           <span className="badge badge-blue">{duties.length} คน</span>
         </div>
 
@@ -182,21 +177,11 @@ export default function DutyPage() {
         ) : (
           <table>
             <thead>
-              <tr>
-                <th>#</th>
-                <th>ชื่อ</th>
-                <th>รหัส</th>
-                <th>สถานะ</th>
-                <th>เวลา</th>
-                <th>หมายเหตุ</th>
-              </tr>
+              <tr><th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>หมายเหตุ</th></tr>
             </thead>
             <tbody>
               {duties.map((d, i) => (
-                <tr
-                  key={d.id}
-                  style={{ background: d.auth_uid === user?.auth_uid ? 'var(--blue-bg)' : undefined }}
-                >
+                <tr key={d.id} style={{ background: d.auth_uid === user?.auth_uid ? 'var(--blue-bg)' : undefined }}>
                   <td style={{ color: 'var(--text-3)' }}>{i + 1}</td>
                   <td style={{ fontWeight: 600 }}>
                     {d.student_name}
@@ -204,13 +189,13 @@ export default function DutyPage() {
                       <span className="badge badge-blue" style={{ marginLeft: 6, fontSize: 10 }}>คุณ</span>
                     )}
                   </td>
-                  <td style={{ fontFamily: 'monospace' }}>{d.student_id}</td>
+                  <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{d.student_id}</td>
                   <td>
                     {d.checked_in
                       ? <span className="badge badge-green">✓ มาแล้ว</span>
                       : <span className="badge badge-gray">รอ</span>}
                   </td>
-                  <td style={{ fontSize: 12.5, color: 'var(--text-3)' }}>
+                  <td style={{ fontSize: 12.5, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
                     {d.checked_in_at
                       ? new Date(d.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.'
                       : '—'}
@@ -223,12 +208,7 @@ export default function DutyPage() {
         )}
       </div>
 
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
-        }
-      `}</style>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
     </AppShell>
   );
 }

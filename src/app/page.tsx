@@ -2,9 +2,7 @@
 
 /**
  * /page.tsx — หน้าหลัก
- * - Supabase Realtime สำหรับ zone_checks + duty
- * - Dashboard-style layout
- * - Public ดูข้อมูล realtime ได้โดยไม่ต้อง login
+ * แก้ไข: ใช้ไทมโซนไทย (UTC+7) สำหรับ TODAY
  */
 
 import { useEffect, useState, useCallback } from 'react';
@@ -15,6 +13,9 @@ import { getBrowserSupabase } from '@/lib/supabaseClient';
 import { useMultiRealtime } from '@/lib/realtimeHooks';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
+
+// ★ ใช้วันที่ไทย (UTC+7) แทน UTC
+const TODAY = new Date(Date.now() + 7 * 3600 * 1000).toISOString().split('T')[0];
 
 type ZoneSummary = { zone: string; status: 'clean' | 'dirty' | 'pending'; inspector: string | null };
 type DutyEntry = { id: string; student_name: string; student_id: string; checked_in: boolean; checked_in_at: string | null; auth_uid: string };
@@ -52,7 +53,6 @@ export default function HomePage() {
     if (isAdmin) void loadAdminStats();
   }, [isAdmin]);
 
-  // ★ Realtime — auto-refresh เมื่อมีการเปลี่ยนแปลง
   useMultiRealtime([
     { table: 'council_zone_checks', onData: () => void loadPublicData() },
     { table: 'council_duty', onData: () => void loadPublicData() },
@@ -72,31 +72,33 @@ export default function HomePage() {
     } catch {}
   }
 
-  const cleanCount = zones.filter(z => z.status === 'clean').length;
-  const dirtyCount = zones.filter(z => z.status === 'dirty').length;
-  const pendingZone = zones.filter(z => z.status === 'pending').length;
-  const dutyChecked = duties.filter(d => d.checked_in).length;
-  const myDuty = user ? duties.find(d => d.auth_uid === user.auth_uid) : null;
+  const cleanCount   = zones.filter(z => z.status === 'clean').length;
+  const dirtyCount   = zones.filter(z => z.status === 'dirty').length;
+  const pendingZone  = zones.filter(z => z.status === 'pending').length;
+  const dutyChecked  = duties.filter(d => d.checked_in).length;
+  const myDuty       = user ? duties.find(d => d.auth_uid === user.auth_uid) : null;
 
   return (
     <AppShell pageTitle="หน้าหลัก" pendingCount={pendingCount}>
 
-      {/* Guest hero banner */}
+      {/* Guest hero */}
       {!isMember && !authLoading && (
         <div style={{
           background: 'linear-gradient(135deg, #0f1c35 0%, #1e3a6e 100%)',
-          borderRadius: 20, padding: '28px 28px 24px', color: '#fff',
-          marginBottom: 22, position: 'relative', overflow: 'hidden',
+          borderRadius: 'var(--r-xl)', padding: '28px 28px 26px',
+          color: '#fff', marginBottom: 22,
+          position: 'relative', overflow: 'hidden',
+          boxShadow: 'var(--shadow-md)',
         }}>
-          <div style={{ position: 'absolute', right: -40, top: -40, width: 200, height: 200, borderRadius: '50%', background: 'rgba(200,147,10,0.10)', pointerEvents: 'none' }} />
-          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 6 }}>
+          <div style={{ position: 'absolute', right: -50, top: -50, width: 220, height: 220, borderRadius: '50%', background: 'rgba(200,147,10,0.08)', pointerEvents: 'none' }} />
+          <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.40)', marginBottom: 6 }}>
             📅 {new Date().toLocaleDateString('th-TH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
           </div>
-          <div style={{ fontFamily: 'var(--font-ui)', fontSize: 24, fontWeight: 800, marginBottom: 4 }}>YPLABS</div>
-          <div style={{ fontSize: 14, opacity: 0.75, marginBottom: 18 }}>ระบบสภานักเรียน โรงเรียนคำยางพิทยา</div>
+          <div style={{ fontFamily: 'var(--font-ui)', fontSize: 26, fontWeight: 800, marginBottom: 4 }}>YPLABS</div>
+          <div style={{ fontSize: 13.5, opacity: 0.68, marginBottom: 20 }}>ระบบสภานักเรียน โรงเรียนคำยางพิทยา</div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <Link href="/login" className="btn btn-gold">🔑 เข้าสู่ระบบ</Link>
-            <Link href="/register" className="btn btn-ghost" style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', borderColor: 'rgba(255,255,255,0.2)' }}>
+            <Link href="/register" className="btn btn-ghost" style={{ background: 'rgba(255,255,255,0.10)', color: '#fff', borderColor: 'rgba(255,255,255,0.20)' }}>
               ลงทะเบียน
             </Link>
           </div>
@@ -116,14 +118,14 @@ export default function HomePage() {
           {myDuty && (
             <div className="card" style={{
               borderLeft: `3px solid ${myDuty.checked_in ? 'var(--green)' : 'var(--amber)'}`,
-              minWidth: 180, padding: '10px 14px',
+              minWidth: 190, padding: '11px 16px',
             }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-3)', marginBottom: 3 }}>🏫 เวรของคุณวันนี้</div>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-3)', marginBottom: 4 }}>🏫 เวรของคุณวันนี้</div>
               {myDuty.checked_in
-                ? <div style={{ color: 'var(--green)', fontWeight: 700, fontSize: 13 }}>✓ เช็คอินแล้ว</div>
+                ? <div style={{ color: 'var(--green)', fontWeight: 700, fontSize: 13.5 }}>✓ เช็คอินแล้ว</div>
                 : (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ color: 'var(--amber)', fontWeight: 700, fontSize: 13 }}>⏳ ยังไม่เช็คอิน</span>
+                    <span style={{ color: 'var(--amber)', fontWeight: 700, fontSize: 13.5 }}>⏳ ยังไม่เช็คอิน</span>
                     <Link href="/duty" className="btn btn-success btn-sm">เช็คอิน</Link>
                   </div>
                 )}
@@ -142,47 +144,47 @@ export default function HomePage() {
         </Link>
       )}
 
-      {/* Quick actions (member only) */}
+      {/* Quick actions */}
       {isMember && (
         <div style={{ marginBottom: 22 }}>
           <div className="section-label">ดำเนินการด่วน</div>
           <div className="grid-auto">
             <Link href="/zone-check" className="action-card">
-              <div className="action-icon" style={{ background: '#dcfce7' }}>🧹</div>
+              <div className="action-icon" style={{ background: '#DCFCE7' }}>🧹</div>
               <div>
                 <div className="action-title">ตรวจเขตสะอาด</div>
                 <div className="action-desc">บันทึกผลตรวจ 9 เขต พร้อมแนบรูป</div>
               </div>
             </Link>
             <Link href="/duty" className="action-card">
-              <div className="action-icon" style={{ background: '#eff6ff' }}>🏫</div>
+              <div className="action-icon" style={{ background: '#EFF6FF' }}>🏫</div>
               <div>
                 <div className="action-title">เวรยืนหน้าโรงเรียน</div>
                 <div className="action-desc">เช็คอินและดูรายชื่อเวรวันนี้</div>
               </div>
             </Link>
             <Link href="/submit" className="action-card">
-              <div className="action-icon" style={{ background: '#f5f3ff' }}>📁</div>
+              <div className="action-icon" style={{ background: '#F5F3FF' }}>📁</div>
               <div>
                 <div className="action-title">ส่งข้อมูล/เอกสาร</div>
                 <div className="action-desc">อัปโหลดเอกสารสำหรับสภา</div>
               </div>
             </Link>
             {isAdmin && (
-              <Link href="/admin" className="action-card" style={{ borderColor: 'var(--gold)', background: '#fffbeb' }}>
-                <div className="action-icon" style={{ background: '#fef9ec' }}>⚙️</div>
+              <Link href="/admin" className="action-card" style={{ borderColor: 'rgba(200,147,10,0.3)', background: '#FFFBEB' }}>
+                <div className="action-icon" style={{ background: '#FEF9EC' }}>⚙️</div>
                 <div>
                   <div className="action-title">แผงแอดมิน</div>
                   <div className="action-desc">จัดการสมาชิกและระบบ</div>
                 </div>
-                {pendingCount > 0 && <span className="badge badge-red">{pendingCount} รายการรอ</span>}
+                {pendingCount > 0 && <span className="badge badge-red" style={{ marginTop: 4, alignSelf: 'flex-start' }}>{pendingCount} รายการรอ</span>}
               </Link>
             )}
           </div>
         </div>
       )}
 
-      {/* Stats overview */}
+      {/* Stats */}
       <div className="grid-4" style={{ marginBottom: 22 }}>
         <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
           <div className="stat-label">เขตสะอาด</div>
@@ -203,7 +205,7 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Zone + Duty grid */}
+      {/* Zone + Duty */}
       <div className="grid-2" style={{ gap: 16, marginBottom: 16 }}>
 
         {/* Zone status */}
@@ -212,24 +214,24 @@ export default function HomePage() {
             <div className="section-label" style={{ marginBottom: 0 }}>สถานะเขตสะอาด — วันนี้</div>
             {lastUpdate && (
               <span style={{ fontSize: 10.5, color: 'var(--text-3)' }}>
-                อัปเดต {lastUpdate.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
+                {lastUpdate.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
               </span>
             )}
           </div>
           {dataLoading ? (
-            <div className="loading-center" style={{ padding: '24px 0' }}><div className="spinner" /></div>
+            <div className="loading-center" style={{ padding: '28px 0' }}><div className="spinner" /></div>
           ) : (
             <div className="zone-grid">
               {zones.map(z => (
                 <div key={z.zone} className={`zone-tile ${z.status}`}>
                   <div className="zone-tile-name">{z.zone}</div>
                   <div className="zone-tile-status">
-                    {z.status === 'clean' ? '✅ สะอาด'
-                      : z.status === 'dirty' ? '❌ ไม่สะอาด'
-                      : '⏳ รอ'}
+                    {z.status === 'clean'   ? '✅ สะอาด'
+                     : z.status === 'dirty' ? '❌ ไม่สะอาด'
+                     : '⏳ รอ'}
                   </div>
                   {z.inspector && (
-                    <div style={{ fontSize: 9.5, color: 'var(--text-3)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div style={{ fontSize: 9.5, color: 'var(--text-3)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {z.inspector}
                     </div>
                   )}
@@ -238,7 +240,7 @@ export default function HomePage() {
             </div>
           )}
           {isMember && (
-            <Link href="/zone-check" className="btn btn-ghost btn-sm btn-full" style={{ marginTop: 12 }}>
+            <Link href="/zone-check" className="btn btn-ghost btn-sm btn-full" style={{ marginTop: 14 }}>
               ตรวจเขตสะอาด →
             </Link>
           )}
@@ -251,9 +253,9 @@ export default function HomePage() {
             <span className="badge badge-blue">{duties.length} คน</span>
           </div>
           {dataLoading ? (
-            <div className="loading-center" style={{ padding: '24px 0' }}><div className="spinner" /></div>
+            <div className="loading-center" style={{ padding: '28px 0' }}><div className="spinner" /></div>
           ) : duties.length === 0 ? (
-            <div className="empty-state" style={{ padding: '24px 0' }}>
+            <div className="empty-state" style={{ padding: '28px 0' }}>
               <div className="empty-icon">📋</div>
               <div>ยังไม่มีรายชื่อเวร</div>
             </div>
@@ -264,10 +266,13 @@ export default function HomePage() {
                   key={d.id}
                   style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    padding: '9px 12px', borderRadius: 'var(--r)',
-                    background: d.auth_uid === user?.auth_uid ? 'var(--blue-bg)' : (d.checked_in ? 'var(--green-bg)' : 'var(--surface-2)'),
-                    border: `1.5px solid ${d.auth_uid === user?.auth_uid ? '#93c5fd' : d.checked_in ? '#86efac' : 'var(--border)'}`,
-                    transition: 'all 0.2s',
+                    padding: '10px 13px', borderRadius: 'var(--r)',
+                    background: d.auth_uid === user?.auth_uid ? 'var(--blue-bg)'
+                      : d.checked_in ? '#F0FDF4' : 'var(--surface-2)',
+                    border: `1.5px solid ${
+                      d.auth_uid === user?.auth_uid ? '#93C5FD'
+                      : d.checked_in ? '#86EFAC' : 'var(--border)'}`,
+                    transition: 'all var(--t) var(--ease)',
                   }}
                 >
                   <div>
@@ -294,7 +299,7 @@ export default function HomePage() {
             </div>
           )}
           {isMember && (
-            <Link href="/duty" className="btn btn-ghost btn-sm btn-full" style={{ marginTop: 12 }}>
+            <Link href="/duty" className="btn btn-ghost btn-sm btn-full" style={{ marginTop: 14 }}>
               ดูรายละเอียด →
             </Link>
           )}
@@ -302,15 +307,15 @@ export default function HomePage() {
       </div>
 
       {/* Realtime indicator */}
-      <div style={{ textAlign: 'center', fontSize: 11.5, color: 'var(--text-3)', marginTop: 8, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 5 }}>
-        <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', animation: 'pulse 2.5s infinite' }} />
+      <div style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-3)', marginTop: 8, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 5 }}>
+        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', animation: 'pulse 2.5s infinite' }} />
         ข้อมูลอัปเดตอัตโนมัติ (Realtime)
       </div>
 
       {/* Guest CTA */}
       {!isMember && !authLoading && (
         <div className="card" style={{ background: 'var(--surface-2)', textAlign: 'center', padding: '28px 24px', marginTop: 16 }}>
-          <div style={{ fontSize: 13, color: 'var(--text-3)', marginBottom: 12 }}>
+          <div style={{ fontSize: 13, color: 'var(--text-3)', marginBottom: 14 }}>
             สมาชิกสภานักเรียนสามารถเข้าสู่ระบบเพื่อบันทึกข้อมูล ตรวจเขต และเช็คอินเวร
           </div>
           <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
@@ -320,9 +325,7 @@ export default function HomePage() {
         </div>
       )}
 
-      <style>{`
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-      `}</style>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}`}</style>
     </AppShell>
   );
 }
