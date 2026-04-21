@@ -1,10 +1,17 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+/**
+ * /admin/zones/page.tsx — รายงานเขตสะอาด (Admin)
+ * - Supabase Realtime: auto-refresh เมื่อมีการบันทึกใหม่
+ * - แสดงรูปจาก Google Drive
+ */
+
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { getBrowserSupabase } from '@/lib/supabaseClient';
+import { useRealtime } from '@/lib/realtimeHooks';
 
 const ZONES = ['ม.1/1','ม.1/2','ม.2/1','ม.2/2','ม.3/1','ม.3/2','ม.4','ม.5','ม.6'];
 
@@ -31,28 +38,39 @@ export default function AdminZonesPage() {
   const [dateTo, setDateTo] = useState(() => new Date().toISOString().split('T')[0]);
   const [filterZone, setFilterZone] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
+  const [photoModal, setPhotoModal] = useState<string | null>(null);
 
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
-  }, [authLoading, isAdmin]);
+  }, [authLoading, isAdmin, router]);
 
-  useEffect(() => {
-    if (isAdmin) void load();
-  }, [isAdmin, dateFrom, dateTo]);
+  async function getToken() {
+    const { data } = await getBrowserSupabase().auth.getSession();
+    return data?.session?.access_token ?? null;
+  }
 
-  async function load() {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
-      const supabase = getBrowserSupabase();
-      const { data: sess } = await supabase.auth.getSession();
-      const token = sess?.session?.access_token;
+      const token = await getToken();
       const res = await fetch(`/api/admin/zones?from=${dateFrom}&to=${dateTo}`, {
         headers: { Authorization: `Bearer ${token ?? ''}` },
       });
       if (res.ok) setRecords(await res.json() || []);
     } catch {}
     setLoading(false);
-  }
+  }, [dateFrom, dateTo]);
+
+  useEffect(() => {
+    if (isAdmin) void load();
+  }, [isAdmin, load]);
+
+  // ★ Realtime
+  useRealtime({
+    table: 'council_zone_checks',
+    onData: () => void load(),
+    enabled: isAdmin,
+  });
 
   const filtered = records.filter(r =>
     (!filterZone || r.zone === filterZone) &&
@@ -61,21 +79,33 @@ export default function AdminZonesPage() {
 
   const cleanCount = filtered.filter(r => r.status === 'clean').length;
   const dirtyCount = filtered.filter(r => r.status === 'dirty').length;
+  const cleanPct = filtered.length ? Math.round(cleanCount / filtered.length * 100) : 0;
 
-  // Zone summary
   const zoneSummary = ZONES.map(z => {
     const zr = filtered.filter(r => r.zone === z);
     return { zone: z, total: zr.length, clean: zr.filter(r => r.status === 'clean').length, dirty: zr.filter(r => r.status === 'dirty').length };
   });
 
-  if (authLoading) return <AppShell pageTitle="รายงานเขตสะอาด"><div className="loading-center"><div className="spinner" /></div></AppShell>;
+  if (authLoading) return (
+    <AppShell pageTitle="รายงานเขตสะอาด">
+      <div className="loading-center"><div className="spinner" /></div>
+    </AppShell>
+  );
   if (!isAdmin) return null;
 
   return (
     <AppShell pageTitle="รายงานเขตสะอาด">
       <div className="page-header">
-        <div className="page-title">รายงานผลการตรวจเขตสะอาด</div>
-        <div className="page-subtitle">ดูประวัติและสถิติการตรวจเขตสะอาดรายวัน</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+          <div>
+            <div className="page-title">รายงานผลการตรวจเขตสะอาด</div>
+            <div className="page-subtitle">ดูประวัติและสถิติการตรวจเขตสะอาดรายวัน</div>
+          </div>
+          <span style={{ fontSize: 11, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', animation: 'pulse 2s infinite' }} />
+            Realtime
+          </span>
+        </div>
       </div>
 
       {/* Filters */}
@@ -103,6 +133,7 @@ export default function AdminZonesPage() {
             <option value="dirty">ไม่สะอาด</option>
           </select>
         </div>
+        <button onClick={load} className="btn btn-ghost btn-sm">🔄 รีเฟรช</button>
       </div>
 
       {/* Stats */}
@@ -114,24 +145,31 @@ export default function AdminZonesPage() {
         <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
           <div className="stat-label">สะอาด</div>
           <div className="stat-value" style={{ color: 'var(--green)' }}>{cleanCount}</div>
-          <div className="stat-sub">{filtered.length ? Math.round(cleanCount / filtered.length * 100) : 0}%</div>
+          <div className="stat-sub">{cleanPct}%</div>
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--red)' }}>
           <div className="stat-label">ไม่สะอาด</div>
           <div className="stat-value" style={{ color: 'var(--red)' }}>{dirtyCount}</div>
-          <div className="stat-sub">{filtered.length ? Math.round(dirtyCount / filtered.length * 100) : 0}%</div>
+          <div className="stat-sub">{filtered.length ? 100 - cleanPct : 0}%</div>
         </div>
       </div>
 
-      {/* Zone summary tiles */}
+      {/* Zone summary */}
       <div className="section-label" style={{ marginBottom: 10 }}>สรุปรายเขต</div>
-      <div className="zone-grid" style={{ marginBottom: 22 }}>
+      <div className="zone-grid" style={{ marginBottom: 22, gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))' }}>
         {zoneSummary.map(z => (
-          <div key={z.zone} className="card" style={{ padding: '12px 14px', textAlign: 'center' }}>
-            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>{z.zone}</div>
-            <div style={{ display: 'flex', gap: 5, justifyContent: 'center', flexWrap: 'wrap' }}>
-              <span className="badge badge-green">✅ {z.clean}</span>
-              <span className="badge badge-red">❌ {z.dirty}</span>
+          <div
+            key={z.zone}
+            className="card"
+            style={{
+              padding: '10px 12px', textAlign: 'center',
+              borderTop: z.dirty > 0 ? '3px solid var(--red)' : z.clean > 0 ? '3px solid var(--green)' : '3px solid var(--border)',
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>{z.zone}</div>
+            <div style={{ display: 'flex', gap: 4, justifyContent: 'center', flexWrap: 'wrap' }}>
+              <span className="badge badge-green" style={{ fontSize: 10 }}>✅ {z.clean}</span>
+              <span className="badge badge-red" style={{ fontSize: 10 }}>❌ {z.dirty}</span>
             </div>
           </div>
         ))}
@@ -143,19 +181,24 @@ export default function AdminZonesPage() {
         {loading ? (
           <div className="loading-center"><div className="spinner" /></div>
         ) : filtered.length === 0 ? (
-          <div className="empty-state"><div className="empty-icon">📊</div><div>ไม่พบข้อมูลในช่วงเวลาที่เลือก</div></div>
+          <div className="empty-state">
+            <div className="empty-icon">📊</div>
+            <div>ไม่พบข้อมูลในช่วงเวลาที่เลือก</div>
+          </div>
         ) : (
           <table>
             <thead>
-              <tr>
-                <th>วันที่</th><th>เขต</th><th>สถานะ</th><th>ผู้ตรวจ</th><th>หมายเหตุ</th><th>รูป</th>
-              </tr>
+              <tr><th>วันที่</th><th>เขต</th><th>สถานะ</th><th>ผู้ตรวจ</th><th>หมายเหตุ</th><th>รูป</th></tr>
             </thead>
             <tbody>
               {filtered.map(r => (
                 <tr key={r.id}>
                   <td style={{ fontSize: 12.5, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
-                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}
+                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}
+                    {' '}
+                    <span style={{ fontSize: 11 }}>
+                      {new Date(r.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
+                    </span>
                   </td>
                   <td style={{ fontWeight: 600 }}>{r.zone}</td>
                   <td>
@@ -164,11 +207,19 @@ export default function AdminZonesPage() {
                       : <span className="badge badge-red">❌ ไม่สะอาด</span>}
                   </td>
                   <td style={{ fontSize: 13 }}>{r.inspector_name}</td>
-                  <td style={{ fontSize: 12.5, color: 'var(--text-3)' }}>{r.note ?? '—'}</td>
+                  <td style={{ fontSize: 12.5, color: 'var(--text-3)', maxWidth: 180 }}>{r.note ?? '—'}</td>
                   <td>
-                    {r.photo_url
-                      ? <a href={r.photo_url} target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm">ดูรูป</a>
-                      : <span style={{ fontSize: 12, color: 'var(--text-3)' }}>—</span>}
+                    {r.photo_url ? (
+                      <button
+                        onClick={() => setPhotoModal(r.photo_url!)}
+                        className="btn btn-ghost btn-sm"
+                        style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+                      >
+                        🖼️ ดูรูป
+                      </button>
+                    ) : (
+                      <span style={{ fontSize: 12, color: 'var(--text-3)' }}>—</span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -176,6 +227,59 @@ export default function AdminZonesPage() {
           </table>
         )}
       </div>
+
+      {/* Photo modal */}
+      {photoModal && (
+        <div
+          onClick={() => setPhotoModal(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)',
+            zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 20,
+          }}
+        >
+          <div onClick={e => e.stopPropagation()} style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }}>
+            <button
+              onClick={() => setPhotoModal(null)}
+              style={{
+                position: 'absolute', top: -14, right: -14, zIndex: 1,
+                background: '#fff', border: 'none', borderRadius: '50%',
+                width: 32, height: 32, fontSize: 18, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontWeight: 700,
+              }}
+            >
+              ×
+            </button>
+            <img
+              src={photoModal}
+              alt="zone check photo"
+              style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain' }}
+              onError={e => {
+                // fallback ถ้า lh3 ไม่โหลด
+                const img = e.currentTarget;
+                if (!img.src.includes('drive.google.com')) {
+                  const id = photoModal.split('/d/')[1];
+                  if (id) img.src = `https://drive.google.com/uc?export=view&id=${id}`;
+                }
+              }}
+            />
+            <a
+              href={photoModal}
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-ghost btn-sm"
+              style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.1)', color: '#fff', borderColor: 'rgba(255,255,255,0.2)' }}
+            >
+              เปิดใน Google Drive ↗
+            </a>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+      `}</style>
     </AppShell>
   );
 }
