@@ -2,16 +2,16 @@
 
 /**
  * /admin/zones/page.tsx — รายงานเขตสะอาด (Admin)
- * - Supabase Realtime: auto-refresh เมื่อมีการบันทึกใหม่
- * - แสดงรูปจาก Google Drive
+ * ★ useAdminCache → instant stale data
+ * ★ Realtime: auto-refresh เมื่อมีการบันทึกใหม่
  */
 
-import { useEffect, useState, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { getBrowserSupabase } from '@/lib/supabaseClient';
 import { useRealtime } from '@/lib/realtimeHooks';
+import { useAdminCache, invalidateCache } from '@/lib/adminCache';
 
 const ZONES = ['ม.1/1','ม.1/2','ม.2/1','ม.2/2','ม.3/1','ม.3/2','ม.4','ม.5','ม.6'];
 
@@ -26,11 +26,15 @@ type ZoneRecord = {
   check_date: string;
 };
 
+// Build URL with date params
+function buildUrl(from: string, to: string) {
+  return `/api/admin/zones?from=${from}&to=${to}`;
+}
+
 export default function AdminZonesPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
-  const [records, setRecords] = useState<ZoneRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+
   const [dateFrom, setDateFrom] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 7);
     return d.toISOString().split('T')[0];
@@ -39,40 +43,29 @@ export default function AdminZonesPage() {
   const [filterZone, setFilterZone] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [photoModal, setPhotoModal] = useState<string | null>(null);
+  const [rtTick, setRtTick] = useState(0);
 
-  useEffect(() => {
-    if (!authLoading && !isAdmin) router.replace('/');
-  }, [authLoading, isAdmin, router]);
+  const zonesUrl = buildUrl(dateFrom, dateTo);
 
-  async function getToken() {
-    const { data } = await getBrowserSupabase().auth.getSession();
-    return data?.session?.access_token ?? null;
-  }
+  if (!authLoading && !isAdmin) { router.replace('/'); return null; }
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const token = await getToken();
-      const res = await fetch(`/api/admin/zones?from=${dateFrom}&to=${dateTo}`, {
-        headers: { Authorization: `Bearer ${token ?? ''}` },
-      });
-      if (res.ok) setRecords(await res.json() || []);
-    } catch {}
-    setLoading(false);
-  }, [dateFrom, dateTo]);
-
-  useEffect(() => {
-    if (isAdmin) void load();
-  }, [isAdmin, load]);
-
-  // ★ Realtime
-  useRealtime({
-    table: 'council_zone_checks',
-    onData: () => void load(),
+  const { data: records, loading, refresh } = useAdminCache<ZoneRecord[]>(zonesUrl, {
+    realtimeDep: rtTick,
     enabled: isAdmin,
   });
 
-  const filtered = records.filter(r =>
+  useRealtime({
+    table: 'council_zone_checks',
+    onData: useCallback(() => {
+      invalidateCache(zonesUrl);
+      setRtTick(n => n + 1);
+    }, [zonesUrl]),
+    enabled: isAdmin,
+    debounceMs: 250,
+  });
+
+  const allRecords = records ?? [];
+  const filtered = allRecords.filter(r =>
     (!filterZone || r.zone === filterZone) &&
     (!filterStatus || r.status === filterStatus)
   );
@@ -91,7 +84,6 @@ export default function AdminZonesPage() {
       <div className="loading-center"><div className="spinner" /></div>
     </AppShell>
   );
-  if (!isAdmin) return null;
 
   return (
     <AppShell pageTitle="รายงานเขตสะอาด">
@@ -102,8 +94,7 @@ export default function AdminZonesPage() {
             <div className="page-subtitle">ดูประวัติและสถิติการตรวจเขตสะอาดรายวัน</div>
           </div>
           <span style={{ fontSize: 11, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', animation: 'pulse 2s infinite' }} />
-            Realtime
+            <span className="rt-dot" />Realtime
           </span>
         </div>
       </div>
@@ -133,7 +124,7 @@ export default function AdminZonesPage() {
             <option value="dirty">ไม่สะอาด</option>
           </select>
         </div>
-        <button onClick={load} className="btn btn-ghost btn-sm">🔄 รีเฟรช</button>
+        <button onClick={refresh} className="btn btn-ghost btn-sm">🔄 รีเฟรช</button>
       </div>
 
       {/* Stats */}
@@ -155,15 +146,15 @@ export default function AdminZonesPage() {
       </div>
 
       {/* Zone summary */}
-      <div className="section-label" style={{ marginBottom: 10 }}>สรุปรายเขต</div>
-      <div className="zone-grid" style={{ marginBottom: 22, gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))' }}>
+      <div className="sec-label" style={{ marginBottom: 10 }}>สรุปรายเขต</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))', gap: 7, marginBottom: 22 }}>
         {zoneSummary.map(z => (
           <div
             key={z.zone}
             className="card"
             style={{
               padding: '10px 12px', textAlign: 'center',
-              borderTop: z.dirty > 0 ? '3px solid var(--red)' : z.clean > 0 ? '3px solid var(--green)' : '3px solid var(--border)',
+              borderTop: z.dirty > 0 ? '3px solid var(--red)' : z.clean > 0 ? '3px solid var(--green)' : '3px solid var(--b)',
             }}
           >
             <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>{z.zone}</div>
@@ -176,9 +167,9 @@ export default function AdminZonesPage() {
       </div>
 
       {/* Detail table */}
-      <div className="section-label" style={{ marginBottom: 10 }}>บันทึกรายการ</div>
+      <div className="sec-label" style={{ marginBottom: 10 }}>บันทึกรายการ</div>
       <div className="table-wrap">
-        {loading ? (
+        {loading && allRecords.length === 0 ? (
           <div className="loading-center"><div className="spinner" /></div>
         ) : filtered.length === 0 ? (
           <div className="empty-state">
@@ -193,7 +184,7 @@ export default function AdminZonesPage() {
             <tbody>
               {filtered.map(r => (
                 <tr key={r.id}>
-                  <td style={{ fontSize: 12.5, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
+                  <td style={{ fontSize: 12.5, color: 'var(--t3)', whiteSpace: 'nowrap' }}>
                     {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}
                     {' '}
                     <span style={{ fontSize: 11 }}>
@@ -207,18 +198,14 @@ export default function AdminZonesPage() {
                       : <span className="badge badge-red">❌ ไม่สะอาด</span>}
                   </td>
                   <td style={{ fontSize: 13 }}>{r.inspector_name}</td>
-                  <td style={{ fontSize: 12.5, color: 'var(--text-3)', maxWidth: 180 }}>{r.note ?? '—'}</td>
+                  <td style={{ fontSize: 12.5, color: 'var(--t3)' }}>{r.note ?? '—'}</td>
                   <td>
                     {r.photo_url ? (
-                      <button
-                        onClick={() => setPhotoModal(r.photo_url!)}
-                        className="btn btn-ghost btn-sm"
-                        style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-                      >
+                      <button onClick={() => setPhotoModal(r.photo_url!)} className="btn btn-ghost btn-sm">
                         🖼️ ดูรูป
                       </button>
                     ) : (
-                      <span style={{ fontSize: 12, color: 'var(--text-3)' }}>—</span>
+                      <span style={{ fontSize: 12, color: 'var(--t3)' }}>—</span>
                     )}
                   </td>
                 </tr>
@@ -232,31 +219,12 @@ export default function AdminZonesPage() {
       {photoModal && (
         <div
           onClick={() => setPhotoModal(null)}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)',
-            zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            padding: 20,
-          }}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)', zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
         >
           <div onClick={e => e.stopPropagation()} style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }}>
-            <button
-              onClick={() => setPhotoModal(null)}
-              style={{
-                position: 'absolute', top: -14, right: -14, zIndex: 1,
-                background: '#fff', border: 'none', borderRadius: '50%',
-                width: 32, height: 32, fontSize: 18, cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontWeight: 700,
-              }}
-            >
-              ×
-            </button>
-            <img
-              src={photoModal}
-              alt="zone check photo"
-              style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain' }}
+            <button onClick={() => setPhotoModal(null)} style={{ position: 'absolute', top: -14, right: -14, zIndex: 1, background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>×</button>
+            <img src={photoModal} alt="zone check photo" style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain' }}
               onError={e => {
-                // fallback ถ้า lh3 ไม่โหลด
                 const img = e.currentTarget;
                 if (!img.src.includes('drive.google.com')) {
                   const id = photoModal.split('/d/')[1];
@@ -264,22 +232,12 @@ export default function AdminZonesPage() {
                 }
               }}
             />
-            <a
-              href={photoModal}
-              target="_blank"
-              rel="noreferrer"
-              className="btn btn-ghost btn-sm"
-              style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.1)', color: '#fff', borderColor: 'rgba(255,255,255,0.2)' }}
-            >
+            <a href={photoModal} target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm" style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.1)', color: '#fff', borderColor: 'rgba(255,255,255,0.2)' }}>
               เปิดใน Google Drive ↗
             </a>
           </div>
         </div>
       )}
-
-      <style>{`
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-      `}</style>
     </AppShell>
   );
 }

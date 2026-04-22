@@ -1,11 +1,21 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+/**
+ * /admin/requests/page.tsx — คำขอสมัครสมาชิก
+ * ★ useAdminCache → instant stale data, 0ms perceived latency
+ * ★ Realtime debounced → auto-refresh เมื่อมีคำขอใหม่
+ */
+
+import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { getBrowserSupabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
+import { useRealtime } from '@/lib/realtimeHooks';
+import { useAdminCache, invalidateCache } from '@/lib/adminCache';
+import { getFreshToken } from '@/lib/sessionUtils';
+
+const REQUESTS_URL = '/api/admin/requests';
 
 type RequestRow = {
   id: string;
@@ -21,41 +31,35 @@ type RequestRow = {
 export default function AdminRequestsPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
-  const [requests, setRequests] = useState < RequestRow[] > ([]);
-  const [loading, setLoading] = useState(true);
+  const [rtTick, setRtTick] = useState(0);
   const [actionId, setActionId] = useState < string | null > (null);
   
-  useEffect(() => {
-    if (!authLoading && !isAdmin) router.replace('/');
-  }, [authLoading, isAdmin]);
+  // ★ Instant stale data + background refresh
+  const { data: requests, loading, refresh } = useAdminCache < RequestRow[] > (REQUESTS_URL, {
+    realtimeDep: rtTick,
+    enabled: isAdmin,
+  });
   
-  useEffect(() => {
-    if (isAdmin) void load();
-  }, [isAdmin]);
+  // ★ Auto-refresh เมื่อมีคำขอใหม่
+  useRealtime({
+    table: 'council_join_requests',
+    onData: useCallback(() => {
+      invalidateCache(REQUESTS_URL);
+      setRtTick(n => n + 1);
+    }, []),
+    debounceMs: 300,
+    enabled: isAdmin,
+  });
   
-  async function getToken() {
-    const supabase = getBrowserSupabase();
-    const { data } = await supabase.auth.getSession();
-    return data?.session?.access_token ?? null;
-  }
+  if (!authLoading && !isAdmin) { router.replace('/'); return null; }
   
-  async function load() {
-    setLoading(true);
-    try {
-      const token = await getToken();
-      const res = await fetch('/api/admin/requests', { headers: { Authorization: `Bearer ${token ?? ''}` } });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      setRequests(json || []);
-    } catch (e: any) { alert(e?.message ?? 'โหลดล้มเหลว'); }
-    finally { setLoading(false); }
-  }
+  const reqList = requests ?? [];
   
   async function approve(id: string) {
     if (!confirm('อนุมัติคำขอนี้?')) return;
     setActionId(id);
     try {
-      const token = await getToken();
+      const token = await getFreshToken();
       const res = await fetch('/api/admin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
@@ -63,7 +67,8 @@ export default function AdminRequestsPage() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      await load();
+      invalidateCache(REQUESTS_URL);
+      setRtTick(n => n + 1);
     } catch (e: any) { alert(e?.message ?? 'อนุมัติล้มเหลว'); }
     finally { setActionId(null); }
   }
@@ -72,89 +77,83 @@ export default function AdminRequestsPage() {
     if (!confirm(`ปฏิเสธและลบคำขอของ "${name}"?`)) return;
     setActionId(id);
     try {
-      const token = await getToken();
+      const token = await getFreshToken();
       const res = await fetch(`/api/admin/requests/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token ?? ''}` },
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      await load();
+      invalidateCache(REQUESTS_URL);
+      setRtTick(n => n + 1);
     } catch (e: any) { alert(e?.message ?? 'ล้มเหลว'); }
     finally { setActionId(null); }
   }
   
-  if (authLoading) return <AppShell pageTitle="คำขอสมัคร"><div className="loading-center"><div className="spinner" /></div></AppShell>;
-  if (!isAdmin) return null;
+  if (authLoading) return (
+    <AppShell pageTitle="คำขอสมัคร">
+      <div className="loading-center"><div className="spinner" /></div>
+    </AppShell>
+  );
   
   return (
-    <AppShell pageTitle="คำขอสมัครสมาชิก" pendingCount={requests.length}>
+    <AppShell pageTitle="คำขอสมัครสมาชิก" pendingCount={reqList.length}>
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
         <div>
           <div className="page-title">คำขอสมัครสมาชิก</div>
           <div className="page-subtitle">ตรวจสอบและอนุมัติคำขอเข้าร่วมสภานักเรียน</div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {requests.length > 0 && <span className="badge badge-red">{requests.length} รายการ</span>}
-          <button onClick={load} className="btn btn-ghost btn-sm">🔄 รีเฟรช</button>
+          {reqList.length > 0 && <span className="badge badge-red">{reqList.length} รายการ</span>}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--green)' }}>
+            <span className="rt-dot" />realtime
+          </div>
+          <button onClick={refresh} className="btn btn-ghost btn-sm">🔄 รีเฟรช</button>
         </div>
       </div>
 
-      {loading ? (
-        <div className="loading-center"><div className="spinner" /></div>
-      ) : requests.length === 0 ? (
+      {/* Show stale skeleton if loading first time */}
+      {loading && reqList.length === 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {[1, 2, 3].map(i => (
+            <div key={i} className="skeleton" style={{ height: 100, borderRadius: 'var(--r-xl)' }} />
+          ))}
+        </div>
+      ) : reqList.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '56px 24px' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
           <h3 style={{ color: 'var(--green)', marginBottom: 8 }}>ไม่มีคำขอรอพิจารณา</h3>
-          <p style={{ color: 'var(--text-3)' }}>คำขอทั้งหมดได้รับการพิจารณาแล้ว</p>
+          <p style={{ color: 'var(--t3)' }}>คำขอทั้งหมดได้รับการพิจารณาแล้ว</p>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {requests.map(r => (
+          {reqList.map(r => (
             <div key={r.id} className="card" style={{ borderLeft: '3px solid var(--brand)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
                 <div style={{ flex: 1, minWidth: 200 }}>
                   <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>{r.full_name}</div>
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
                     {r.student_id && (
-                      <span style={{ fontSize: 13, color: 'var(--text-3)' }}>
-                        🎓 รหัส: <strong style={{ color: 'var(--text)' }}>{r.student_id}</strong>
-                      </span>
+                      <span style={{ fontSize: 13, color: 'var(--t3)' }}>🎓 รหัส: <strong style={{ color: 'var(--t)' }}>{r.student_id}</strong></span>
                     )}
-                    {r.email && (
-                      <span style={{ fontSize: 13, color: 'var(--text-3)' }}>📧 {r.email}</span>
-                    )}
-                    {r.year && (
-                      <span style={{ fontSize: 13, color: 'var(--text-3)' }}>📅 ปี {r.year}</span>
-                    )}
+                    {r.email && <span style={{ fontSize: 13, color: 'var(--t3)' }}>📧 {r.email}</span>}
+                    {r.year && <span style={{ fontSize: 13, color: 'var(--t3)' }}>📅 ปี {r.year}</span>}
                     <span className="badge badge-blue">{r.account_type ?? 'student'}</span>
                   </div>
                   {r.message && (
-                    <div style={{
-                      fontSize: 13, color: 'var(--text-3)', fontStyle: 'italic',
-                      background: 'var(--surface-2)', padding: '8px 12px',
-                      borderRadius: 'var(--r)', marginBottom: 6,
-                    }}>
+                    <div style={{ fontSize: 13, color: 'var(--t3)', fontStyle: 'italic', background: 'var(--s2)', padding: '8px 12px', borderRadius: 'var(--r)', marginBottom: 6 }}>
                       "{r.message}"
                     </div>
                   )}
-                  <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>
+                  <div style={{ fontSize: 11.5, color: 'var(--t3)' }}>
                     ส่งเมื่อ {new Date(r.created_at).toLocaleString('th-TH')}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignSelf: 'center' }}>
-                  <button
-                    disabled={actionId !== null}
-                    onClick={() => approve(r.id)}
-                    className="btn btn-success"
-                  >
+                  <button disabled={actionId !== null} onClick={() => approve(r.id)} className="btn btn-success">
                     {actionId === r.id ? '🔄...' : '✅ อนุมัติ'}
                   </button>
-                  <button
-                    disabled={actionId !== null}
-                    onClick={() => reject(r.id, r.full_name)}
-                    className="btn btn-danger"
-                  >
+                  <button disabled={actionId !== null} onClick={() => reject(r.id, r.full_name)} className="btn btn-danger">
                     {actionId === r.id ? '🔄...' : '❌ ปฏิเสธ'}
                   </button>
                 </div>
