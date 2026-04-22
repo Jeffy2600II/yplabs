@@ -1,34 +1,49 @@
 /* src/lib/dataCache.ts */
 /**
- * dataCache.ts — In-memory SWR-like cache for API routes
+ * dataCache.ts v2 — Reactive SWR-like cache
  * ─────────────────────────────────────────────────────────────────
- * Eliminates duplicate requests + shows stale data instantly
- * while fetching fresh data in background.
+ * BUG FIX v1→v2:
+ *   เดิม: invalidateCache() ลบ entry จาก Map แต่ไม่แจ้ง hooks
+ *   ใหม่: invalidateCache() → notify ALL mounted useApiCache hooks
+ *         สำหรับ URL นั้นทันที → re-fetch ทุก component พร้อมกัน
+ *         ไม่ต้องพึ่ง Supabase Realtime ก็ทำงานได้
  *
- * Usage in any page:
- *   const { data, loading } = useCache('/api/public/duty/today');
- *
- * Cache TTL: 30s for public data, 10s for admin data
- * Deduplication: concurrent calls to same URL share one fetch
+ * Flow:
+ *   zone-check page บันทึกผล
+ *   → invalidateCache('/api/public/zones/today')
+ *   → home page's useApiCache hook รับ notify → refetch ทันที
+ *   → home page แสดงผลใหม่โดยไม่ต้อง reload
  * ─────────────────────────────────────────────────────────────────
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-type CacheEntry<T> = {
-  data: T;
-  ts: number;
-};
-
-// Singleton in-memory store
+// ── In-memory cache store ─────────────────────────────────────────
+type CacheEntry<T> = { data: T; ts: number };
 const store = new Map<string, CacheEntry<any>>();
-// Pending promises for deduplication
 const pending = new Map<string, Promise<any>>();
 
-// Cache TTL config
+// ── Reactive listener registry ────────────────────────────────────
+// url → Set of refetch functions from mounted hooks
+// เมื่อ invalidateCache(url) ถูกเรียก → แจ้งทุก hook ที่ subscribe URL นั้น
+const listeners = new Map<string, Set<() => void>>();
+
+function addListener(url: string, fn: () => void) {
+  if (!listeners.has(url)) listeners.set(url, new Set());
+  listeners.get(url)!.add(fn);
+}
+
+function removeListener(url: string, fn: () => void) {
+  const s = listeners.get(url);
+  if (!s) return;
+  s.delete(fn);
+  if (s.size === 0) listeners.delete(url);
+}
+
+// ── TTL config ────────────────────────────────────────────────────
 const TTL: Record<string, number> = {
-  '/api/public/': 30_000,       // 30s for public endpoints
-  '/api/admin/':  10_000,       // 10s for admin endpoints
+  '/api/public/': 30_000,
+  '/api/admin/':  10_000,
   default:        20_000,
 };
 
@@ -45,11 +60,7 @@ function isStale(url: string): boolean {
   return Date.now() - e.ts > getTTL(url);
 }
 
-async function fetchAndCache<T>(
-  url: string,
-  fetchFn: () => Promise<T>,
-): Promise<T> {
-  // Deduplicate concurrent requests
+async function fetchAndCache<T>(url: string, fetchFn: () => Promise<T>): Promise<T> {
   if (pending.has(url)) return pending.get(url)!;
 
   const promise = fetchFn().then(data => {
@@ -65,12 +76,10 @@ async function fetchAndCache<T>(
   return promise;
 }
 
+// ── Types ─────────────────────────────────────────────────────────
 type UseCacheOptions = {
-  /** Additional headers (e.g. Authorization) */
   headers?: Record<string, string>;
-  /** Set to false to skip fetch */
   enabled?: boolean;
-  /** On Supabase realtime event, call refresh() */
   realtimeDep?: number;
 };
 
@@ -81,13 +90,7 @@ type UseCacheResult<T> = {
   refresh: () => void;
 };
 
-/**
- * useApiCache — SWR-style hook with instant stale data
- *
- * 1. Shows cached data immediately (0ms perceived latency)
- * 2. Refetches in background if stale
- * 3. Deduplicates concurrent requests
- */
+// ── useApiCache hook ──────────────────────────────────────────────
 export function useApiCache<T = any>(
   url: string,
   options: UseCacheOptions = {},
@@ -95,24 +98,24 @@ export function useApiCache<T = any>(
   const { headers, enabled = true, realtimeDep } = options;
   const [data, setData] = useState<T | null>(() => store.get(url)?.data ?? null);
   const [loading, setLoading] = useState(() => !store.get(url));
-  const [error, setError]   = useState<string | null>(null);
-  const refreshCount = useRef(0);
+  const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
 
+  // ★ Core fetch function
   const fetchData = useCallback(async (force = false) => {
     if (!enabled) return;
+
     if (!force && !isStale(url)) {
-      // Show stale immediately
       const cached = store.get(url);
-      if (cached) setData(cached.data);
-      setLoading(false);
+      if (cached) { setData(cached.data); setLoading(false); }
       return;
     }
 
-    // Show stale data immediately while refetching
+    // Show stale data immediately while refetching (no spinner if we have data)
     const stale = store.get(url);
     if (stale) {
       setData(stale.data);
-      setLoading(false); // don't show spinner if we have stale data
+      setLoading(false);
     } else {
       setLoading(true);
     }
@@ -121,52 +124,79 @@ export function useApiCache<T = any>(
       const fresh = await fetchAndCache<T>(url, async () => {
         const res = await fetch(url, {
           headers: { 'Accept': 'application/json', ...(headers ?? {}) },
-          // Use edge cache when possible
-          next: { revalidate: 0 },
         } as RequestInit);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       });
-      setData(fresh);
-      setError(null);
+      if (mountedRef.current) {
+        setData(fresh);
+        setError(null);
+      }
     } catch (e: any) {
-      setError(e?.message ?? 'โหลดล้มเหลว');
+      if (mountedRef.current) setError(e?.message ?? 'โหลดล้มเหลว');
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
-  }, [url, enabled, headers]); // eslint-disable-line
+  }, [url, enabled, JSON.stringify(headers)]); // eslint-disable-line
 
-  // Initial fetch
+  // ★ Cleanup on unmount
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  // ★ Initial fetch
   useEffect(() => { void fetchData(); }, [fetchData]);
 
-  // Refetch when realtime event fires
+  // ★ Refetch on realtime event (Supabase Realtime)
   useEffect(() => {
     if (realtimeDep !== undefined && realtimeDep > 0) {
       void fetchData(true);
     }
   }, [realtimeDep]); // eslint-disable-line
 
-  const refresh = useCallback(() => {
-    refreshCount.current++;
-    void fetchData(true);
-  }, [fetchData]);
+  // ★★ CORE FIX: Register as listener for reactive invalidation
+  //    เมื่อ invalidateCache(url) ถูกเรียกจากที่ไหนก็ตาม
+  //    hook นี้จะ refetch ทันทีโดยไม่ต้องรอ realtime หรือ rtTick
+  useEffect(() => {
+    const trigger = () => { void fetchData(true); };
+    addListener(url, trigger);
+    return () => removeListener(url, trigger);
+  }, [url, fetchData]);
+
+  const refresh = useCallback(() => { void fetchData(true); }, [fetchData]);
 
   return { data, loading, error, refresh };
 }
 
 /**
- * Invalidate cache for a URL — call after mutations
- * e.g. after POST to /api/admin/duty, call invalidate('/api/public/duty/today')
+ * invalidateCache — ลบ cache + notify ทุก mounted hook ที่ subscribe URL นั้น
+ * ★★ FIX: ตอนนี้ hook ทุกตัวที่ใช้ URL นี้จะ refetch ทันที
+ *
+ * Usage after mutation:
+ *   invalidateCache('/api/public/zones/today');
+ *   // → home page, zone-check page ทุกตัวที่ mount อยู่ update ทันที
  */
 export function invalidateCache(url: string): void {
   store.delete(url);
+  pending.delete(url);
+  // ★ Notify all mounted hooks → they will refetch immediately
+  listeners.get(url)?.forEach(fn => fn());
 }
 
 /**
- * Prefetch a URL into cache — call onMouseEnter of navigation items
+ * invalidateCachePrefix — invalidate ทุก URL ที่ขึ้นต้นด้วย prefix
+ * ใช้เมื่อต้องการ invalidate หลาย URL พร้อมกัน
  */
+export function invalidateCachePrefix(prefix: string): void {
+  for (const [key] of store) {
+    if (key.startsWith(prefix)) invalidateCache(key);
+  }
+}
+
+/** Prefetch into cache (call on hover/navigation intent) */
 export async function prefetch(url: string, headers?: Record<string, string>): Promise<void> {
-  if (!isStale(url)) return; // already fresh
+  if (!isStale(url)) return;
   try {
     const res = await fetch(url, { headers: { 'Accept': 'application/json', ...headers } });
     if (res.ok) store.set(url, { data: await res.json(), ts: Date.now() });
