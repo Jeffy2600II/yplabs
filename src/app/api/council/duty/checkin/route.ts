@@ -1,3 +1,9 @@
+// =================================================================
+// FILE: src/app/api/council/duty/checkin/route.ts
+// API — เช็คอินเวรของตัวเอง (สมาชิกที่มีรายชื่อเวรวันนี้)
+// ★ ใช้วันที่ไทย UTC+7
+// =================================================================
+
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase, verifyMember } from '@/lib/apiHelper';
 import { createLogger } from '@/lib/serverLogger';
@@ -14,15 +20,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'กรุณาเข้าสู่ระบบก่อน' }, { status: 401 });
   }
   
-  // ★ ใช้วันที่ไทย (UTC+7) แทน UTC
+  // ★ ใช้วันที่ไทย UTC+7
   const today = getTodayTH();
   const { note } = await req.json().catch(() => ({ note: '' }));
   
-  logger.info('checkin attempt', {
-    uid: member.id.slice(-6),
-    name: (member as any).full_name,
-    date: today,
-  });
+  logger.info('checkin attempt', { uid: member.id.slice(-6), name: (member as any).full_name, date: today });
   
   const { data: entry, error: findErr } = await supabase
     .from('council_duty')
@@ -37,22 +39,18 @@ export async function POST(req: NextRequest) {
   }
   
   if (!entry) {
-    logger.warn('no duty entry found for today', { uid: member.id.slice(-6), name: (member as any).full_name, date: today });
+    logger.warn('no duty entry found for today', { uid: member.id.slice(-6), date: today });
     return NextResponse.json({ error: 'คุณไม่มีรายชื่อเวรวันนี้' }, { status: 400 });
   }
   
   if (entry.checked_in) {
-    logger.warn('already checked in', { uid: member.id.slice(-6), name: (member as any).full_name, date: today });
+    logger.warn('already checked in', { uid: member.id.slice(-6), date: today });
     return NextResponse.json({ error: 'เช็คอินแล้ว' }, { status: 400 });
   }
   
   const { error: updateErr } = await supabase
     .from('council_duty')
-    .update({
-      checked_in: true,
-      checked_in_at: new Date().toISOString(),
-      note: note ?? null,
-    })
+    .update({ checked_in: true, checked_in_at: new Date().toISOString(), note: note ?? null })
     .eq('id', entry.id);
   
   if (updateErr) {
@@ -60,6 +58,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: updateErr.message }, { status: 400 });
   }
   
-  logger.info('checkin successful', { uid: member.id.slice(-6), name: (member as any).full_name, date: today });
+  logger.info('checkin successful', { uid: member.id.slice(-6), date: today });
   return NextResponse.json({ ok: true });
 }
