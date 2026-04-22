@@ -1,171 +1,211 @@
-// =================================================================
-// FILE: src/app/zone-check/page.tsx
-// หน้าตรวจเขตสะอาด
-// ★ BUG FIX: invalidateCache → reactive → home page อัปเดตทันที
-// ★ BUG FIX: loadTodayChecks() ถูกเรียกซ้ำหลังบันทึกสำเร็จ
-// ★ เขตที่บันทึกแล้วล็อก ไม่สามารถแก้ไขได้
-// =================================================================
-
+/* src/app/zone-check/page.tsx */
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+/**
+ * หน้าตรวจเขตสะอาด
+ * ─────────────────────────────────────────────────────────────────
+ * แก้ไขปัญหา: เดิมใช้ fetch(url + '?_t=timestamp') ซึ่ง bypass cache
+ * ทำให้ home page ไม่รู้ว่าข้อมูลเปลี่ยน
+ *
+ * วิธีใหม่:
+ *   - useQuery(ZONES_URL) อ่านจาก cache system
+ *   - invalidate(ZONES_URL) หลัง save → ทุก subscriber รับแจ้ง
+ *   - local state แยกออกจาก server state ชัดเจน
+ *
+ * Data flow:
+ *   server state (useQuery) — ข้อมูลที่บันทึกแล้วใน DB
+ *   local state             — selection ที่ยังไม่ได้ save
+ *   zones (derived)         — รวมทั้งสอง: server ล็อก, local แก้ได้
+ */
+
+import { useState, useCallback, useMemo } from 'react';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { fetchWithAuth } from '@/lib/sessionUtils';
-import { invalidateCache } from '@/lib/dataCache';
+import { useQuery, invalidate } from '@/lib/cache';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
-const ZONES_TODAY_URL = '/api/public/zones/today';
 
-type ZStatus = 'pending' | 'clean' | 'dirty';
-type ZState = {
-  status: ZStatus;
+/** URL ของ API สาธารณะ — ใช้ key เดียวกันทุกหน้า */
+const ZONES_URL = '/api/public/zones/today';
+
+// ── Types ─────────────────────────────────────────────────────────
+
+/** ข้อมูลจาก server (DB) */
+type ServerZone = {
+  zone: string;
+  status: 'clean' | 'dirty' | 'pending';
+  inspector: string | null;
+  note: string | null;
+  recorded_at: string | null;
+};
+
+/** Local state สำหรับ selection ที่ยังไม่ได้ save */
+type LocalZone = {
+  status: 'pending' | 'clean' | 'dirty';
   note: string;
   file: File | null;
   preview: string | null;
-  saved: boolean;
+};
+
+/** Combined view สำหรับ render */
+type ZoneView = {
+  zone: string;
+  status: 'pending' | 'clean' | 'dirty';
+  note: string;
+  file: File | null;
+  preview: string | null;
+  saved: boolean;       // true = ข้อมูลมาจาก server (ล็อก)
   savedBy: string | null;
   savedAt: string | null;
 };
 
-function initZones(): Record<string, ZState> {
-  const r: Record<string, ZState> = {};
-  ZONES.forEach(z => {
-    r[z] = { status: 'pending', note: '', file: null, preview: null, saved: false, savedBy: null, savedAt: null };
-  });
-  return r;
+// ── Helpers ───────────────────────────────────────────────────────
+
+function initLocal(): Record<string, LocalZone> {
+  return Object.fromEntries(
+    ZONES.map(z => [z, { status: 'pending', note: '', file: null, preview: null }])
+  );
 }
+
+// ─────────────────────────────────────────────────────────────────
 
 export default function ZoneCheckPage() {
   const { isMember, user, loading: authLoading } = useAuth();
-  const [zones, setZones] = useState(initZones);
+
+  // ★ Server state — reactive ผ่าน cache system
+  //   เมื่อ invalidate(ZONES_URL) ถูกเรียก (จากหน้านี้หรือหน้าอื่น)
+  //   hook นี้จะ refetch อัตโนมัติ
+  const { data: serverZones, loading: serverLoading } = useQuery<ServerZone[]>(ZONES_URL, {
+    enabled: !authLoading,
+  });
+
+  // Local state — selection ที่ผู้ใช้กำลัง input (ยังไม่ save)
+  const [local, setLocal] = useState<Record<string, LocalZone>>(initLocal);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [submitProgress, setSubmitProgress] = useState<{ zone: string; done: number; total: number } | null>(null);
+  const [submitProgress, setSubmitProgress] = useState<{
+    zone: string; done: number; total: number;
+  } | null>(null);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loadingToday, setLoadingToday] = useState(true);
 
-  // ★ Load today's checks
-  const loadTodayChecks = useCallback(async (silent = false) => {
-    if (!silent) setLoadingToday(true);
-    try {
-      const res = await fetch(ZONES_TODAY_URL + '?_t=' + Date.now()); // cache-bust
-      if (!res.ok) return;
-      const data: { zone: string; status: string; inspector: string | null; note: string | null; recorded_at: string | null }[] = await res.json();
-      setZones(prev => {
-        const updated = { ...prev };
-        // Reset all first (in case prev data was wrong)
-        ZONES.forEach(z => {
-          if (!updated[z].saved) return; // keep unsaved user selections
-        });
-        data.forEach(d => {
-          if ((d.status === 'clean' || d.status === 'dirty') && updated[d.zone]) {
-            updated[d.zone] = {
-              ...updated[d.zone],
-              status: d.status as ZStatus,
-              note: d.note ?? '',
-              saved: true,
-              savedBy: d.inspector,
-              savedAt: d.recorded_at,
-            };
-          }
-        });
-        return updated;
-      });
-    } catch {}
-    if (!silent) setLoadingToday(false);
-  }, []);
+  // ★ Derived state — รวม server + local
+  //   server data ที่ไม่ใช่ 'pending' = บันทึกแล้ว = ล็อก (ไม่ให้แก้)
+  const zones: ZoneView[] = useMemo(() => {
+    return ZONES.map(z => {
+      const server = serverZones?.find(s => s.zone === z);
+      const isLocked = server && server.status !== 'pending';
 
-  useEffect(() => {
-    if (isMember) {
-      void loadTodayChecks();
-    } else if (!authLoading) {
-      setLoadingToday(false);
-    }
-  }, [isMember, authLoading, loadTodayChecks]);
+      if (isLocked) {
+        return {
+          zone: z,
+          status: server!.status,
+          note: server!.note ?? '',
+          file: null,
+          preview: null,
+          saved: true,
+          savedBy: server!.inspector,
+          savedAt: server!.recorded_at,
+        };
+      }
 
-  const update = useCallback((zone: string, patch: Partial<ZState>) => {
-    setZones(p => ({ ...p, [zone]: { ...p[zone], ...patch } }));
+      return {
+        zone: z,
+        status: local[z].status,
+        note: local[z].note,
+        file: local[z].file,
+        preview: local[z].preview,
+        saved: false,
+        savedBy: null,
+        savedAt: null,
+      };
+    });
+  }, [serverZones, local]);
+
+  // ── Actions ────────────────────────────────────────────────────
+
+  const updateLocal = useCallback((zone: string, patch: Partial<LocalZone>) => {
+    setLocal(p => ({ ...p, [zone]: { ...p[zone], ...patch } }));
   }, []);
 
   function handlePhoto(zone: string, file: File | null) {
     if (!file) return;
     if (file.size > 8 * 1024 * 1024) { alert('ไฟล์ใหญ่เกิน 8MB'); return; }
-    update(zone, { file, preview: URL.createObjectURL(file) });
+    updateLocal(zone, { file, preview: URL.createObjectURL(file) });
   }
 
   function removePhoto(zone: string) {
-    const prev = zones[zone].preview;
+    const prev = local[zone].preview;
     if (prev) URL.revokeObjectURL(prev);
-    update(zone, { file: null, preview: null });
+    updateLocal(zone, { file: null, preview: null });
   }
 
   async function handleSubmit() {
-    const toSend = ZONES.filter(z => !zones[z].saved && zones[z].status !== 'pending');
+    // หา zone ที่ยังไม่ save และมีการ select แล้ว
+    const toSend = zones.filter(z => !z.saved && z.status !== 'pending').map(z => z.zone);
+
     if (!toSend.length) {
       setError('ไม่มีเขตใหม่ให้บันทึก — กรุณาเลือกสถานะอย่างน้อย 1 เขต');
       return;
     }
 
-    setSubmitting(true); setError(null);
+    setSubmitting(true);
+    setError(null);
     setSubmitProgress({ zone: '', done: 0, total: toSend.length });
-    let savedAny = false;
 
     try {
       for (let i = 0; i < toSend.length; i++) {
         const zone = toSend[i];
-        const z = zones[zone];
+        const l = local[zone];
         setSubmitProgress({ zone, done: i, total: toSend.length });
 
         const fd = new FormData();
         fd.append('zone', zone);
-        fd.append('status', z.status);
-        fd.append('note', z.note);
-        if (z.file) fd.append('photo', z.file);
+        fd.append('status', l.status);
+        fd.append('note', l.note);
+        if (l.file) fd.append('photo', l.file);
 
         const res = await fetchWithAuth('/api/council/zone-check', {
-          method: 'POST', body: fd, noContentType: true,
+          method: 'POST',
+          body: fd,
+          noContentType: true,
         });
         const json = await res.json();
         if (!res.ok) throw new Error(`เขต ${zone}: ${json.error ?? 'บันทึกล้มเหลว'}`);
 
-        // Mark as saved in local state immediately
-        update(zone, {
-          saved: true,
-          savedBy: user?.full_name ?? null,
-          savedAt: new Date().toISOString(),
-        });
-        savedAny = true;
+        // Cleanup preview URL
+        if (local[zone].preview) URL.revokeObjectURL(local[zone].preview!);
       }
 
-      // ★★ BUG FIX: invalidateCache → notify home page hook → refetch immediately
-      invalidateCache(ZONES_TODAY_URL);
-
-      toSend.forEach(zone => { const p = zones[zone].preview; if (p) URL.revokeObjectURL(p); });
+      // ★ สำคัญ: invalidate ZONES_URL → ทุก component ที่ subscribe URL นี้
+      //   จะ refetch ทันที รวมถึง home page ด้วย
+      invalidate(ZONES_URL);
       setDone(true);
+
     } catch (e: any) {
       setError(e?.message ?? 'เกิดข้อผิดพลาด');
-      // Still invalidate if some zones were saved
-      if (savedAny) invalidateCache(ZONES_TODAY_URL);
+      // ยัง invalidate เผื่อว่า save บางส่วนสำเร็จ
+      invalidate(ZONES_URL);
     } finally {
       setSubmitting(false);
       setSubmitProgress(null);
     }
   }
 
-  // ★ BUG FIX: Re-fetch from DB when returning to view
-  function handleViewResults() {
-    setDone(false);
-    void loadTodayChecks(); // force re-fetch from DB
-  }
+  // ── Stats ──────────────────────────────────────────────────────
 
-  const savedCount   = ZONES.filter(z => zones[z].saved).length;
-  const newPending   = ZONES.filter(z => !zones[z].saved && zones[z].status !== 'pending').length;
-  const cleanCount   = ZONES.filter(z => zones[z].status === 'clean').length;
-  const dirtyCount   = ZONES.filter(z => zones[z].status === 'dirty').length;
-  const pendingCount = ZONES.filter(z => zones[z].status === 'pending').length;
+  const savedCount   = zones.filter(z => z.saved).length;
+  const newPending   = zones.filter(z => !z.saved && z.status !== 'pending').length;
+  const cleanCount   = zones.filter(z => z.status === 'clean').length;
+  const dirtyCount   = zones.filter(z => z.status === 'dirty').length;
+  const pendingCount = zones.filter(z => z.status === 'pending').length;
+
+  // loading ครั้งแรก (ยังไม่มี data ใน cache)
+  const isFirstLoad = serverLoading && !serverZones;
+
+  // ── Auth guard ─────────────────────────────────────────────────
 
   if (!authLoading && !isMember) {
     return (
@@ -184,6 +224,8 @@ export default function ZoneCheckPage() {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
   });
 
+  // ── Render ──────────────────────────────────────────────────────
+
   return (
     <AppShell pageTitle="ตรวจเขตสะอาด">
       <div className="page-header">
@@ -191,35 +233,40 @@ export default function ZoneCheckPage() {
         <div className="page-subtitle">{todayLabel}</div>
       </div>
 
+      {/* Success screen */}
       {done ? (
         <div className="card" style={{ textAlign: 'center', padding: '52px 24px' }}>
           <div style={{ fontSize: 60, marginBottom: 14 }}>✅</div>
           <h2 style={{ color: 'var(--green)', marginBottom: 8 }}>บันทึกเรียบร้อย!</h2>
-          <p style={{ color: 'var(--t3)', fontSize: 14, marginBottom: 8 }}>บันทึกผลตรวจสำเร็จ {newPending} เขต</p>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap', marginTop: 8 }}>
             {cleanCount > 0 && <span className="badge badge-green">✅ สะอาด {cleanCount}</span>}
             {dirtyCount > 0 && <span className="badge badge-red">❌ ไม่สะอาด {dirtyCount}</span>}
           </div>
           <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 24, flexWrap: 'wrap' }}>
             <Link href="/" className="btn btn-primary">กลับหน้าหลัก</Link>
-            <button onClick={handleViewResults} className="btn btn-ghost">ดูผลตรวจวันนี้</button>
+            <button onClick={() => setDone(false)} className="btn btn-ghost">ดูผลตรวจวันนี้</button>
           </div>
         </div>
       ) : (
         <>
-          {loadingToday && (
+          {/* Loading state ครั้งแรก */}
+          {isFirstLoad && (
             <div className="card" style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
               <div className="spinner" />
               <span style={{ fontSize: 13, color: 'var(--t3)' }}>กำลังโหลดผลตรวจวันนี้...</span>
             </div>
           )}
 
-          {!loadingToday && (
+          {!isFirstLoad && (
             <>
+              {/* Stats */}
               <div className="grid-4" style={{ marginBottom: 16 }}>
                 <div className="stat-card" style={{ borderTop: '3px solid var(--brand)' }}>
                   <div className="stat-label">ตรวจแล้ว</div>
-                  <div className="stat-value">{cleanCount + dirtyCount}<span style={{ fontSize: 16, color: 'var(--t3)' }}>/{ZONES.length}</span></div>
+                  <div className="stat-value">
+                    {cleanCount + dirtyCount}
+                    <span style={{ fontSize: 16, color: 'var(--t3)' }}>/{ZONES.length}</span>
+                  </div>
                 </div>
                 <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
                   <div className="stat-label">สะอาด</div>
@@ -241,88 +288,194 @@ export default function ZoneCheckPage() {
                 </div>
               )}
 
+              {/* Progress bar */}
               <div className="card" style={{ marginBottom: 14, padding: '14px 18px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
                   <span style={{ fontWeight: 700 }}>ความคืบหน้าวันนี้</span>
                   <span style={{ color: 'var(--t3)' }}>{cleanCount + dirtyCount}/{ZONES.length} เขต</span>
                 </div>
                 <div className="progress-track">
-                  <div className="progress-fill" style={{
-                    width: `${((cleanCount + dirtyCount) / ZONES.length) * 100}%`,
-                    background: dirtyCount > 0 ? 'var(--amber)' : 'var(--green)',
-                  }} />
+                  <div
+                    className="progress-fill"
+                    style={{
+                      width: `${((cleanCount + dirtyCount) / ZONES.length) * 100}%`,
+                      background: dirtyCount > 0 ? 'var(--amber)' : 'var(--green)',
+                    }}
+                  />
                 </div>
               </div>
             </>
           )}
 
+          {/* Zone cards */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {ZONES.map(zone => {
-              const z = zones[zone];
+            {zones.map(({ zone, status, note, file, preview, saved, savedBy, savedAt }) => {
               const isOpen = expanded === zone;
-              const isLocked = z.saved;
               const borderColor =
-                z.status === 'clean' ? (isLocked ? '#4ADE80' : '#86EFAC') :
-                z.status === 'dirty' ? (isLocked ? '#F87171' : '#FCA5A5') : 'var(--border)';
+                status === 'clean' ? (saved ? '#4ADE80' : '#86EFAC') :
+                status === 'dirty' ? (saved ? '#F87171' : '#FCA5A5') :
+                'var(--border)';
               const bgColor =
-                z.status === 'clean' ? (isLocked ? '#ECFDF5' : '#F7FFF9') :
-                z.status === 'dirty' ? (isLocked ? '#FEF2F2' : '#FFF9F9') : 'var(--surface)';
+                status === 'clean' ? (saved ? '#ECFDF5' : '#F7FFF9') :
+                status === 'dirty' ? (saved ? '#FEF2F2' : '#FFF9F9') :
+                'var(--surface)';
 
               return (
-                <div key={zone} style={{ background: bgColor, border: `1.5px solid ${borderColor}`, borderRadius: 'var(--r-lg)', overflow: 'hidden', opacity: loadingToday ? 0.6 : 1 }}>
+                <div
+                  key={zone}
+                  style={{
+                    background: bgColor,
+                    border: `1.5px solid ${borderColor}`,
+                    borderRadius: 'var(--r-lg)',
+                    overflow: 'hidden',
+                    opacity: isFirstLoad ? 0.6 : 1,
+                  }}
+                >
+                  {/* Header row */}
                   <div
-                    onClick={() => !loadingToday && setExpanded(isOpen ? null : zone)}
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 16px', cursor: 'pointer', userSelect: 'none', gap: 8 }}
+                    onClick={() => !isFirstLoad && setExpanded(isOpen ? null : zone)}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      padding: '13px 16px', cursor: 'pointer', userSelect: 'none', gap: 8,
+                    }}
                   >
                     <span style={{ fontWeight: 700, fontSize: 15, flexShrink: 0, minWidth: 50 }}>{zone}</span>
+
                     <div style={{ display: 'flex', gap: 6, flex: 1, justifyContent: 'center' }}>
-                      {isLocked ? (
-                        <span className={z.status === 'clean' ? 'badge badge-green' : 'badge badge-red'} style={{ fontSize: 12 }}>
-                          {z.status === 'clean' ? '✅ สะอาด' : '❌ ไม่สะอาด'}
+                      {saved ? (
+                        <span
+                          className={status === 'clean' ? 'badge badge-green' : 'badge badge-red'}
+                          style={{ fontSize: 12 }}
+                        >
+                          {status === 'clean' ? '✅ สะอาด' : '❌ ไม่สะอาด'}
                         </span>
                       ) : (
                         <>
-                          <button onClick={e => { e.stopPropagation(); update(zone, { status: 'clean' }); }} disabled={loadingToday} className="btn btn-sm" style={{ background: z.status === 'clean' ? 'var(--green)' : 'rgba(21,163,74,0.09)', color: z.status === 'clean' ? '#fff' : 'var(--green)', border: 'none' }}>✅ สะอาด</button>
-                          <button onClick={e => { e.stopPropagation(); update(zone, { status: 'dirty' }); }} disabled={loadingToday} className="btn btn-sm" style={{ background: z.status === 'dirty' ? 'var(--red)' : 'rgba(220,38,38,0.08)', color: z.status === 'dirty' ? '#fff' : 'var(--red)', border: 'none' }}>❌ ไม่สะอาด</button>
+                          <button
+                            onClick={e => { e.stopPropagation(); updateLocal(zone, { status: 'clean' }); }}
+                            disabled={isFirstLoad}
+                            className="btn btn-sm"
+                            style={{
+                              background: status === 'clean' ? 'var(--green)' : 'rgba(21,163,74,0.09)',
+                              color: status === 'clean' ? '#fff' : 'var(--green)',
+                              border: 'none',
+                            }}
+                          >
+                            ✅ สะอาด
+                          </button>
+                          <button
+                            onClick={e => { e.stopPropagation(); updateLocal(zone, { status: 'dirty' }); }}
+                            disabled={isFirstLoad}
+                            className="btn btn-sm"
+                            style={{
+                              background: status === 'dirty' ? 'var(--red)' : 'rgba(220,38,38,0.08)',
+                              color: status === 'dirty' ? '#fff' : 'var(--red)',
+                              border: 'none',
+                            }}
+                          >
+                            ❌ ไม่สะอาด
+                          </button>
                         </>
                       )}
                     </div>
+
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                      {isLocked && z.savedBy && <span style={{ fontSize: 10.5, color: 'var(--t3)', maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{z.savedBy}</span>}
-                      {!isLocked && z.file && <span style={{ fontSize: 11, color: 'var(--blue)' }}>📎</span>}
-                      <span style={{ color: 'var(--t3)', fontSize: 11, transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+                      {saved && savedBy && (
+                        <span style={{
+                          fontSize: 10.5, color: 'var(--t3)',
+                          maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}>
+                          {savedBy}
+                        </span>
+                      )}
+                      {!saved && file && <span style={{ fontSize: 11, color: 'var(--blue)' }}>📎</span>}
+                      <span style={{
+                        color: 'var(--t3)', fontSize: 11,
+                        transform: isOpen ? 'rotate(180deg)' : 'none',
+                        transition: 'transform 0.15s',
+                      }}>▼</span>
                     </div>
                   </div>
 
+                  {/* Expanded detail */}
                   {isOpen && (
-                    <div style={{ borderTop: `1px solid ${borderColor}`, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      {isLocked ? (
-                        <div style={{ background: 'rgba(37,99,235,0.07)', border: '1px solid rgba(37,99,235,0.15)', borderRadius: 'var(--r)', padding: '10px 14px', fontSize: 13 }}>
-                          <div style={{ fontWeight: 700, color: 'var(--blue)', marginBottom: 6 }}>🔒 บันทึกแล้ว — ไม่สามารถแก้ไขได้</div>
-                          {z.savedBy && <div style={{ color: 'var(--t3)', fontSize: 12 }}>ผู้บันทึก: <strong>{z.savedBy}</strong></div>}
-                          {z.savedAt && <div style={{ color: 'var(--t3)', fontSize: 12 }}>เวลา: <strong>{new Date(z.savedAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</strong></div>}
-                          {z.note && <div style={{ color: 'var(--t3)', fontSize: 12, marginTop: 4 }}>หมายเหตุ: {z.note}</div>}
+                    <div style={{
+                      borderTop: `1px solid ${borderColor}`,
+                      padding: '14px 16px',
+                      display: 'flex', flexDirection: 'column', gap: 12,
+                    }}>
+                      {saved ? (
+                        /* ข้อมูล server — ล็อก ไม่แก้ได้ */
+                        <div style={{
+                          background: 'rgba(37,99,235,0.07)',
+                          border: '1px solid rgba(37,99,235,0.15)',
+                          borderRadius: 'var(--r)', padding: '10px 14px', fontSize: 13,
+                        }}>
+                          <div style={{ fontWeight: 700, color: 'var(--blue)', marginBottom: 6 }}>
+                            🔒 บันทึกแล้ว — ไม่สามารถแก้ไขได้
+                          </div>
+                          {savedBy && (
+                            <div style={{ color: 'var(--t3)', fontSize: 12 }}>
+                              ผู้บันทึก: <strong>{savedBy}</strong>
+                            </div>
+                          )}
+                          {savedAt && (
+                            <div style={{ color: 'var(--t3)', fontSize: 12 }}>
+                              เวลา: <strong>
+                                {new Date(savedAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
+                              </strong>
+                            </div>
+                          )}
+                          {note && (
+                            <div style={{ color: 'var(--t3)', fontSize: 12, marginTop: 4 }}>
+                              หมายเหตุ: {note}
+                            </div>
+                          )}
                         </div>
                       ) : (
+                        /* Local input — ยังแก้ได้ */
                         <>
                           <div className="form-group">
                             <label className="form-label">หมายเหตุ</label>
-                            <input value={z.note} onChange={e => update(zone, { note: e.target.value })} placeholder="เช่น พบขยะในห้องน้ำ..." />
+                            <input
+                              value={local[zone].note}
+                              onChange={e => updateLocal(zone, { note: e.target.value })}
+                              placeholder="เช่น พบขยะในห้องน้ำ..."
+                            />
                           </div>
                           <div className="form-group">
                             <label className="form-label">แนบรูปภาพ (Google Drive)</label>
-                            {!z.file ? (
-                              <input type="file" accept="image/*" capture="environment" onChange={e => handlePhoto(zone, e.target.files?.[0] ?? null)} />
+                            {!file ? (
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                onChange={e => handlePhoto(zone, e.target.files?.[0] ?? null)}
+                              />
                             ) : (
                               <div>
-                                <img src={z.preview!} alt="preview" style={{ width: '100%', maxHeight: 200, objectFit: 'cover', borderRadius: 'var(--r)', marginBottom: 8 }} />
+                                <img
+                                  src={preview!}
+                                  alt="preview"
+                                  style={{
+                                    width: '100%', maxHeight: 200, objectFit: 'cover',
+                                    borderRadius: 'var(--r)', marginBottom: 8,
+                                  }}
+                                />
                                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                                  <span style={{ fontSize: 12.5, color: 'var(--t3)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📎 {z.file.name}</span>
+                                  <span style={{
+                                    fontSize: 12.5, color: 'var(--t3)', flex: 1,
+                                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                  }}>
+                                    📎 {file.name}
+                                  </span>
                                   <button onClick={() => removePhoto(zone)} className="btn btn-danger btn-sm">ลบ</button>
                                 </div>
                               </div>
                             )}
-                            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 4 }}>JPG, PNG, WEBP · สูงสุด 8MB</div>
+                            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 4 }}>
+                              JPG, PNG, WEBP · สูงสุด 8MB
+                            </div>
                           </div>
                         </>
                       )}
@@ -333,17 +486,33 @@ export default function ZoneCheckPage() {
             })}
           </div>
 
+          {/* Submit progress */}
           {submitProgress && (
             <div className="alert alert-info" style={{ marginBottom: 12 }}>
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>🔄 กำลังบันทึก... ({submitProgress.done}/{submitProgress.total}){submitProgress.zone && ` — เขต ${submitProgress.zone}`}</div>
-              <div className="progress-track"><div className="progress-fill" style={{ width: `${(submitProgress.done / submitProgress.total) * 100}%`, background: 'var(--blue)' }} /></div>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                🔄 กำลังบันทึก... ({submitProgress.done}/{submitProgress.total})
+                {submitProgress.zone && ` — เขต ${submitProgress.zone}`}
+              </div>
+              <div className="progress-track">
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: `${(submitProgress.done / submitProgress.total) * 100}%`,
+                    background: 'var(--blue)',
+                  }}
+                />
+              </div>
             </div>
           )}
 
           {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
 
-          {!loadingToday && (
-            <button onClick={handleSubmit} disabled={submitting || newPending === 0} className="btn btn-primary btn-full btn-lg">
+          {!isFirstLoad && (
+            <button
+              onClick={handleSubmit}
+              disabled={submitting || newPending === 0}
+              className="btn btn-primary btn-full btn-lg"
+            >
               {submitting ? '🔄 กำลังบันทึก...' :
                newPending === 0 && savedCount === ZONES.length ? '✅ บันทึกครบทุกเขตแล้ว' :
                newPending === 0 ? '📋 เลือกสถานะเขตที่ต้องการบันทึก' :

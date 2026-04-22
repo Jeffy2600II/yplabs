@@ -1,10 +1,12 @@
+/* src/app/duty/page.tsx */
 'use client';
 
 /**
- * /duty/page.tsx — เวรยืนหน้าโรงเรียน
- * ★ สมาชิกทุกคนเช็คอินได้ (walk-in ด้วย)
- * ★ useApiCache → instant stale + reactive invalidation
- * ★ BUG FIX: ไม่พึ่ง realtime, ใช้ reactive cache แทน
+ * หน้าเวรยืนหน้าโรงเรียน (ฝั่งสมาชิก)
+ * ─────────────────────────────────────────────────────────────────
+ * - useQuery(DUTY_URL) — reactive: อัปเดตทันทีเมื่อ invalidate() ถูกเรียก
+ * - invalidate(DUTY_URL) หลัง check-in → ทั้ง duty page + home page update
+ * - Supabase Realtime เป็น bonus (ไม่บังคับ)
  */
 
 import { useState, useCallback } from 'react';
@@ -13,8 +15,9 @@ import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { getFreshToken } from '@/lib/sessionUtils';
 import { useRealtime } from '@/lib/realtimeHooks';
-import { useApiCache, invalidateCache } from '@/lib/dataCache';
+import { useQuery, invalidate } from '@/lib/cache';
 
+/** URL ของ public API สำหรับเวรวันนี้ */
 const DUTY_URL = '/api/public/duty/today';
 
 type DutyEntry = {
@@ -30,14 +33,14 @@ type DutyEntry = {
 export default function DutyPage() {
   const { user, isMember, loading: authLoading } = useAuth();
 
-  // useApiCache with reactive invalidation — no rtTick needed for cross-page sync
-  const { data: duties, loading } = useApiCache<DutyEntry[]>(DUTY_URL);
+  // ★ useQuery — reactive, อ่าน cache ทันที และ refetch เมื่อ invalidate() ถูกเรียก
+  const { data: duties, loading } = useQuery<DutyEntry[]>(DUTY_URL);
   const dutyList = duties ?? [];
 
-  // Realtime still listens as extra signal (bonus, not required)
+  // Supabase Realtime เป็น bonus signal
   useRealtime({
     table: 'council_duty',
-    onData: useCallback(() => { invalidateCache(DUTY_URL); }, []),
+    onData: useCallback(() => { invalidate(DUTY_URL); }, []),
     debounceMs: 500,
   });
 
@@ -51,10 +54,13 @@ export default function DutyPage() {
   const pendingCount = dutyList.length - checkedCount;
 
   async function handleCheckIn() {
-    setCheckingIn(true); setError(null); setSuccess(null);
+    setCheckingIn(true);
+    setError(null);
+    setSuccess(null);
     try {
       const token = await getFreshToken();
       if (!token) throw new Error('กรุณาเข้าสู่ระบบก่อน');
+
       const res = await fetch('/api/council/duty/checkin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -62,10 +68,12 @@ export default function DutyPage() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? 'เช็คอินล้มเหลว');
+
       setSuccess(`เช็คอินสำเร็จแล้ว ✅${json.is_walkin ? ' (Walk-in)' : ''}`);
       setNote('');
-      // ★ reactive invalidation → hook refetches immediately
-      invalidateCache(DUTY_URL);
+
+      // ★ invalidate → duty page + home page รับแจ้ง → refetch อัตโนมัติ
+      invalidate(DUTY_URL);
     } catch (e: any) {
       setError(e?.message ?? 'เกิดข้อผิดพลาด');
     } finally {
@@ -105,7 +113,7 @@ export default function DutyPage() {
         </div>
       </div>
 
-      {/* Check-in card — แสดงสำหรับสมาชิกทุกคนที่ยังไม่เช็คอิน */}
+      {/* Check-in card */}
       {isMember && !myEntry?.checked_in && !authLoading && (
         <div className="card" style={{ borderLeft: '4px solid var(--brand)', marginBottom: 16 }}>
           {myEntry ? (
@@ -152,7 +160,11 @@ export default function DutyPage() {
 
       {/* Duty list */}
       <div className="table-wrap">
-        <div style={{ padding: '11px 14px', background: 'var(--s2)', borderBottom: '1px solid var(--b)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{
+          padding: '11px 14px', background: 'var(--s2)',
+          borderBottom: '1px solid var(--b)',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
           <span style={{ fontWeight: 700, fontSize: 13 }}>รายชื่อผู้ปฏิบัติหน้าที่วันนี้</span>
           <span className="badge badge-blue">{dutyList.length} คน</span>
         </div>
@@ -172,11 +184,16 @@ export default function DutyPage() {
         ) : (
           <table>
             <thead>
-              <tr><th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>หมายเหตุ</th></tr>
+              <tr>
+                <th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>หมายเหตุ</th>
+              </tr>
             </thead>
             <tbody>
               {dutyList.map((d, i) => (
-                <tr key={d.id} style={{ background: d.auth_uid === user?.auth_uid ? 'var(--blue-bg)' : undefined }}>
+                <tr
+                  key={d.id}
+                  style={{ background: d.auth_uid === user?.auth_uid ? 'var(--blue-bg)' : undefined }}
+                >
                   <td style={{ color: 'var(--t3)', width: 36 }}>{i + 1}</td>
                   <td style={{ fontWeight: 600 }}>
                     {d.student_name}
