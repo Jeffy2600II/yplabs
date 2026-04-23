@@ -4,16 +4,18 @@
 /**
  * หน้าตรวจเขตสะอาด
  * ─────────────────────────────────────────────────────────────────
- * ★ Data Freshness:
- *   - refreshInterval: 30_000 → polling ทุก 30 วินาที (realtime backup)
- *   - visibilitychange (จาก cache.ts) → refetch เมื่อกลับมาที่แท็บ
- *   - invalidate(ZONES_URL) หลัง save → ทุก subscriber รับแจ้ง
+ * แก้ไขปัญหา: เดิมใช้ fetch(url + '?_t=timestamp') ซึ่ง bypass cache
+ * ทำให้ home page ไม่รู้ว่าข้อมูลเปลี่ยน
  *
- * ★ Data flow:
- *   server state (useQuery) — ข้อมูลที่บันทึกแล้วใน DB (ล็อก)
+ * วิธีใหม่:
+ *   - useQuery(ZONES_URL) อ่านจาก cache system
+ *   - invalidate(ZONES_URL) หลัง save → ทุก subscriber รับแจ้ง
+ *   - local state แยกออกจาก server state ชัดเจน
+ *
+ * Data flow:
+ *   server state (useQuery) — ข้อมูลที่บันทึกแล้วใน DB
  *   local state             — selection ที่ยังไม่ได้ save
  *   zones (derived)         — รวมทั้งสอง: server ล็อก, local แก้ได้
- * ─────────────────────────────────────────────────────────────────
  */
 
 import { useState, useCallback, useMemo } from 'react';
@@ -54,7 +56,7 @@ type ZoneView = {
   note: string;
   file: File | null;
   preview: string | null;
-  saved: boolean;
+  saved: boolean;       // true = ข้อมูลมาจาก server (ล็อก)
   savedBy: string | null;
   savedAt: string | null;
 };
@@ -72,12 +74,14 @@ function initLocal(): Record<string, LocalZone> {
 export default function ZoneCheckPage() {
   const { isMember, user, loading: authLoading } = useAuth();
 
-  // ★ Server state — reactive + polling backup ทุก 30 วินาที
+  // ★ Server state — reactive ผ่าน cache system
+  //   เมื่อ invalidate(ZONES_URL) ถูกเรียก (จากหน้านี้หรือหน้าอื่น)
+  //   hook นี้จะ refetch อัตโนมัติ
   const { data: serverZones, loading: serverLoading } = useQuery<ServerZone[]>(ZONES_URL, {
     enabled: !authLoading,
-    refreshInterval: 30_000, // ★ polling backup
   });
 
+  // Local state — selection ที่ผู้ใช้กำลัง input (ยังไม่ save)
   const [local, setLocal] = useState<Record<string, LocalZone>>(initLocal);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -88,6 +92,7 @@ export default function ZoneCheckPage() {
   const [error, setError] = useState<string | null>(null);
 
   // ★ Derived state — รวม server + local
+  //   server data ที่ไม่ใช่ 'pending' = บันทึกแล้ว = ล็อก (ไม่ให้แก้)
   const zones: ZoneView[] = useMemo(() => {
     return ZONES.map(z => {
       const server = serverZones?.find(s => s.zone === z);
@@ -138,6 +143,7 @@ export default function ZoneCheckPage() {
   }
 
   async function handleSubmit() {
+    // หา zone ที่ยังไม่ save และมีการ select แล้ว
     const toSend = zones.filter(z => !z.saved && z.status !== 'pending').map(z => z.zone);
 
     if (!toSend.length) {
@@ -169,16 +175,19 @@ export default function ZoneCheckPage() {
         const json = await res.json();
         if (!res.ok) throw new Error(`เขต ${zone}: ${json.error ?? 'บันทึกล้มเหลว'}`);
 
+        // Cleanup preview URL
         if (local[zone].preview) URL.revokeObjectURL(local[zone].preview!);
       }
 
-      // ★ invalidate → ทุก subscriber (รวม home page) รับแจ้ง
+      // ★ สำคัญ: invalidate ZONES_URL → ทุก component ที่ subscribe URL นี้
+      //   จะ refetch ทันที รวมถึง home page ด้วย
       invalidate(ZONES_URL);
       setDone(true);
 
     } catch (e: any) {
       setError(e?.message ?? 'เกิดข้อผิดพลาด');
-      invalidate(ZONES_URL); // เผื่อ save บางส่วนสำเร็จ
+      // ยัง invalidate เผื่อว่า save บางส่วนสำเร็จ
+      invalidate(ZONES_URL);
     } finally {
       setSubmitting(false);
       setSubmitProgress(null);
@@ -193,6 +202,7 @@ export default function ZoneCheckPage() {
   const dirtyCount   = zones.filter(z => z.status === 'dirty').length;
   const pendingCount = zones.filter(z => z.status === 'pending').length;
 
+  // loading ครั้งแรก (ยังไม่มี data ใน cache)
   const isFirstLoad = serverLoading && !serverZones;
 
   // ── Auth guard ─────────────────────────────────────────────────
@@ -219,15 +229,8 @@ export default function ZoneCheckPage() {
   return (
     <AppShell pageTitle="ตรวจเขตสะอาด">
       <div className="page-header">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
-          <div>
-            <div className="page-title">🧹 ตรวจเขตสะอาด</div>
-            <div className="page-subtitle">{todayLabel}</div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--green)', flexShrink: 0 }}>
-            <span className="rt-dot" />อัปเดตอัตโนมัติ
-          </div>
-        </div>
+        <div className="page-title">🧹 ตรวจเขตสะอาด</div>
+        <div className="page-subtitle">{todayLabel}</div>
       </div>
 
       {/* Success screen */}
@@ -246,7 +249,7 @@ export default function ZoneCheckPage() {
         </div>
       ) : (
         <>
-          {/* Loading ครั้งแรก */}
+          {/* Loading state ครั้งแรก */}
           {isFirstLoad && (
             <div className="card" style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
               <div className="spinner" />
@@ -261,7 +264,8 @@ export default function ZoneCheckPage() {
                 <div className="stat-card" style={{ borderTop: '3px solid var(--brand)' }}>
                   <div className="stat-label">ตรวจแล้ว</div>
                   <div className="stat-value">
-                    {cleanCount + dirtyCount}<span style={{ fontSize: 16, color: 'var(--t3)' }}>/{ZONES.length}</span>
+                    {cleanCount + dirtyCount}
+                    <span style={{ fontSize: 16, color: 'var(--t3)' }}>/{ZONES.length}</span>
                   </div>
                 </div>
                 <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
@@ -339,7 +343,10 @@ export default function ZoneCheckPage() {
 
                     <div style={{ display: 'flex', gap: 6, flex: 1, justifyContent: 'center' }}>
                       {saved ? (
-                        <span className={status === 'clean' ? 'badge badge-green' : 'badge badge-red'} style={{ fontSize: 12 }}>
+                        <span
+                          className={status === 'clean' ? 'badge badge-green' : 'badge badge-red'}
+                          style={{ fontSize: 12 }}
+                        >
                           {status === 'clean' ? '✅ สะอาด' : '❌ ไม่สะอาด'}
                         </span>
                       ) : (
@@ -374,30 +381,59 @@ export default function ZoneCheckPage() {
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                       {saved && savedBy && (
-                        <span style={{ fontSize: 10.5, color: 'var(--t3)', maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <span style={{
+                          fontSize: 10.5, color: 'var(--t3)',
+                          maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}>
                           {savedBy}
                         </span>
                       )}
                       {!saved && file && <span style={{ fontSize: 11, color: 'var(--blue)' }}>📎</span>}
-                      <span style={{ color: 'var(--t3)', fontSize: 11, transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
+                      <span style={{
+                        color: 'var(--t3)', fontSize: 11,
+                        transform: isOpen ? 'rotate(180deg)' : 'none',
+                        transition: 'transform 0.15s',
+                      }}>▼</span>
                     </div>
                   </div>
 
                   {/* Expanded detail */}
                   {isOpen && (
-                    <div style={{ borderTop: `1px solid ${borderColor}`, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{
+                      borderTop: `1px solid ${borderColor}`,
+                      padding: '14px 16px',
+                      display: 'flex', flexDirection: 'column', gap: 12,
+                    }}>
                       {saved ? (
-                        <div style={{ background: 'rgba(37,99,235,0.07)', border: '1px solid rgba(37,99,235,0.15)', borderRadius: 'var(--r)', padding: '10px 14px', fontSize: 13 }}>
-                          <div style={{ fontWeight: 700, color: 'var(--blue)', marginBottom: 6 }}>🔒 บันทึกแล้ว — ไม่สามารถแก้ไขได้</div>
-                          {savedBy && <div style={{ color: 'var(--t3)', fontSize: 12 }}>ผู้บันทึก: <strong>{savedBy}</strong></div>}
-                          {savedAt && (
+                        /* ข้อมูล server — ล็อก ไม่แก้ได้ */
+                        <div style={{
+                          background: 'rgba(37,99,235,0.07)',
+                          border: '1px solid rgba(37,99,235,0.15)',
+                          borderRadius: 'var(--r)', padding: '10px 14px', fontSize: 13,
+                        }}>
+                          <div style={{ fontWeight: 700, color: 'var(--blue)', marginBottom: 6 }}>
+                            🔒 บันทึกแล้ว — ไม่สามารถแก้ไขได้
+                          </div>
+                          {savedBy && (
                             <div style={{ color: 'var(--t3)', fontSize: 12 }}>
-                              เวลา: <strong>{new Date(savedAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</strong>
+                              ผู้บันทึก: <strong>{savedBy}</strong>
                             </div>
                           )}
-                          {note && <div style={{ color: 'var(--t3)', fontSize: 12, marginTop: 4 }}>หมายเหตุ: {note}</div>}
+                          {savedAt && (
+                            <div style={{ color: 'var(--t3)', fontSize: 12 }}>
+                              เวลา: <strong>
+                                {new Date(savedAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
+                              </strong>
+                            </div>
+                          )}
+                          {note && (
+                            <div style={{ color: 'var(--t3)', fontSize: 12, marginTop: 4 }}>
+                              หมายเหตุ: {note}
+                            </div>
+                          )}
                         </div>
                       ) : (
+                        /* Local input — ยังแก้ได้ */
                         <>
                           <div className="form-group">
                             <label className="form-label">หมายเหตุ</label>
@@ -410,17 +446,36 @@ export default function ZoneCheckPage() {
                           <div className="form-group">
                             <label className="form-label">แนบรูปภาพ (Google Drive)</label>
                             {!file ? (
-                              <input type="file" accept="image/*" capture="environment" onChange={e => handlePhoto(zone, e.target.files?.[0] ?? null)} />
+                              <input
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                onChange={e => handlePhoto(zone, e.target.files?.[0] ?? null)}
+                              />
                             ) : (
                               <div>
-                                <img src={preview!} alt="preview" style={{ width: '100%', maxHeight: 200, objectFit: 'cover', borderRadius: 'var(--r)', marginBottom: 8 }} />
+                                <img
+                                  src={preview!}
+                                  alt="preview"
+                                  style={{
+                                    width: '100%', maxHeight: 200, objectFit: 'cover',
+                                    borderRadius: 'var(--r)', marginBottom: 8,
+                                  }}
+                                />
                                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                                  <span style={{ fontSize: 12.5, color: 'var(--t3)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📎 {file.name}</span>
+                                  <span style={{
+                                    fontSize: 12.5, color: 'var(--t3)', flex: 1,
+                                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                  }}>
+                                    📎 {file.name}
+                                  </span>
                                   <button onClick={() => removePhoto(zone)} className="btn btn-danger btn-sm">ลบ</button>
                                 </div>
                               </div>
                             )}
-                            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 4 }}>JPG, PNG, WEBP · สูงสุด 8MB</div>
+                            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 4 }}>
+                              JPG, PNG, WEBP · สูงสุด 8MB
+                            </div>
                           </div>
                         </>
                       )}
@@ -439,7 +494,13 @@ export default function ZoneCheckPage() {
                 {submitProgress.zone && ` — เขต ${submitProgress.zone}`}
               </div>
               <div className="progress-track">
-                <div className="progress-fill" style={{ width: `${(submitProgress.done / submitProgress.total) * 100}%`, background: 'var(--blue)' }} />
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: `${(submitProgress.done / submitProgress.total) * 100}%`,
+                    background: 'var(--blue)',
+                  }}
+                />
               </div>
             </div>
           )}
