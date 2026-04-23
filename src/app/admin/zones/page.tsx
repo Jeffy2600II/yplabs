@@ -1,7 +1,8 @@
-import { useRealtime } from '@/lib/realtimeHooks'; // keep for other usages if any (optional)
+'use client';
+
 import { useServerEvents } from '@/lib/useServerEvents';
 import { useAdminCache, invalidateCache } from '@/lib/adminCache';
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
@@ -49,7 +50,8 @@ export default function AdminZonesPage() {
   // Subscribe to server events (SSE / long-poll fallback)
   useServerEvents((message) => {
     try {
-      const table = message.table;
+      // message is expected: { schema, table, operation, row_id, payload, ... }
+      const table = message?.table;
       if (table === 'council_zone_checks') {
         invalidateCache(zonesUrl);
         setRtTick(n => n + 1);
@@ -81,7 +83,7 @@ export default function AdminZonesPage() {
   );
 
   return (
-    <AppShell pageTitle="รายงานเขตสะอาด">
+    <AppShell pageTitle="รายงานผลการตรวจเขตสะอาด">
       <div className="page-header">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
           <div>
@@ -180,8 +182,7 @@ export default function AdminZonesPage() {
               {filtered.map(r => (
                 <tr key={r.id}>
                   <td style={{ fontSize: 12.5, color: 'var(--t3)', whiteSpace: 'nowrap' }}>
-                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}
-                    {' '}
+                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}{' '}
                     <span style={{ fontSize: 11 }}>
                       {new Date(r.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
                     </span>
@@ -217,17 +218,41 @@ export default function AdminZonesPage() {
           style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)', zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
         >
           <div onClick={e => e.stopPropagation()} style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }}>
-            <button onClick={() => setPhotoModal(null)} style={{ position: 'absolute', top: -14, right: -14, zIndex: 1, background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>×</button>
-            <img src={photoModal} alt="zone check photo" style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain' }}
+            <button
+              onClick={() => setPhotoModal(null)}
+              aria-label="close"
+              style={{
+                position: 'absolute', top: -14, right: -14, zIndex: 1,
+                background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'
+              }}
+            >
+              ×
+            </button>
+            <img
+              src={photoModal}
+              alt="zone check photo"
+              style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain', display: 'block' }}
               onError={e => {
-                const img = e.currentTarget;
-                if (!img.src.includes('drive.google.com')) {
-                  const id = photoModal.split('/d/')[1];
-                  if (id) img.src = `https://drive.google.com/uc?export=view&id=${id}`;
-                }
+                const img = e.currentTarget as HTMLImageElement;
+                try {
+                  if (!img.src.includes('drive.google.com')) {
+                    const parts = photoModal.split('/d/');
+                    if (parts.length > 1) {
+                      const id = parts[1].split('/')[0];
+                      if (id) img.src = `https://drive.google.com/uc?export=view&id=${id}`;
+                    }
+                  }
+                } catch {}
               }}
             />
-            <a href={photoModal} target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm" style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.1)', color: '#fff', borderColor: 'rgba(255,255,255,0.2)' }}>
+            <a
+              href={photoModal}
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-ghost btn-sm"
+              style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.06)' }}
+            >
               เปิดใน Google Drive ↗
             </a>
           </div>

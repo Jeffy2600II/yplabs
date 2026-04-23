@@ -1,4 +1,6 @@
-import { useRealtime } from '@/lib/realtimeHooks'; // keep for other usages if any (optional)
+'use client';
+
+import { useRealtime } from '@/lib/realtimeHooks'; // optional
 import { useServerEvents } from '@/lib/useServerEvents';
 import { useAdminCache, invalidateCache } from '@/lib/adminCache';
 import { useCallback, useState } from 'react';
@@ -174,7 +176,7 @@ export default function AdminZonesPage() {
         ) : (
           <table>
             <thead>
-              <tr><th>วันที่</th><th>เขต</th><th>สถานะ</th><th>ผู้ตรวจ</th><th>หมายเหตุ</th><th>รูป</th></tr>
+              <tr><th>วันที่</th><th>เขต</th><th>สถานะ</th><th>ผู้��รวจ</th><th>หมายเหตุ</th><th>รูป</th></tr>
             </thead>
             <tbody>
               {filtered.map(r => (
