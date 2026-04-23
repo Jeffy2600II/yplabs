@@ -1,17 +1,10 @@
-'use client';
-
-/**
- * /admin/zones/page.tsx — รายงานเขตสะอาด (Admin)
- * ★ useAdminCache → instant stale data
- * ★ Realtime: auto-refresh เมื่อมีการบันทึกใหม่
- */
-
-import { useState, useCallback } from 'react';
+import { useRealtime } from '@/lib/realtimeHooks'; // keep for other usages if any (optional)
+import { useServerEvents } from '@/lib/useServerEvents';
+import { useAdminCache, invalidateCache } from '@/lib/adminCache';
+import { useCallback, useState } from 'react';
+import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
-import { useAuth } from '@/context/AuthContext';
-import { useRealtime } from '@/lib/realtimeHooks';
-import { useAdminCache, invalidateCache } from '@/lib/adminCache';
 
 const ZONES = ['ม.1/1','ม.1/2','ม.2/1','ม.2/2','ม.3/1','ม.3/2','ม.4','ม.5','ม.6'];
 
@@ -26,7 +19,6 @@ type ZoneRecord = {
   check_date: string;
 };
 
-// Build URL with date params
 function buildUrl(from: string, to: string) {
   return `/api/admin/zones?from=${from}&to=${to}`;
 }
@@ -54,15 +46,18 @@ export default function AdminZonesPage() {
     enabled: isAdmin,
   });
 
-  useRealtime({
-    table: 'council_zone_checks',
-    onData: useCallback(() => {
-      invalidateCache(zonesUrl);
-      setRtTick(n => n + 1);
-    }, [zonesUrl]),
-    enabled: isAdmin,
-    debounceMs: 250,
-  });
+  // Subscribe to server events (SSE / long-poll fallback)
+  useServerEvents((message) => {
+    try {
+      const table = message.table;
+      if (table === 'council_zone_checks') {
+        invalidateCache(zonesUrl);
+        setRtTick(n => n + 1);
+      }
+    } catch (e) {
+      console.warn('[useServerEvents] admin zones handler error', e);
+    }
+  }, { enabled: isAdmin, pollFallback: true });
 
   const allRecords = records ?? [];
   const filtered = allRecords.filter(r =>

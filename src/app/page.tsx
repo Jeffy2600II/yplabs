@@ -3,10 +3,10 @@
 
 /**
  * หน้าหลัก
- * ─────────────────────────────────────────────────────────────────
+ * ────────────────────────────────────────────────────────────────
  * - useQuery() จาก cache.ts — อ่าน cache ทันที, background refresh
- * - useMultiRealtime — รับแจ้งจาก Supabase เมื่อมีข้อมูลใหม่ (bonus)
- * - ข้อมูลจะ update ทันทีเมื่อ invalidate() ถูกเรียกจากหน้าอื่น
+ * - useServerEvents — รับแจ้งจากฐานข้อมูลผ่าน SSE / long-poll fallback
+ * - ข้อมูลจะ update ทันทีเมื่อ invalidate() ถูกเรียกจาก event handler
  *   (เช่น zone-check save, duty check-in)
  */
 
@@ -14,9 +14,9 @@ import { useState, useCallback, useEffect } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { useMultiRealtime } from '@/lib/realtimeHooks';
 import { useQuery } from '@/lib/cache';
 import { getBrowserSupabase } from '@/lib/supabaseClient';
+import { useServerEvents } from '@/lib/useServerEvents';
 
 const ZONES = ['ม.1/1','ม.1/2','ม.2/1','ม.2/2','ม.3/1','ม.3/2','ม.4','ม.5','ม.6'];
 
@@ -30,14 +30,23 @@ type DutyEntry   = { id: string; student_name: string; student_id: string; check
 export default function HomePage() {
   const { user, isAdmin, isMember, loading: authLoading } = useAuth();
 
-  // Supabase Realtime — bump ค่า dep เพื่อ trigger refetch
+  // Supabase Realtime replacement — bump ค่า dep เพื่อ trigger refetch
   const [rtTick, setRtTick] = useState(0);
   const bumpTick = useCallback(() => setRtTick(n => n + 1), []);
 
-  useMultiRealtime([
-    { table: 'council_zone_checks', onData: bumpTick, debounceMs: 250 },
-    { table: 'council_duty',        onData: bumpTick, debounceMs: 250 },
-  ]);
+  // Subscribe to server-side events (SSE with long-poll fallback)
+  useServerEvents((message) => {
+    // message shape: { schema, table, operation, row_id, payload }
+    try {
+      const table = message?.table;
+      if (table === 'council_zone_checks' || table === 'council_duty') {
+        // bump tick to force revalidation in useQuery hooks
+        bumpTick();
+      }
+    } catch (e) {
+      console.warn('[useServerEvents] homepage handler error', e);
+    }
+  }, { enabled: true, pollFallback: true });
 
   // ★ useQuery — reactive: อัปเดตเมื่อ invalidate() หรือ rtTick เปลี่ยน
   const { data: zones,   loading: zonesLoading }  = useQuery<ZoneSummary[]>(ZONES_URL, { realtimeDep: rtTick });
@@ -48,15 +57,19 @@ export default function HomePage() {
   useEffect(() => {
     if (!isAdmin) return;
     async function load() {
-      const sb = getBrowserSupabase();
-      const { data: { session } } = await sb.auth.getSession();
-      if (!session) return;
-      const res = await fetch('/api/admin/requests', {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      if (res.ok) {
-        const d = await res.json();
-        setPendingCount(Array.isArray(d) ? d.length : 0);
+      try {
+        const sb = getBrowserSupabase();
+        const { data: { session } } = await sb.auth.getSession();
+        if (!session) return;
+        const res = await fetch('/api/admin/requests', {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (res.ok) {
+          const d = await res.json();
+          setPendingCount(Array.isArray(d) ? d.length : 0);
+        }
+      } catch (err) {
+        console.warn('[home] load pending count error', err);
       }
     }
     void load();
