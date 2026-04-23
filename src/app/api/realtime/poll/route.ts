@@ -4,37 +4,28 @@ export const dynamic = 'force-dynamic';
 
 import { Client } from 'pg';
 
-function validateDatabaseUrl(dbUrl ? : string) {
-  if (!dbUrl) return { ok: false, reason: 'missing' };
-  try {
-    new URL(dbUrl);
-    return { ok: true };
-  } catch (err: any) {
-    return { ok: false, reason: err?.message ?? 'invalid' };
-  }
+function isDbUrlValid(url ? : string) {
+  if (!url) return false;
+  try { new URL(url); return true; } catch { return false; }
 }
 
 export async function GET(req: Request) {
   const DATABASE_URL = process.env.SUPABASE_DATABASE_URL ?? process.env.DATABASE_URL;
-  const check = validateDatabaseUrl(DATABASE_URL);
-  if (!check.ok) {
-    return new Response(JSON.stringify({
-      error: 'Database connection not configured or invalid for poll route.',
-      detail: check.reason,
-      hint: 'Set SUPABASE_DATABASE_URL to a valid postgres URL (encode special chars in password).'
-    }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+  if (!isDbUrlValid(DATABASE_URL)) {
+    // If DB not configured, return 204 so client treats as "no event" instead of error
+    return new Response(null, { status: 204 });
   }
   
-  const client = new Client({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } as any });
+  let client: Client | null = null;
   try {
+    client = new Client({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } as any });
     await client.connect();
     await client.query('LISTEN realtime_changes');
   } catch (err) {
-    try { await client.end(); } catch {}
-    return new Response(JSON.stringify({
-      error: 'Failed to connect or LISTEN to database.',
-      detail: String(err)
-    }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+    console.error('[api/realtime/poll] db connect/listen failed:', String(err));
+    try { if (client) await client.end(); } catch {}
+    // Return 204 instead of 502 so client fallback continues without hard failure
+    return new Response(null, { status: 204 });
   }
   
   let finished = false;
@@ -46,13 +37,13 @@ export async function GET(req: Request) {
       resolve({ payload: msg.payload });
     };
     
-    client.on('notification', onNotification);
+    client!.on('notification', onNotification);
     
     const to = setTimeout(() => {
       if (finished) return;
       finished = true;
-      resolve(null);
-    }, 25_000);
+      resolve(null); // timeout
+    }, 20_000); // wait up to 20s
     
     req.signal.addEventListener('abort', () => {
       if (finished) return;
@@ -65,11 +56,11 @@ export async function GET(req: Request) {
   try {
     client.removeAllListeners('notification');
     await client.end();
-  } catch {}
-  
-  if (!payload) {
-    return new Response(null, { status: 204 });
+  } catch (e) {
+    // ignore
   }
+  
+  if (!payload) return new Response(null, { status: 204 });
   
   return new Response(payload.payload, { status: 200, headers: { 'Content-Type': 'application/json' } });
 }

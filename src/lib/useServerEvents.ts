@@ -1,116 +1,70 @@
-/* src/lib/useServerEvents.ts
-   Lightweight SSE + long-poll fallback with simple reconnect/backoff and debug logs.
-*/
-
+// src/lib/useServerEvents.ts
 import { useEffect, useRef } from 'react';
 
-type OnMessage = (payload: any) => void;
-
-export function useServerEvents(onMessage: OnMessage, options ? : { enabled ? : boolean;pollFallback ? : boolean }) {
-  const { enabled = true, pollFallback = true } = options ?? {};
-  const esRef = useRef < EventSource | null > (null);
-  const abortRef = useRef(false);
-  const backoffRef = useRef(1000); // ms
+export function useServerEvents(onMessage, options = { enabled: true, pollFallback: true }) {
+  const { enabled = true, pollFallback = true } = options;
+  const esRef = useRef(null);
+  const aborted = useRef(false);
+  const backoff = useRef(1000);
   const maxBackoff = 30_000;
-  
+
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return;
-    abortRef.current = false;
-    backoffRef.current = 1000;
-    
-    let sseConnected = false;
+    aborted.current = false;
+    backoff.current = 1000;
+
+    let sseOpen = false;
     let pollAbort = false;
-    
+
     const startSSE = () => {
       try {
         const es = new EventSource('/api/realtime/subscribe');
         esRef.current = es;
-        
-        es.onopen = () => {
-          sseConnected = true;
-          backoffRef.current = 1000;
-          console.debug('[SSE] connected');
-        };
-        
-        es.onmessage = (e) => {
-          try {
-            const payload = JSON.parse(e.data);
-            console.debug('[SSE] message', payload);
-            onMessage(payload);
-          } catch (err) {
-            console.warn('[SSE] parse error', err);
-          }
-        };
-        
-        es.onerror = (ev) => {
-          console.warn('[SSE] error', ev);
-          // close and fallback/retry
+        es.onopen = () => { sseOpen = true; backoff.current = 1000; console.debug('[SSE] open'); };
+        es.onmessage = (e) => { try { const payload = JSON.parse(e.data); console.debug('[SSE] msg', payload); onMessage(payload); } catch (err) { console.warn('[SSE] parse', err); } };
+        es.onerror = (err) => {
+          console.warn('[SSE] error', err);
           try { es.close(); } catch {}
           esRef.current = null;
-          sseConnected = false;
-          if (pollFallback) startPollLoop(); // start fallback immediately
-          // schedule reconnect with backoff
-          setTimeout(() => {
-            if (!abortRef.current) startSSE();
-            backoffRef.current = Math.min(maxBackoff, backoffRef.current * 2);
-          }, backoffRef.current);
+          sseOpen = false;
+          if (pollFallback) startPoll();
+          // reconnect with backoff
+          setTimeout(() => { if (!aborted.current) startSSE(); backoff.current = Math.min(maxBackoff, backoff.current * 2); }, backoff.current);
         };
       } catch (err) {
-        console.warn('[SSE] constructor failed', err);
-        if (pollFallback) startPollLoop();
+        console.warn('[SSE] constructor fail', err);
+        if (pollFallback) startPoll();
       }
     };
-    
-    const startPollLoop = async () => {
+
+    const startPoll = async () => {
       if (!pollFallback) return;
       pollAbort = false;
-      console.debug('[poll] starting fallback long-poll');
-      while (!pollAbort && !abortRef.current) {
+      console.debug('[poll] start');
+      while (!pollAbort && !aborted.current) {
         try {
           const res = await fetch('/api/realtime/poll', { cache: 'no-store' });
           if (res.status === 200) {
             const txt = await res.text();
-            try {
-              console.debug('[poll] event', txt);
-              const payload = JSON.parse(txt);
-              onMessage(payload);
-            } catch (e) {
-              console.warn('[poll] parse failed', e);
-            }
-            // immediately continue the loop to wait next event
+            try { const payload = JSON.parse(txt); console.debug('[poll] event', payload); onMessage(payload); } catch (e) { console.warn('[poll] parse fail', e); }
             continue;
           }
-          if (res.status === 204) {
-            // timeout, no event — loop again
-            continue;
-          }
-          // other statuses -> wait a bit before retry
-          await new Promise(r => setTimeout(r, 1000));
+          if (res.status === 204) { /* no event; loop */ continue; }
+          // Treat 502/500 as transient — wait backoff then retry
+          console.warn('[poll] unexpected status', res.status);
+          await new Promise(r => setTimeout(r, backoff.current));
+          backoff.current = Math.min(maxBackoff, backoff.current * 2);
         } catch (err) {
-          console.warn('[poll] error', err);
-          // backoff on network error
-          await new Promise(r => setTimeout(r, Math.min(maxBackoff, backoffRef.current)));
-          backoffRef.current = Math.min(maxBackoff, backoffRef.current * 2);
+          console.warn('[poll] fetch error', err);
+          await new Promise(r => setTimeout(r, backoff.current));
+          backoff.current = Math.min(maxBackoff, backoff.current * 2);
         }
       }
     };
-    
-    // prefer SSE, but start poll fallback if SSE fails or blocked
+
     startSSE();
-    
-    // if SSE not open within X ms, start poll fallback as backup
-    const fallbackTimer = setTimeout(() => {
-      if (!sseConnected && pollFallback) void startPollLoop();
-    }, 1500);
-    
-    return () => {
-      abortRef.current = true;
-      if (esRef.current) {
-        try { esRef.current.close(); } catch {}
-        esRef.current = null;
-      }
-      pollAbort = true;
-      clearTimeout(fallbackTimer);
-    };
+    const t = setTimeout(() => { if (!sseOpen && pollFallback) void startPoll(); }, 1500);
+
+    return () => { aborted.current = true; clearTimeout(t); if (esRef.current) try { esRef.current.close(); } catch {} esRef.current = null; pollAbort = true; };
   }, [onMessage, enabled, pollFallback]);
 }
