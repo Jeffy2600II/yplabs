@@ -2,31 +2,26 @@
 
 /*
   src/app/page.tsx
-  หน้าแรก (Home) — โค้ชเต็ม:
-  - โหลดข้อมูลจาก /api/public/zones/today และ /api/public/duty/today แบบทนทาน (retry / error UI)
-  - รับเหตุการณ์จากเซิร์ฟเวอร์ผ่าน useServerEvents (SSE + long-poll fallback)
-  - เมื่อมีเหตุการณ์ใหม่ จะรีเฟรชข้อมูลที่เกี่ยวข้องทันที (ไม่มีการ poll ทุก ๆ 2-5 วินาที)
-  - มีสถานะ loading / error / retry ให้ผู้ใช้เห็นอย่างชัดเจน
-  - ข้อความภาษาไทยครบและแก้ไขปัญหาอักขระ (เช่น "อัปเดตอัตโนมัติ")
+  Home page — robust fetch + server events merged into local state (debounce batching)
 */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { useServerEvents } from '@/lib/useServerEvents';
 
-const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
+const ZONES = ['ม.1/1','ม.1/2','ม.2/1','ม.2/2','ม.3/1','ม.3/2','ม.4','ม.5','ม.6'];
 
 const ZONES_URL = '/api/public/zones/today';
-const DUTY_URL = '/api/public/duty/today';
+const DUTY_URL  = '/api/public/duty/today';
 
 type ZoneSummary = {
   zone: string;
-  status: 'clean' | 'dirty' | 'pending';
+  status: 'clean'|'dirty'|'pending';
   inspector: string | null;
-  note ? : string | null;
-  recorded_at ? : string | null;
+  note?: string | null;
+  recorded_at?: string | null;
 };
 
 type DutyEntry = {
@@ -38,25 +33,64 @@ type DutyEntry = {
   auth_uid: string;
 };
 
-// Safe parse helper
-function safeJson < T = any > (txt: string): T | null {
-  try { return JSON.parse(txt) as T; } catch { return null; }
+// Helper: merge/update list
+function mergeZoneIntoList(list: ZoneSummary[], row: any): ZoneSummary[] {
+  const zoneKey = String(row.zone ?? '').trim();
+  const newItem: ZoneSummary = {
+    zone: zoneKey,
+    status: (row.status ?? 'pending') as ZoneSummary['status'],
+    inspector: row.inspector_name ?? row.inspector ?? null,
+    note: row.note ?? null,
+    recorded_at: row.created_at ?? row.recorded_at ?? null,
+  };
+  const idx = list.findIndex(z => String(z.zone).trim() === zoneKey);
+  if (idx >= 0) {
+    const existing = list[idx];
+    const existingTs = existing.recorded_at ? new Date(existing.recorded_at).getTime() : 0;
+    const incomingTs = newItem.recorded_at ? new Date(newItem.recorded_at).getTime() : Date.now();
+    if (incomingTs >= existingTs) {
+      const copy = list.slice();
+      copy[idx] = newItem;
+      return copy;
+    }
+    return list;
+  } else {
+    // keep canonical order based on ZONES constant
+    const copy = list.slice();
+    // insert at correct index according to ZONES
+    const pos = ZONES.indexOf(zoneKey);
+    if (pos === -1) {
+      copy.push(newItem);
+    } else {
+      // find insertion position by ZONES order among existing
+      let insertAt = copy.length;
+      for (let i = 0; i < copy.length; i++) {
+        const curPos = ZONES.indexOf(copy[i].zone);
+        if (curPos > pos) { insertAt = i; break; }
+      }
+      copy.splice(insertAt, 0, newItem);
+    }
+    return copy;
+  }
+}
+
+function deleteZoneFromList(list: ZoneSummary[], row: any): ZoneSummary[] {
+  const zoneKey = String(row.zone ?? '').trim();
+  return list.filter(z => String(z.zone).trim() !== zoneKey);
 }
 
 export default function HomePage() {
-  const { user, isAdmin, isMember, loading: authLoading } = useAuth();
-  
-  // Data states
-  const [zones, setZones] = useState < ZoneSummary[] | null > (null);
-  const [duties, setDuties] = useState < DutyEntry[] | null > (null);
-  
-  // UI states
+  const { user, isMember, loading: authLoading } = useAuth();
+
+  const [zones, setZones] = useState<ZoneSummary[] | null>(null);
+  const [duties, setDuties] = useState<DutyEntry[] | null>(null);
+
   const [loadingZones, setLoadingZones] = useState(true);
   const [loadingDuties, setLoadingDuties] = useState(true);
-  const [errorZones, setErrorZones] = useState < string | null > (null);
-  const [errorDuties, setErrorDuties] = useState < string | null > (null);
-  
-  // Fetch functions
+  const [errorZones, setErrorZones] = useState<string | null>(null);
+  const [errorDuties, setErrorDuties] = useState<string | null>(null);
+
+  // fetch functions
   const fetchZones = useCallback(async () => {
     setErrorZones(null);
     setLoadingZones(true);
@@ -65,16 +99,26 @@ export default function HomePage() {
       if (!res.ok) throw new Error(`ไม่สามารถโหลดข้อมูลเขต (status ${res.status})`);
       const data = await res.json();
       if (!Array.isArray(data)) throw new Error('รูปแบบข้อมูลเขตไม่ถูกต้อง');
-      setZones(data);
+      // normalize zone list to canonical order
+      const ordered = ZONES.map(z => {
+        const found = data.find((r: any) => String(r.zone).trim() === z);
+        return found ? {
+          zone: z,
+          status: found.status,
+          inspector: found.inspector ?? null,
+          note: found.note ?? null,
+          recorded_at: found.recorded_at ?? found.created_at ?? null,
+        } : { zone: z, status: 'pending' as const, inspector: null };
+      });
+      setZones(ordered);
     } catch (err: any) {
       console.error('[home] fetchZones error', err);
       setErrorZones(String(err?.message ?? err));
-      // keep previous zones if any (graceful)
     } finally {
       setLoadingZones(false);
     }
   }, []);
-  
+
   const fetchDuties = useCallback(async () => {
     setErrorDuties(null);
     setLoadingDuties(true);
@@ -91,55 +135,87 @@ export default function HomePage() {
       setLoadingDuties(false);
     }
   }, []);
-  
-  // Initial load
+
   useEffect(() => {
     void Promise.all([fetchZones(), fetchDuties()]);
   }, [fetchZones, fetchDuties]);
-  
-  // Server events handler: refresh specific resources on events
-  useServerEvents((msg) => {
+
+  // local event queue + debounce
+  const eventQueueRef = useRef<any[]>([]);
+  const debounceTimerRef = useRef<number | null>(null);
+
+  const handleIncomingEvent = useCallback((msg: any) => {
     try {
       if (!msg || typeof msg !== 'object') return;
+      const op = String((msg.operation ?? msg.op ?? '').toUpperCase() || '').trim();
       const table = msg.table;
-      // Debug log so we can see events in browser console
-      console.debug('[home] server event', msg);
-      
-      if (table === 'council_zone_checks') {
-        // refresh zones only
-        void fetchZones();
-      } else if (table === 'council_duty') {
+      const payload = msg.payload ?? msg;
+
+      if (table === 'council_duty') {
+        // update duties by refetching (simple)
         void fetchDuties();
-      } else {
-        // unknown table: refresh both as fallback
-        void fetchZones();
-        void fetchDuties();
+        return;
       }
-    } catch (e) {
-      console.warn('[home] server event handler error', e);
+
+      if (table !== 'council_zone_checks') return;
+
+      eventQueueRef.current.push({ op, payload });
+
+      // debounce
+      if (debounceTimerRef.current) window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = window.setTimeout(() => {
+        const queue = eventQueueRef.current.splice(0);
+        debounceTimerRef.current = null;
+
+        setZones(prev => {
+          const base = prev ? prev.slice() : ZONES.map(z => ({ zone: z, status: 'pending', inspector: null }));
+          let next = base;
+          for (const e of queue) {
+            const { op, payload } = e;
+            if (op === 'DELETE') {
+              next = deleteZoneFromList(next, payload);
+            } else {
+              // INSERT/UPDATE/UPSERT -> merge
+              next = mergeZoneIntoList(next, payload);
+            }
+          }
+          return next;
+        });
+
+        // background verify fetch to ensure eventual consistency
+        (async () => {
+          try {
+            await new Promise(r => setTimeout(r, 300));
+            await fetchZones();
+          } catch (err) {
+            console.warn('[home] background verify failed', err);
+          }
+        })();
+      }, 200);
+    } catch (err) {
+      console.warn('[home] handleIncomingEvent error', err);
+      void fetchZones(); // fallback
     }
+  }, [fetchZones, fetchDuties]);
+
+  // subscribe to server events
+  useServerEvents((msg) => {
+    console.debug('[home] server event', msg);
+    void handleIncomingEvent(msg);
   }, { enabled: true, pollFallback: true });
-  
-  // Derived values
+
+  // derived stats
   const zoneList: ZoneSummary[] = zones ?? ZONES.map(z => ({ zone: z, status: 'pending', inspector: null }));
-  
   const cleanCount = zoneList.filter(z => z.status === 'clean').length;
   const dirtyCount = zoneList.filter(z => z.status === 'dirty').length;
   const pendingCount = zoneList.filter(z => z.status === 'pending').length;
   const dutyChecked = (duties ?? []).filter(d => d.checked_in).length;
-  
-  // UI helpers
   const isLoading = loadingZones || loadingDuties;
-  
+
   return (
     <AppShell pageTitle="หน้าหลัก">
-      {/* Header / Hero */}
       {!isMember && !authLoading && (
-        <div style={{
-          background: 'linear-gradient(135deg,#0C1120 0%,#1E3EAB 100%)',
-          borderRadius: 'var(--r-xl)', padding: 24, color: '#fff',
-          marginBottom: 20, overflow: 'hidden',
-        }}>
+        <div style={{ background: 'linear-gradient(135deg,#0C1120 0%,#1E3EAB 100%)', borderRadius: 'var(--r-xl)', padding: 24, color: '#fff', marginBottom: 20 }}>
           <div style={{ fontSize: 10, color: 'rgba(255,255,255,.38)', marginBottom: 6 }}>
             📅 {new Date().toLocaleDateString('th-TH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
           </div>
@@ -147,14 +223,11 @@ export default function HomePage() {
           <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 14 }}>ระบบสภานักเรียน โรงเรียนคำยางพิทยา</div>
           <div style={{ display: 'flex', gap: 8 }}>
             <Link href="/login" className="btn btn-gold">🔑 เข้าสู่ระบบ</Link>
-            <Link href="/register" className="btn" style={{ background: 'rgba(255,255,255,.12)', color: '#fff', border: '1px solid rgba(255,255,255,.20)' }}>
-              ลงทะเบียน
-            </Link>
+            <Link href="/register" className="btn" style={{ background: 'rgba(255,255,255,.12)', color: '#fff', border: '1px solid rgba(255,255,255,.20)' }}>ลงทะเบียน</Link>
           </div>
         </div>
       )}
 
-      {/* Error banner for zones */}
       {errorZones && (
         <div className="alert alert-danger" style={{ marginBottom: 12 }}>
           <div>เกิดข้อผิดพลาดในการโหลดสถานะเขต: {errorZones}</div>
@@ -164,7 +237,6 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* Summary cards */}
       <div className="grid-4" style={{ marginBottom: 18 }}>
         <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
           <div className="stat-label">เขตสะอาด</div>
@@ -181,19 +253,14 @@ export default function HomePage() {
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--brand)' }}>
           <div className="stat-label">เวรเช็คอิน</div>
-          <div className="stat-value">
-            {dutyChecked}<span style={{ fontSize: 15, color: 'var(--t3)' }}>/{(duties ?? []).length}</span>
-          </div>
+          <div className="stat-value">{dutyChecked}<span style={{ fontSize: 15, color: 'var(--t3)' }}>/{(duties ?? []).length}</span></div>
         </div>
       </div>
 
-      {/* Zone panel */}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div className="sec-label">สถานะเขตสะอาด (วันนี้)</div>
-          <div style={{ fontSize: 12, color: 'var(--t3)' }}>
-            {isLoading ? 'กำลังโหลด…' : 'อัปเดตอัตโนมัติ'}
-          </div>
+          <div style={{ fontSize: 12, color: 'var(--t3)' }}>{isLoading ? 'กำลังโหลด…' : 'อัปเดตอัตโนมัติ'}</div>
         </div>
 
         {loadingZones && !zones ? (
@@ -213,14 +280,9 @@ export default function HomePage() {
           </div>
         )}
 
-        {isMember && (
-          <div style={{ marginTop: 12 }}>
-            <Link href="/zone-check" className="btn btn-ghost btn-sm">ตรวจเขตสะอาด →</Link>
-          </div>
-        )}
+        {isMember && <div style={{ marginTop: 12 }}><Link href="/zone-check" className="btn btn-ghost btn-sm">ตรวจเขตสะอาด →</Link></div>}
       </div>
 
-      {/* Duty panel */}
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div className="sec-label">เวรยืนหน้าโรงเรียน</div>
@@ -241,22 +303,14 @@ export default function HomePage() {
                 </div>
                 <div style={{ textAlign: 'right' }}>
                   {d.checked_in ? <span className="badge badge-green">✓ มาแล้ว</span> : <span className="badge badge-gray">รอ</span>}
-                  {d.checked_in && d.checked_in_at && (
-                    <div style={{ fontSize: 11, color: 'var(--t3)', marginTop: 6 }}>
-                      {new Date(d.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
-                    </div>
-                  )}
+                  {d.checked_in && d.checked_in_at && (<div style={{ fontSize: 11, color: 'var(--t3)', marginTop: 6 }}>{new Date(d.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</div>)}
                 </div>
               </div>
             ))}
           </div>
         )}
 
-        {isMember && (
-          <div style={{ marginTop: 12 }}>
-            <Link href="/duty" className="btn btn-ghost btn-sm">ดูรายละเอียด →</Link>
-          </div>
-        )}
+        {isMember && <div style={{ marginTop: 12 }}><Link href="/duty" className="btn btn-ghost btn-sm">ดูรายละเอียด →</Link></div>}
       </div>
     </AppShell>
   );
