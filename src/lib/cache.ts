@@ -2,26 +2,27 @@
 /**
  * YPLABS Reactive Cache — ระบบ cache กลาง
  * ─────────────────────────────────────────────────────────────────
- * ไฟล์นี้คือ "ศูนย์กลาง" ของการจัดการข้อมูลทั้งระบบ
- * ทุก page ที่ต้องการดึงข้อมูลจาก API ให้ใช้ไฟล์นี้เท่านั้น
+ * แก้ไขปัญหา:
+ *   ★ ข้อมูลเก่าเมื่อกลับมาที่แท็บหลังทิ้งไว้นาน
+ *     → เพิ่ม visibilitychange listener: เมื่อแท็บกลับมา visible
+ *       ทุก subscriber จะ invalidate + refetch อัตโนมัติ
+ *
+ *   ★ Realtime connection ขาดแล้วไม่มี fallback
+ *     → เพิ่ม refreshInterval option ใน useQuery
+ *       ใช้เป็น polling backup ทุก N ms
  *
  * API:
  *   useQuery(url, options)  — Hook สำหรับดึงข้อมูล พร้อม reactive update
- *   invalidate(url)         — บังคับ refetch ทุก component ที่ใช้ URL นั้น
- *   invalidateAll(...urls)  — invalidate หลาย URL พร้อมกัน (ใช้หลัง mutation)
+ *   invalidate(...urls)     — บังคับ refetch ทุก component ที่ใช้ URL นั้น
  *   prefetch(url)           — โหลดข้อมูลล่วงหน้า
  *
  * หลักการ:
  *   1. Component mount → อ่าน cache ทันที (0ms perceived latency)
- *   2. ถ้าข้อมูลเก่า → fetch background โดยไม่บังคับ loading state
+ *   2. ข้อมูลเก่า → fetch background ไม่บังคับ loading state (stale-while-revalidate)
  *   3. Mutation สำเร็จ → invalidate(url) → ทุก subscriber refetch พร้อมกัน
- *   4. ถ้า component ไม่ mount → store ถูก delete → เมื่อ mount ครั้งถัดไปได้ข้อมูลใหม่
- *
- * ปัญหาที่แก้:
- *   ✅ Admin เพิ่มเวร → public duty URL ก็ถูก invalidate ด้วย
- *   ✅ Zone check save → home page update ทันที
- *   ✅ ไม่ต้องพึ่ง Supabase Realtime (ทำงานได้โดยไม่ต้องตั้งค่า Realtime)
- *   ✅ Cross-page: กลับมาหน้าหลักได้ข้อมูลล่าสุดเสมอ
+ *   4. กลับมาที่แท็บ → visibilitychange → force refetch ทุก active URL
+ *   5. refreshInterval → polling backup เมื่อ realtime ขาด
+ * ─────────────────────────────────────────────────────────────────
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -31,12 +32,10 @@ type CacheEntry<T> = { data: T; ts: number };
 const store = new Map<string, CacheEntry<any>>();
 
 // ── In-flight request deduplication ──────────────────────────────
-// ป้องกัน fetch ซ้ำหลาย request พร้อมกันสำหรับ URL เดียวกัน
 const inflight = new Map<string, Promise<any>>();
 
 // ── Subscriber Registry ───────────────────────────────────────────
 // URL → Set of refetch callbacks จาก mounted components
-// เมื่อ invalidate(url) ถูกเรียก → แจ้งทุก callback ทันที
 const subs = new Map<string, Set<() => void>>();
 
 function addSub(url: string, fn: () => void) {
@@ -53,10 +52,10 @@ function removeSub(url: string, fn: () => void) {
 
 // ── TTL per URL pattern ───────────────────────────────────────────
 const TTL_MAP: [string, number][] = [
-  ['/api/public/', 30_000],  // public APIs: 30 วินาที
-  ['/api/admin/',  15_000],  // admin APIs: 15 วินาที
+  ['/api/public/', 15_000],  // public APIs: 15 วินาที (ลดจาก 30)
+  ['/api/admin/',  10_000],  // admin APIs: 10 วินาที
 ];
-const TTL_DEFAULT = 20_000;
+const TTL_DEFAULT = 15_000;
 
 function getTTL(url: string): number {
   for (const [prefix, ttl] of TTL_MAP) {
@@ -71,12 +70,28 @@ function isExpired(url: string): boolean {
   return Date.now() - entry.ts > getTTL(url);
 }
 
+// ── ★ Visibility-based Global Refresh ────────────────────────────
+// เมื่อผู้ใช้กลับมาที่แท็บ (จากการ minimize / สลับแท็บ / sleep) →
+// force invalidate และ refetch ทุก URL ที่มี active subscriber
+// แก้ปัญหา: ข้อมูลเก่าหลังทิ้งแท็บไว้หลายชั่วโมง
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      const activeUrls = Array.from(subs.keys());
+      for (const url of activeUrls) {
+        store.delete(url);
+        inflight.delete(url);
+        subs.get(url)?.forEach(fn => fn());
+      }
+    }
+  });
+}
+
 // ── Core fetch function ───────────────────────────────────────────
 async function doFetch<T>(
   url: string,
   headers?: Record<string, string>
 ): Promise<T> {
-  // Reuse existing inflight request if any
   if (inflight.has(url)) return inflight.get(url)!;
 
   const promise = fetch(url, {
@@ -108,6 +123,12 @@ export type QueryOptions = {
   enabled?: boolean;
   /** ถ้าค่านี้เปลี่ยน → force refetch (ใช้กับ Supabase Realtime) */
   realtimeDep?: number;
+  /**
+   * ★ Polling interval (ms) — 0 หรือ undefined = ปิด
+   * ใช้เป็น backup เมื่อ realtime connection ขาด
+   * แนะนำ: 30_000 (30 วินาที) สำหรับหน้าที่ต้องการข้อมูลสด
+   */
+  refreshInterval?: number;
 };
 
 export type QueryResult<T> = {
@@ -118,23 +139,12 @@ export type QueryResult<T> = {
 };
 
 // ── useQuery ──────────────────────────────────────────────────────
-/**
- * Hook หลักสำหรับดึงข้อมูล
- *
- * @example
- * const { data, loading } = useQuery<DutyEntry[]>('/api/public/duty/today');
- *
- * @example
- * // กับ auth header (admin)
- * const { data } = useQuery('/api/admin/users', { headers: { Authorization: `Bearer ${token}` } });
- */
 export function useQuery<T = any>(
   url: string,
   options: QueryOptions = {}
 ): QueryResult<T> {
-  const { headers, enabled = true, realtimeDep } = options;
+  const { headers, enabled = true, realtimeDep, refreshInterval } = options;
 
-  // อ่าน cache ทันทีตอน render ครั้งแรก (synchronous — 0ms)
   const [data, setData] = useState<T | null>(() => store.get(url)?.data ?? null);
   const [loading, setLoading] = useState<boolean>(() => !store.get(url));
   const [error, setError] = useState<string | null>(null);
@@ -144,7 +154,6 @@ export function useQuery<T = any>(
     async (force = false) => {
       if (!enabled) return;
 
-      // ถ้าไม่ force และยังไม่หมดอายุ → แสดง cache โดยไม่ fetch
       if (!force && !isExpired(url)) {
         const cached = store.get(url);
         if (cached) {
@@ -154,7 +163,7 @@ export function useQuery<T = any>(
         return;
       }
 
-      // แสดงข้อมูลเก่าก่อน (stale-while-revalidate) ไม่บังคับ spinner
+      // Stale-while-revalidate: แสดงข้อมูลเก่าก่อน
       const stale = store.get(url);
       if (stale) {
         setData(stale.data);
@@ -178,7 +187,6 @@ export function useQuery<T = any>(
     [url, enabled, JSON.stringify(headers ?? {})] // eslint-disable-line
   );
 
-  // Cleanup on unmount
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
@@ -187,12 +195,19 @@ export function useQuery<T = any>(
   // Initial fetch on mount
   useEffect(() => { void load(); }, [load]);
 
-  // Realtime-triggered refetch (Supabase Realtime)
+  // Realtime-triggered refetch
   useEffect(() => {
     if (realtimeDep !== undefined && realtimeDep > 0) void load(true);
   }, [realtimeDep]); // eslint-disable-line
 
-  // ★ Register subscriber — เมื่อ invalidate(url) ถูกเรียก จะได้รับแจ้งทันที
+  // ★ Periodic polling — backup เมื่อ realtime ขาด
+  useEffect(() => {
+    if (!refreshInterval || !enabled) return;
+    const id = setInterval(() => void load(true), refreshInterval);
+    return () => clearInterval(id);
+  }, [refreshInterval, enabled, load]);
+
+  // Register subscriber สำหรับ invalidate() และ visibilitychange
   useEffect(() => {
     const refetch = () => { void load(true); };
     addSub(url, refetch);
@@ -206,19 +221,14 @@ export function useQuery<T = any>(
 
 // ── invalidate ────────────────────────────────────────────────────
 /**
- * ★ ฟังก์ชันสำคัญที่สุด — เรียกหลัง mutation ทุกครั้ง
- *
- * ทำ 2 อย่าง:
- * 1. ลบ cache entry → เมื่อ page ถัดไป mount จะได้ข้อมูลใหม่
- * 2. แจ้ง mounted subscribers → refetch ทันที (ไม่ต้อง navigate ออกแล้วกลับ)
+ * ★ เรียกหลัง mutation ทุกครั้ง
+ * ลบ cache + แจ้ง mounted subscribers ให้ refetch ทันที
  *
  * @example
- * // หลัง check-in เวร
- * await fetch('/api/council/duty/checkin', { method: 'POST', ... });
  * invalidate('/api/public/duty/today');
  *
  * @example
- * // Admin เพิ่มเวร → invalidate ทั้ง admin และ public URL
+ * // Admin เพิ่มเวร → invalidate ทั้ง admin และ public
  * invalidate('/api/admin/duty?date=2024-01-01', '/api/public/duty/today');
  */
 export function invalidate(...urls: string[]): void {
@@ -230,9 +240,6 @@ export function invalidate(...urls: string[]): void {
 }
 
 // ── prefetch ──────────────────────────────────────────────────────
-/**
- * โหลดข้อมูลล่วงหน้าก่อน navigation
- */
 export async function prefetch(
   url: string,
   headers?: Record<string, string>
@@ -242,9 +249,9 @@ export async function prefetch(
 }
 
 // ── Compatibility exports ──────────────────────────────────────────
-// ชื่อ alias สำหรับ backward compatibility กับโค้ดเดิม
 export { useQuery as useApiCache };
 export const invalidateCache = (...urls: string[]) => invalidate(...urls);
+export const invalidateAll = (...urls: string[]) => invalidate(...urls);
 export const invalidateCachePrefix = (prefix: string) => {
   for (const [key] of store) {
     if (key.startsWith(prefix)) invalidate(key);
