@@ -1,8 +1,13 @@
 'use client';
 
+/* src/app/admin/zones/page.tsx
+   Admin zones page — more defensive: call refresh when records missing and on server events,
+   show error UI and retry button.
+*/
+
 import { useServerEvents } from '@/lib/useServerEvents';
 import { useAdminCache, invalidateCache } from '@/lib/adminCache';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
@@ -37,6 +42,7 @@ export default function AdminZonesPage() {
   const [filterStatus, setFilterStatus] = useState('');
   const [photoModal, setPhotoModal] = useState<string | null>(null);
   const [rtTick, setRtTick] = useState(0);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const zonesUrl = buildUrl(dateFrom, dateTo);
 
@@ -47,14 +53,38 @@ export default function AdminZonesPage() {
     enabled: isAdmin,
   });
 
-  // Subscribe to server events (SSE / long-poll fallback)
+  // Ensure initial refresh if records missing (defensive)
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (!records) {
+      (async () => {
+        try {
+          setFetchError(null);
+          await refresh();
+        } catch (err: any) {
+          console.error('[admin/zones] initial refresh error', err);
+          setFetchError(String(err?.message ?? err));
+        }
+      })();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
+
+  // Subscribe to events -> invalidate and refresh
   useServerEvents((message) => {
     try {
-      // message is expected: { schema, table, operation, row_id, payload, ... }
       const table = message?.table;
       if (table === 'council_zone_checks') {
         invalidateCache(zonesUrl);
+        // bump tick to make sure useAdminCache notices
         setRtTick(n => n + 1);
+        // try to refresh immediately (best-effort)
+        void (async () => {
+          try { setFetchError(null); await refresh(); } catch (err: any) {
+            console.warn('[admin/zones] refresh after event failed', err);
+            setFetchError(String(err?.message ?? err));
+          }
+        })();
       }
     } catch (e) {
       console.warn('[useServerEvents] admin zones handler error', e);
@@ -76,12 +106,6 @@ export default function AdminZonesPage() {
     return { zone: z, total: zr.length, clean: zr.filter(r => r.status === 'clean').length, dirty: zr.filter(r => r.status === 'dirty').length };
   });
 
-  if (authLoading) return (
-    <AppShell pageTitle="รายงานเขตสะอาด">
-      <div className="loading-center"><div className="spinner" /></div>
-    </AppShell>
-  );
-
   return (
     <AppShell pageTitle="รายงานผลการตรวจเขตสะอาด">
       <div className="page-header">
@@ -96,7 +120,16 @@ export default function AdminZonesPage() {
         </div>
       </div>
 
-      {/* Filters */}
+      {fetchError && (
+        <div className="alert alert-danger" style={{ marginBottom: 12 }}>
+          <div>ไม่สามารถโหลดข้อมูล: {fetchError}</div>
+          <div style={{ marginTop: 8 }}>
+            <button className="btn btn-ghost btn-sm" onClick={() => void refresh()}>ลองใหม่</button>
+          </div>
+        </div>
+      )}
+
+      {/* Filters + Stats + Table (UI unchanged) */}
       <div className="card" style={{ marginBottom: 18, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div className="form-group">
           <label className="form-label">จากวันที่</label>
@@ -121,10 +154,9 @@ export default function AdminZonesPage() {
             <option value="dirty">ไม่สะอาด</option>
           </select>
         </div>
-        <button onClick={refresh} className="btn btn-ghost btn-sm">🔄 รีเฟรช</button>
+        <button onClick={() => void refresh()} className="btn btn-ghost btn-sm">🔄 รีเฟรช</button>
       </div>
 
-      {/* Stats */}
       <div className="grid-3" style={{ marginBottom: 20 }}>
         <div className="stat-card" style={{ borderTop: '3px solid var(--brand)' }}>
           <div className="stat-label">รายการทั้งหมด</div>
@@ -142,18 +174,10 @@ export default function AdminZonesPage() {
         </div>
       </div>
 
-      {/* Zone summary */}
       <div className="sec-label" style={{ marginBottom: 10 }}>สรุปรายเขต</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))', gap: 7, marginBottom: 22 }}>
         {zoneSummary.map(z => (
-          <div
-            key={z.zone}
-            className="card"
-            style={{
-              padding: '10px 12px', textAlign: 'center',
-              borderTop: z.dirty > 0 ? '3px solid var(--red)' : z.clean > 0 ? '3px solid var(--green)' : '3px solid var(--b)',
-            }}
-          >
+          <div key={z.zone} className="card" style={{ padding: '10px 12px', textAlign: 'center', borderTop: z.dirty > 0 ? '3px solid var(--red)' : z.clean > 0 ? '3px solid var(--green)' : '3px solid var(--b)' }}>
             <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>{z.zone}</div>
             <div style={{ display: 'flex', gap: 4, justifyContent: 'center', flexWrap: 'wrap' }}>
               <span className="badge badge-green" style={{ fontSize: 10 }}>✅ {z.clean}</span>
@@ -163,16 +187,12 @@ export default function AdminZonesPage() {
         ))}
       </div>
 
-      {/* Detail table */}
       <div className="sec-label" style={{ marginBottom: 10 }}>บันทึกรายการ</div>
       <div className="table-wrap">
         {loading && allRecords.length === 0 ? (
           <div className="loading-center"><div className="spinner" /></div>
         ) : filtered.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-icon">📊</div>
-            <div>ไม่พบข้อมูลในช่วงเวลาที่เลือก</div>
-          </div>
+          <div className="empty-state"><div className="empty-icon">📊</div><div>ไม่พบข้อมูลในช่วงเวลาที่เลือก</div></div>
         ) : (
           <table>
             <thead>
@@ -182,28 +202,13 @@ export default function AdminZonesPage() {
               {filtered.map(r => (
                 <tr key={r.id}>
                   <td style={{ fontSize: 12.5, color: 'var(--t3)', whiteSpace: 'nowrap' }}>
-                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}{' '}
-                    <span style={{ fontSize: 11 }}>
-                      {new Date(r.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
-                    </span>
+                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })} <span style={{ fontSize: 11 }}>{new Date(r.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</span>
                   </td>
                   <td style={{ fontWeight: 600 }}>{r.zone}</td>
-                  <td>
-                    {r.status === 'clean'
-                      ? <span className="badge badge-green">✅ สะอาด</span>
-                      : <span className="badge badge-red">❌ ไม่สะอาด</span>}
-                  </td>
+                  <td>{r.status === 'clean' ? <span className="badge badge-green">✅ สะอาด</span> : <span className="badge badge-red">❌ ไม่สะอาด</span>}</td>
                   <td style={{ fontSize: 13 }}>{r.inspector_name}</td>
                   <td style={{ fontSize: 12.5, color: 'var(--t3)' }}>{r.note ?? '—'}</td>
-                  <td>
-                    {r.photo_url ? (
-                      <button onClick={() => setPhotoModal(r.photo_url!)} className="btn btn-ghost btn-sm">
-                        🖼️ ดูรูป
-                      </button>
-                    ) : (
-                      <span style={{ fontSize: 12, color: 'var(--t3)' }}>—</span>
-                    )}
-                  </td>
+                  <td>{r.photo_url ? <button onClick={() => setPhotoModal(r.photo_url!)} className="btn btn-ghost btn-sm">🖼️ ดูรูป</button> : <span style={{ fontSize: 12, color: 'var(--t3)' }}>—</span>}</td>
                 </tr>
               ))}
             </tbody>
@@ -211,50 +216,12 @@ export default function AdminZonesPage() {
         )}
       </div>
 
-      {/* Photo modal */}
       {photoModal && (
-        <div
-          onClick={() => setPhotoModal(null)}
-          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)', zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
-        >
+        <div onClick={() => setPhotoModal(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)', zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
           <div onClick={e => e.stopPropagation()} style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }}>
-            <button
-              onClick={() => setPhotoModal(null)}
-              aria-label="close"
-              style={{
-                position: 'absolute', top: -14, right: -14, zIndex: 1,
-                background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32,
-                display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'
-              }}
-            >
-              ×
-            </button>
-            <img
-              src={photoModal}
-              alt="zone check photo"
-              style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain', display: 'block' }}
-              onError={e => {
-                const img = e.currentTarget as HTMLImageElement;
-                try {
-                  if (!img.src.includes('drive.google.com')) {
-                    const parts = photoModal.split('/d/');
-                    if (parts.length > 1) {
-                      const id = parts[1].split('/')[0];
-                      if (id) img.src = `https://drive.google.com/uc?export=view&id=${id}`;
-                    }
-                  }
-                } catch {}
-              }}
-            />
-            <a
-              href={photoModal}
-              target="_blank"
-              rel="noreferrer"
-              className="btn btn-ghost btn-sm"
-              style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.06)' }}
-            >
-              เปิดใน Google Drive ↗
-            </a>
+            <button onClick={() => setPhotoModal(null)} aria-label="close" style={{ position: 'absolute', top: -14, right: -14, zIndex: 1, background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>×</button>
+            <img src={photoModal} alt="zone check photo" style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain', display: 'block' }} />
+            <a href={photoModal} target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm" style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.06)' }}>เปิดใน Google Drive ↗</a>
           </div>
         </div>
       )}
