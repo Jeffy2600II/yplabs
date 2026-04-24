@@ -1,32 +1,40 @@
+/* src/app/page.tsx */
 'use client';
 
-/*
-  src/app/page.tsx
-  หน้าแรก (Home) — โค้ชเต็ม:
-  - โหลดข้อมูลจาก /api/public/zones/today และ /api/public/duty/today แบบทนทาน (retry / error UI)
-  - รับเหตุการณ์จากเซิร์ฟเวอร์ผ่าน useServerEvents (SSE + long-poll fallback)
-  - เมื่อมีเหตุการณ์ใหม่ จะรีเฟรชข้อมูลที่เกี่ยวข้องทันที (ไม่มีการ poll ทุก ๆ 2-5 วินาที)
-  - มีสถานะ loading / error / retry ให้ผู้ใช้เห็นอย่างชัดเจน
-  - ข้อความภาษาไทยครบและแก้ไขปัญหาอักขระ (เช่น "อัปเดตอัตโนมัติ")
-*/
+/**
+ * หน้าแรก (Home)
+ * ─────────────────────────────────────────────────────────────────
+ * ★ Fix: ใช้ useQuery() จาก cache.ts แทน manual fetch + useState
+ *   → ข้อมูลอัปเดตทันทีเมื่อ invalidate() ถูกเรียกจากหน้าอื่น
+ *   → visibilitychange handler ใน cache.ts รีเฟรชข้อมูลเมื่อกลับมาที่ tab
+ *   → Supabase Realtime เป็น bonus signal ไม่ใช่เงื่อนไขหลัก
+ *
+ * Data flow:
+ *   useQuery(ZONES_URL) ← invalidate() จาก zone-check/page.tsx
+ *   useQuery(DUTY_URL)  ← invalidate() จาก duty/page.tsx + admin/duty/page.tsx
+ */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { useServerEvents } from '@/lib/useServerEvents';
+import { useQuery, invalidate } from '@/lib/cache';
+import { useRealtime } from '@/lib/realtimeHooks';
+
+// ── URL constants ─────────────────────────────────────────────────
+/** ต้องตรงกับที่ใช้ใน zone-check/page.tsx เพื่อให้ invalidate() ทำงานข้ามหน้า */
+const ZONES_URL = '/api/public/zones/today';
+/** ต้องตรงกับที่ใช้ใน duty/page.tsx และ admin/duty/page.tsx */
+const DUTY_URL  = '/api/public/duty/today';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
-
-const ZONES_URL = '/api/public/zones/today';
-const DUTY_URL = '/api/public/duty/today';
 
 type ZoneSummary = {
   zone: string;
   status: 'clean' | 'dirty' | 'pending';
   inspector: string | null;
-  note ? : string | null;
-  recorded_at ? : string | null;
+  note?: string | null;
+  recorded_at?: string | null;
 };
 
 type DutyEntry = {
@@ -35,118 +43,66 @@ type DutyEntry = {
   student_id: string;
   checked_in: boolean;
   checked_in_at: string | null;
-  auth_uid: string;
+  auth_uid: string | null;
 };
-
-// Safe parse helper
-function safeJson < T = any > (txt: string): T | null {
-  try { return JSON.parse(txt) as T; } catch { return null; }
-}
 
 export default function HomePage() {
   const { user, isAdmin, isMember, loading: authLoading } = useAuth();
-  
-  // Data states
-  const [zones, setZones] = useState < ZoneSummary[] | null > (null);
-  const [duties, setDuties] = useState < DutyEntry[] | null > (null);
-  
-  // UI states
-  const [loadingZones, setLoadingZones] = useState(true);
-  const [loadingDuties, setLoadingDuties] = useState(true);
-  const [errorZones, setErrorZones] = useState < string | null > (null);
-  const [errorDuties, setErrorDuties] = useState < string | null > (null);
-  
-  // Fetch functions
-  const fetchZones = useCallback(async () => {
-    setErrorZones(null);
-    setLoadingZones(true);
-    try {
-      const res = await fetch(ZONES_URL, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`ไม่สามารถโหลดข้อมูลเขต (status ${res.status})`);
-      const data = await res.json();
-      if (!Array.isArray(data)) throw new Error('รูปแบบข้อมูลเขตไม่ถูกต้อง');
-      setZones(data);
-    } catch (err: any) {
-      console.error('[home] fetchZones error', err);
-      setErrorZones(String(err?.message ?? err));
-      // keep previous zones if any (graceful)
-    } finally {
-      setLoadingZones(false);
-    }
-  }, []);
-  
-  const fetchDuties = useCallback(async () => {
-    setErrorDuties(null);
-    setLoadingDuties(true);
-    try {
-      const res = await fetch(DUTY_URL, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`ไม่สามารถโหลดข้อมูลเวร (status ${res.status})`);
-      const data = await res.json();
-      if (!Array.isArray(data)) throw new Error('รูปแบบข้อมูลเวรไม่ถูกต้อง');
-      setDuties(data);
-    } catch (err: any) {
-      console.warn('[home] fetchDuties error', err);
-      setErrorDuties(String(err?.message ?? err));
-    } finally {
-      setLoadingDuties(false);
-    }
-  }, []);
-  
-  // Initial load
-  useEffect(() => {
-    void Promise.all([fetchZones(), fetchDuties()]);
-  }, [fetchZones, fetchDuties]);
-  
-  // Server events handler: refresh specific resources on events
-  useServerEvents((msg) => {
-    try {
-      if (!msg || typeof msg !== 'object') return;
-      const table = msg.table;
-      // Debug log so we can see events in browser console
-      console.debug('[home] server event', msg);
-      
-      if (table === 'council_zone_checks') {
-        // refresh zones only
-        void fetchZones();
-      } else if (table === 'council_duty') {
-        void fetchDuties();
-      } else {
-        // unknown table: refresh both as fallback
-        void fetchZones();
-        void fetchDuties();
-      }
-    } catch (e) {
-      console.warn('[home] server event handler error', e);
-    }
-  }, { enabled: true, pollFallback: true });
-  
-  // Derived values
-  const zoneList: ZoneSummary[] = zones ?? ZONES.map(z => ({ zone: z, status: 'pending', inspector: null }));
-  
-  const cleanCount = zoneList.filter(z => z.status === 'clean').length;
-  const dirtyCount = zoneList.filter(z => z.status === 'dirty').length;
+
+  // ★ useQuery — reactive, อ่าน cache ทันที, refetch เมื่อ invalidate() หรือ tab กลับมา
+  const { data: zonesRaw, loading: loadingZones, error: errorZones, refresh: refreshZones } =
+    useQuery<ZoneSummary[]>(ZONES_URL);
+
+  const { data: duties, loading: loadingDuties, error: errorDuties, refresh: refreshDuties } =
+    useQuery<DutyEntry[]>(DUTY_URL);
+
+  // Supabase Realtime — bonus signal (ไม่บังคับ)
+  useRealtime({
+    table: 'council_zone_checks',
+    onData: useCallback(() => { invalidate(ZONES_URL); }, []),
+    debounceMs: 500,
+  });
+  useRealtime({
+    table: 'council_duty',
+    onData: useCallback(() => { invalidate(DUTY_URL); }, []),
+    debounceMs: 500,
+  });
+
+  // Derived
+  const zoneList: ZoneSummary[] = zonesRaw ?? ZONES.map(z => ({ zone: z, status: 'pending', inspector: null }));
+  const dutyList: DutyEntry[]   = duties ?? [];
+
+  const cleanCount   = zoneList.filter(z => z.status === 'clean').length;
+  const dirtyCount   = zoneList.filter(z => z.status === 'dirty').length;
   const pendingCount = zoneList.filter(z => z.status === 'pending').length;
-  const dutyChecked = (duties ?? []).filter(d => d.checked_in).length;
-  
-  // UI helpers
-  const isLoading = loadingZones || loadingDuties;
-  
+  const dutyChecked  = dutyList.filter(d => d.checked_in).length;
+  const myEntry      = user ? dutyList.find(d => d.auth_uid === user.auth_uid) : null;
+
+  const todayTH = new Date().toLocaleDateString('th-TH', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  });
+
   return (
     <AppShell pageTitle="หน้าหลัก">
-      {/* Header / Hero */}
+
+      {/* ── Hero (ผู้เยี่ยมชม) ──────────────────────────────────── */}
       {!isMember && !authLoading && (
         <div style={{
-          background: 'linear-gradient(135deg,#0C1120 0%,#1E3EAB 100%)',
-          borderRadius: 'var(--r-xl)', padding: 24, color: '#fff',
-          marginBottom: 20, overflow: 'hidden',
+          background: 'linear-gradient(135deg, #0C1120 0%, #1E3EAB 100%)',
+          borderRadius: 'var(--r-xl)', padding: '24px 22px', color: '#fff',
+          marginBottom: 18, overflow: 'hidden', position: 'relative',
         }}>
-          <div style={{ fontSize: 10, color: 'rgba(255,255,255,.38)', marginBottom: 6 }}>
-            📅 {new Date().toLocaleDateString('th-TH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,.40)', marginBottom: 6 }}>
+            📅 {todayTH}
           </div>
-          <div style={{ fontFamily: 'var(--font-ui)', fontSize: 24, fontWeight: 800 }}>YPLABS</div>
-          <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 14 }}>ระบบสภานักเรียน โรงเรียนคำยางพิทยา</div>
+          <div style={{ fontFamily: 'var(--font-ui)', fontSize: 26, fontWeight: 800, letterSpacing: '-.02em' }}>
+            YPLABS
+          </div>
+          <div style={{ fontSize: 13, opacity: 0.80, marginBottom: 18, marginTop: 2 }}>
+            ระบบสภานักเรียน โรงเรียนคำยางพิทยา
+          </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <Link href="/login" className="btn btn-gold">🔑 เข้าสู่ระบบ</Link>
+            <Link href="/login"    className="btn btn-gold">🔑 เข้าสู่ระบบ</Link>
             <Link href="/register" className="btn" style={{ background: 'rgba(255,255,255,.12)', color: '#fff', border: '1px solid rgba(255,255,255,.20)' }}>
               ลงทะเบียน
             </Link>
@@ -154,60 +110,101 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* Error banner for zones */}
-      {errorZones && (
-        <div className="alert alert-danger" style={{ marginBottom: 12 }}>
-          <div>เกิดข้อผิดพลาดในการโหลดสถานะเขต: {errorZones}</div>
-          <div style={{ marginTop: 8 }}>
-            <button className="btn btn-ghost btn-sm" onClick={() => void fetchZones()}>ลองใหม่</button>
-          </div>
-        </div>
-      )}
-
-      {/* Summary cards */}
+      {/* ── Stat Cards ───────────────────────────────────────────── */}
       <div className="grid-4" style={{ marginBottom: 18 }}>
         <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
           <div className="stat-label">เขตสะอาด</div>
-          <div className="stat-value" style={{ color: 'var(--green)' }}>{cleanCount}</div>
+          <div className="stat-value" style={{ color: 'var(--green)' }}>
+            {loadingZones && !zonesRaw ? <div className="skeleton" style={{ height: 28, width: 40, borderRadius: 6 }} /> : cleanCount}
+          </div>
           <div className="stat-sub">จาก {ZONES.length} เขต</div>
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--red)' }}>
           <div className="stat-label">ไม่สะอาด</div>
-          <div className="stat-value" style={{ color: dirtyCount > 0 ? 'var(--red)' : 'var(--t3)' }}>{dirtyCount}</div>
+          <div className="stat-value" style={{ color: dirtyCount > 0 ? 'var(--red)' : 'var(--t3)' }}>
+            {loadingZones && !zonesRaw ? <div className="skeleton" style={{ height: 28, width: 30, borderRadius: 6 }} /> : dirtyCount}
+          </div>
+          <div className="stat-sub">เขต</div>
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--amber)' }}>
           <div className="stat-label">รอตรวจ</div>
-          <div className="stat-value" style={{ color: 'var(--amber)' }}>{pendingCount}</div>
+          <div className="stat-value" style={{ color: 'var(--amber)' }}>
+            {loadingZones && !zonesRaw ? <div className="skeleton" style={{ height: 28, width: 30, borderRadius: 6 }} /> : pendingCount}
+          </div>
+          <div className="stat-sub">เขต</div>
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--brand)' }}>
           <div className="stat-label">เวรเช็คอิน</div>
           <div className="stat-value">
-            {dutyChecked}<span style={{ fontSize: 15, color: 'var(--t3)' }}>/{(duties ?? []).length}</span>
+            {loadingDuties && !duties
+              ? <div className="skeleton" style={{ height: 28, width: 48, borderRadius: 6 }} />
+              : <>{dutyChecked}<span style={{ fontSize: 16, color: 'var(--t3)' }}>/{dutyList.length}</span></>
+            }
           </div>
+          <div className="stat-sub">คน</div>
         </div>
       </div>
 
-      {/* Zone panel */}
+      {/* ── My status (สมาชิก) ───────────────────────────────────── */}
+      {isMember && myEntry?.checked_in && (
+        <div className="alert alert-success" style={{ marginBottom: 14 }}>
+          ✅ คุณเช็คอินเวรแล้วเมื่อ{' '}
+          {myEntry.checked_in_at
+            ? new Date(myEntry.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.'
+            : ''}
+        </div>
+      )}
+
+      {/* ── Error banners ─────────────────────────────────────────── */}
+      {errorZones && (
+        <div className="alert alert-error" style={{ marginBottom: 12 }}>
+          โหลดข้อมูลเขตไม่สำเร็จ
+          <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
+        </div>
+      )}
+      {errorDuties && (
+        <div className="alert alert-error" style={{ marginBottom: 12 }}>
+          โหลดข้อมูลเวรไม่สำเร็จ
+          <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
+        </div>
+      )}
+
+      {/* ── Zone Panel ───────────────────────────────────────────── */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div className="sec-label">สถานะเขตสะอาด (วันนี้)</div>
-          <div style={{ fontSize: 12, color: 'var(--t3)' }}>
-            {isLoading ? 'กำลังโหลด…' : 'อัปเดตอัตโนมัติ'}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14, fontFamily: 'var(--font-ui)' }}>🧹 สถานะเขตสะอาด</div>
+            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 2 }}>{todayTH}</div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--green)' }}>
+            <span className="rt-dot" />อัปเดตอัตโนมัติ
           </div>
         </div>
 
-        {loadingZones && !zones ? (
-          <div style={{ padding: 12 }}>กำลังโหลดข้อมูลเขต…</div>
+        {loadingZones && !zonesRaw ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 7 }}>
+            {ZONES.map((_, i) => (
+              <div key={i} className="skeleton" style={{ height: 56, borderRadius: 'var(--r-lg)' }} />
+            ))}
+          </div>
         ) : (
-          <div className="zone-grid" style={{ marginTop: 8 }}>
+          <div className="zone-grid">
             {zoneList.map(z => (
-              <div key={z.zone} className={`zone-tile ${z.status}`} style={{ padding: 10 }}>
-                <div className="zone-name" style={{ fontWeight: 700 }}>{z.zone}</div>
-                <div className="zone-status" style={{ marginTop: 6 }}>
-                  {z.status === 'clean' ? '✅ สะอาด' : z.status === 'dirty' ? '❌ ไม่สะอาด' : '⏳ รอตรวจ'}
+              <div
+                key={z.zone}
+                className={`zone-tile ${z.status}`}
+              >
+                <div className="zone-name">{z.zone}</div>
+                <div className="zone-status" style={{ marginTop: 5 }}>
+                  {z.status === 'clean'   ? '✅ สะอาด' :
+                   z.status === 'dirty'   ? '❌ ไม่สะอาด' :
+                                            '⏳ รอตรวจ'}
                 </div>
-                {z.inspector && <div style={{ fontSize: 11, color: 'var(--t3)', marginTop: 6 }}>{z.inspector}</div>}
-                {z.note && <div style={{ fontSize: 11, color: 'var(--t3)', marginTop: 4 }}>{z.note}</div>}
+                {z.inspector && (
+                  <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {z.inspector}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -220,29 +217,56 @@ export default function HomePage() {
         )}
       </div>
 
-      {/* Duty panel */}
+      {/* ── Duty Panel ───────────────────────────────────────────── */}
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div className="sec-label">เวรยืนหน้าโรงเรียน</div>
-          <div style={{ fontSize: 12, color: 'var(--t3)' }}>{loadingDuties ? 'กำลังโหลด…' : `${(duties ?? []).length} คน`}</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14, fontFamily: 'var(--font-ui)' }}>🏫 เวรยืนหน้าโรงเรียน</div>
+            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 2 }}>{todayTH}</div>
+          </div>
+          <span className="badge badge-blue">{dutyList.length} คน</span>
         </div>
 
         {loadingDuties && !duties ? (
-          <div style={{ padding: 12 }}>กำลังโหลดรายชื่อเวร…</div>
-        ) : duties && duties.length === 0 ? (
-          <div style={{ padding: 12 }}>ยังไม่มีรายชื่อเวร</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {[1, 2, 3].map(i => (
+              <div key={i} className="skeleton" style={{ height: 44, borderRadius: 'var(--r-lg)' }} />
+            ))}
+          </div>
+        ) : dutyList.length === 0 ? (
+          <div className="empty-state" style={{ padding: '20px 0' }}>
+            <div className="empty-icon">📋</div>
+            <div style={{ fontSize: 13 }}>ยังไม่มีรายชื่อเวรสำหรับวันนี้</div>
+          </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-            {(duties ?? []).map(d => (
-              <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 8, borderRadius: 8 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {dutyList.map(d => (
+              <div
+                key={d.id}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '10px 12px', borderRadius: 'var(--r-lg)',
+                  background: d.auth_uid === user?.auth_uid ? 'var(--blue-bg)' : 'var(--s2)',
+                  border: `1px solid ${d.auth_uid === user?.auth_uid ? 'rgba(37,99,235,0.20)' : 'var(--b)'}`,
+                }}
+              >
                 <div>
-                  <div style={{ fontWeight: 700 }}>{d.student_name}</div>
-                  <div style={{ fontSize: 12, color: 'var(--t3)' }}>{d.student_id}</div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    {d.student_name}
+                    {d.auth_uid === user?.auth_uid && (
+                      <span className="badge badge-blue" style={{ marginLeft: 6, fontSize: 9 }}>คุณ</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--t3)', fontFamily: 'var(--font-mono)' }}>
+                    {d.student_id}
+                  </div>
                 </div>
                 <div style={{ textAlign: 'right' }}>
-                  {d.checked_in ? <span className="badge badge-green">✓ มาแล้ว</span> : <span className="badge badge-gray">รอ</span>}
+                  {d.checked_in
+                    ? <span className="badge badge-green">✓ มาแล้ว</span>
+                    : <span className="badge badge-gray">รอ</span>}
                   {d.checked_in && d.checked_in_at && (
-                    <div style={{ fontSize: 11, color: 'var(--t3)', marginTop: 6 }}>
+                    <div style={{ fontSize: 11, color: 'var(--t3)', marginTop: 4 }}>
                       {new Date(d.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.
                     </div>
                   )}
@@ -258,6 +282,7 @@ export default function HomePage() {
           </div>
         )}
       </div>
+
     </AppShell>
   );
 }
