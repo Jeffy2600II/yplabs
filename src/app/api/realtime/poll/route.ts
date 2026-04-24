@@ -1,8 +1,23 @@
 // src/app/api/realtime/poll/route.ts
+// ─────────────────────────────────────────────────────────────────
+// อัปเดตสำหรับ Vercel Marketplace Integration:
+//   SUPABASE_DATABASE_URL / DATABASE_URL → POSTGRES_URL_NON_POOLING
+//   (ต้องใช้ non-pooling สำหรับ pg LISTEN/NOTIFY)
+// ─────────────────────────────────────────────────────────────────
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 import { Client } from 'pg';
+
+function getDbUrl(): string | undefined {
+  // Vercel Marketplace inject: POSTGRES_URL_NON_POOLING
+  // ใช้ non-pooling เสมอสำหรับ LISTEN/NOTIFY (pooler ไม่รองรับ)
+  return (
+    process.env.POSTGRES_URL_NON_POOLING ??
+    process.env.SUPABASE_DATABASE_URL ?? // legacy fallback
+    process.env.DATABASE_URL // legacy fallback
+  );
+}
 
 function isDbUrlValid(url ? : string) {
   if (!url) return false;
@@ -10,9 +25,8 @@ function isDbUrlValid(url ? : string) {
 }
 
 export async function GET(req: Request) {
-  const DATABASE_URL = process.env.SUPABASE_DATABASE_URL ?? process.env.DATABASE_URL;
+  const DATABASE_URL = getDbUrl();
   if (!isDbUrlValid(DATABASE_URL)) {
-    // If DB not configured, return 204 so client treats as "no event" instead of error
     return new Response(null, { status: 204 });
   }
   
@@ -24,7 +38,6 @@ export async function GET(req: Request) {
   } catch (err) {
     console.error('[api/realtime/poll] db connect/listen failed:', String(err));
     try { if (client) await client.end(); } catch {}
-    // Return 204 instead of 502 so client fallback continues without hard failure
     return new Response(null, { status: 204 });
   }
   
@@ -42,8 +55,8 @@ export async function GET(req: Request) {
     const to = setTimeout(() => {
       if (finished) return;
       finished = true;
-      resolve(null); // timeout
-    }, 20_000); // wait up to 20s
+      resolve(null);
+    }, 20_000);
     
     req.signal.addEventListener('abort', () => {
       if (finished) return;
@@ -56,11 +69,12 @@ export async function GET(req: Request) {
   try {
     client.removeAllListeners('notification');
     await client.end();
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
   
   if (!payload) return new Response(null, { status: 204 });
   
-  return new Response(payload.payload, { status: 200, headers: { 'Content-Type': 'application/json' } });
+  return new Response(payload.payload, {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }

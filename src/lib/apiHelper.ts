@@ -1,9 +1,10 @@
 /**
  * apiHelper.ts — Server-side auth helpers
  * ─────────────────────────────────────────────────────────────────
- * Centralized Supabase admin client + auth verifiers สำหรับ API routes
- * - verifyAdmin(): ตรวจสอบว่า caller เป็น admin ที่ approved และไม่ disabled
- * - verifyMember(): ตรวจสอบว่า caller เป็นสมาชิกที่ approved และไม่ disabled
+ * อัปเดตสำหรับ Vercel Marketplace Integration:
+ *   Server-side URL  → SUPABASE_URL  (Vercel inject ให้)
+ *   Service Role Key → SUPABASE_SERVICE_ROLE_KEY  (ชื่อเดิม)
+ * ─────────────────────────────────────────────────────────────────
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
@@ -11,20 +12,25 @@ import { createLogger } from './serverLogger';
 
 const logger = createLogger('lib/apiHelper');
 
-// ── Singleton server-side client ──────────────────────────────────
-
 let _client: SupabaseClient | null = null;
 
 export function getServerSupabase(): SupabaseClient {
   if (_client) return _client;
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) throw new Error('Missing Supabase server env vars');
+  
+  // Vercel Marketplace inject ให้ว่า SUPABASE_URL (ไม่มี NEXT_PUBLIC_)
+  // เก็บ fallback ไว้ถ้าใช้ .env.local เดิม
+  const url =
+    process.env.SUPABASE_URL ??
+    process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
+  
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+  
+  if (!url || !key) throw new Error('Missing Supabase server env vars (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)');
+  
   _client = createClient(url, key, { auth: { persistSession: false } });
   return _client;
 }
 
-// Named export expected by existing route files
 export const supabase = new Proxy({} as SupabaseClient, {
   get(_, prop) {
     return (getServerSupabase() as any)[prop];
@@ -42,8 +48,6 @@ type VerifiedUser = {
   account_type: string;
 };
 
-// ── Helper: extract + validate token ─────────────────────────────
-
 async function getCallerUser(authHeader: string | null): Promise < { id: string;email ? : string } | null > {
   if (!authHeader) return null;
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
@@ -57,8 +61,6 @@ async function getCallerUser(authHeader: string | null): Promise < { id: string;
   }
   return user;
 }
-
-// ── verifyAdmin ────────────────────────────────────────────────────
 
 export async function verifyAdmin(authHeader: string | null): Promise < VerifiedUser | null > {
   const authUser = await getCallerUser(authHeader);
@@ -89,8 +91,6 @@ export async function verifyAdmin(authHeader: string | null): Promise < Verified
   
   return { id: authUser.id, email: authUser.email, ...row };
 }
-
-// ── verifyMember ───────────────────────────────────────────────────
 
 export async function verifyMember(authHeader: string | null): Promise < VerifiedUser | null > {
   const authUser = await getCallerUser(authHeader);

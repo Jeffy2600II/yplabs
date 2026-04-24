@@ -1,17 +1,12 @@
-// =================================================================
-// FILE: src/app/api/public/duty/today/route.ts
-// Public API — รายชื่อเวรวันนี้ (ไม่ต้อง auth)
-// ★ Simple & reliable: query by today's date only
-// ★ ใช้วันที่ไทย UTC+7
-// =================================================================
-
+// src/app/api/public/duty/today/route.ts
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { getTodayTH } from '@/lib/dateUtils';
 
+// Vercel Marketplace: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? '',
+  process.env.SUPABASE_SERVICE_ROLE_KEY ?? ''
 );
 
 export async function GET() {
