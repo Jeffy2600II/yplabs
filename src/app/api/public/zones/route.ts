@@ -1,16 +1,18 @@
-// src/app/api/public/zones/route.ts
+// Path:    src/app/api/public/zones/route.ts
+// Purpose: Public endpoint — returns zone check history with optional date filtering.
+//          No authentication required.
+// Used by: admin/zones/page.tsx (public summary view), analytics
+
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-
-const supabase = createClient(
-  process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY ?? ''
-);
+import { SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } from '@/lib/env';
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const from = searchParams.get('from');
   const to = searchParams.get('to');
+  
+  const supabase = createClient(SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
   
   let query = supabase
     .from('council_zone_checks')
@@ -22,7 +24,11 @@ export async function GET(req: NextRequest) {
   if (to) query = query.lte('check_date', to);
   
   const { data, error } = await query;
-  if (error) return NextResponse.json([], { status: 200 });
+  
+  if (error) {
+    console.error('[api/public/zones] Supabase error:', error.message);
+    return NextResponse.json([], { status: 200 });
+  }
   
   return NextResponse.json(data ?? [], {
     headers: { 'Cache-Control': 'public, max-age=30, stale-while-revalidate=60' },

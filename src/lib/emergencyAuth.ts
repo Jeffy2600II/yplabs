@@ -1,31 +1,31 @@
+// Path:    src/lib/emergencyAuth.ts
+// Purpose: Break-glass emergency access system — stateless HMAC token auth.
+//          Used when normal Supabase admin login is unavailable.
+// Used by: src/app/api/emergency/* routes, src/app/login/page.tsx (trigger)
+
 /**
- * lib/emergencyAuth.ts
- * ─────────────────────────────────────────────────────────────────
- * Break-glass emergency access system
- *
- * ENV vars ที่ต้องตั้งค่า:
- *   EMERGENCY_ACCESS_CODE   = รหัสลับ (ตัวอักษรและตัวเลข 12+ ตัว)
- *   EMERGENCY_JWT_SECRET    = สตริงสุ่ม 32+ ตัว สำหรับ sign token
+ * ENV vars required (set manually in Vercel dashboard):
+ *   EMERGENCY_ACCESS_CODE   — secret code (12+ chars, alphanumeric)
+ *   EMERGENCY_JWT_SECRET    — 32+ char random string for HMAC signing
  *
  * Security model:
- *   - รหัสถูก verify ด้วย HMAC constant-time comparison (ป้องกัน timing attack)
- *   - Token เป็น stateless HMAC-signed payload (ไม่ต้อง DB)
- *   - Token หมดอายุ 30 นาที (หมดแล้วต้องกรอกรหัสใหม่)
- *   - Token เก็บใน sessionStorage เท่านั้น (ปิด tab = หมดสิทธิ์ทันที)
- *   - ทุก API call ต้องส่ง token ใน header X-Emergency-Token
- * ─────────────────────────────────────────────────────────────────
+ *   - Code verified with HMAC constant-time comparison (prevents timing attacks)
+ *   - Tokens are stateless HMAC-signed payloads (no DB required)
+ *   - Tokens expire after 30 minutes
+ *   - Tokens stored in sessionStorage only (closed tab = immediate expiry)
+ *   - Every API call must send token in X-Emergency-Token header
  */
 
 import crypto from 'crypto';
 
-// 30 minutes
+// 30 minutes in milliseconds
 export const EMERGENCY_EXPIRY_MS = 30 * 60 * 1000;
 
-// ── Helpers ────────────────────────────────────────────────────────
+// ── Env helpers ───────────────────────────────────────────────────────────────
 
 function getJwtSecret(): string {
   const s = process.env.EMERGENCY_JWT_SECRET ?? '';
-  if (!s) throw new Error('EMERGENCY_JWT_SECRET not set');
+  if (!s) throw new Error('[emergencyAuth] EMERGENCY_JWT_SECRET not set');
   return s;
 }
 
@@ -33,7 +33,12 @@ function getAccessCode(): string {
   return process.env.EMERGENCY_ACCESS_CODE ?? '';
 }
 
-// Constant-time string comparison via HMAC (same output size = safe)
+// ── Constant-time comparison ──────────────────────────────────────────────────
+
+/**
+ * Compares two strings in constant time to prevent timing attacks.
+ * Uses HMAC to normalize length before crypto.timingSafeEqual.
+ */
 function safeCompare(a: string, b: string): boolean {
   try {
     const key = 'yplabs-code-compare';
@@ -45,11 +50,11 @@ function safeCompare(a: string, b: string): boolean {
   }
 }
 
-// ── Code Verification ──────────────────────────────────────────────
+// ── Code verification ─────────────────────────────────────────────────────────
 
 /**
- * ตรวจสอบรหัสลับที่ผู้ใช้กรอก
- * คืน true ถ้าถูกต้อง
+ * Verifies the emergency access code entered by the user.
+ * Returns true only if the code matches EMERGENCY_ACCESS_CODE exactly.
  */
 export function verifyEmergencyCode(inputCode: string): boolean {
   const expected = getAccessCode();
@@ -57,18 +62,18 @@ export function verifyEmergencyCode(inputCode: string): boolean {
   return safeCompare(inputCode.trim(), expected.trim());
 }
 
-// ── Token Management (Stateless HMAC JWT) ─────────────────────────
+// ── Token management ──────────────────────────────────────────────────────────
 
 type EmergencyPayload = {
-  iat: number;   // issued at (ms)
-  exp: number;   // expires at (ms)
-  jti: string;   // unique nonce
-  t: 'emg';     // type marker
+  iat: number;  // issued at (ms)
+  exp: number;  // expires at (ms)
+  jti: string;  // unique nonce (prevents replay)
+  t: 'emg';    // type marker
 };
 
 /**
- * สร้าง emergency token (หลังจาก verify code สำเร็จ)
- * รูปแบบ: base64url(payload) + "." + base64url(hmac)
+ * Creates a signed emergency token after successful code verification.
+ * Format: base64url(payload) + "." + base64url(hmac-sha256-signature)
  */
 export function createEmergencyToken(): string {
   const secret = getJwtSecret();
@@ -88,11 +93,12 @@ export type VerifyResult =
   | { valid: false; reason: string };
 
 /**
- * ตรวจสอบ emergency token จาก header
- * ใช้ใน API route ทุกตัวที่ต้องการ emergency access
+ * Verifies an emergency token from the X-Emergency-Token header.
+ * Checks signature integrity and expiry time.
  */
 export function verifyEmergencyToken(token: string | null | undefined): VerifyResult {
   if (!token) return { valid: false, reason: 'missing token' };
+
   try {
     const secret = getJwtSecret();
 
@@ -102,7 +108,7 @@ export function verifyEmergencyToken(token: string | null | undefined): VerifyRe
     const data = token.slice(0, dotIdx);
     const sig  = token.slice(dotIdx + 1);
 
-    // Verify signature
+    // Verify signature in constant time
     const expectedSig = crypto.createHmac('sha256', secret).update(data).digest('base64url');
     const sigBuf = Buffer.from(sig,         'base64url');
     const expBuf = Buffer.from(expectedSig, 'base64url');
@@ -110,20 +116,22 @@ export function verifyEmergencyToken(token: string | null | undefined): VerifyRe
     if (sigBuf.length !== expBuf.length) return { valid: false, reason: 'signature length mismatch' };
     if (!crypto.timingSafeEqual(sigBuf, expBuf)) return { valid: false, reason: 'invalid signature' };
 
-    // Decode payload
-    const payload: EmergencyPayload = JSON.parse(Buffer.from(data, 'base64url').toString('utf-8'));
+    const payload: EmergencyPayload = JSON.parse(
+      Buffer.from(data, 'base64url').toString('utf-8')
+    );
 
     if (payload.t !== 'emg') return { valid: false, reason: 'wrong token type' };
     if (Date.now() > payload.exp) return { valid: false, reason: 'token expired' };
 
     return { valid: true, expiresAt: payload.exp, issuedAt: payload.iat };
+
   } catch (e: any) {
     return { valid: false, reason: `parse error: ${e?.message}` };
   }
 }
 
 /**
- * Helper: ดึง emergency token จาก request headers
+ * Extracts the emergency token from the X-Emergency-Token request header.
  */
 export function getEmergencyTokenFromRequest(req: Request): string | null {
   return (req.headers as any).get?.('x-emergency-token')
@@ -132,13 +140,15 @@ export function getEmergencyTokenFromRequest(req: Request): string | null {
 }
 
 /**
- * Helper สำหรับ API routes: ตรวจ token แล้วคืน error response ถ้าไม่ผ่าน
+ * Middleware helper for emergency API routes.
+ * Returns an error Response if the token is missing or invalid; null if valid.
+ *
  * Usage:
- *   const check = requireEmergencyAuth(req);
- *   if (check) return check;
+ *   const deny = requireEmergencyAuth(req);
+ *   if (deny) return deny;
  */
 export function requireEmergencyAuth(req: Request): Response | null {
-  const token = getEmergencyTokenFromRequest(req);
+  const token  = getEmergencyTokenFromRequest(req);
   const result = verifyEmergencyToken(token);
   if (!result.valid) {
     return new Response(
@@ -146,5 +156,5 @@ export function requireEmergencyAuth(req: Request): Response | null {
       { status: 401, headers: { 'Content-Type': 'application/json' } }
     );
   }
-  return null; // pass
+  return null;
 }

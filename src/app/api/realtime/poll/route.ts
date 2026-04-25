@@ -1,38 +1,34 @@
-// src/app/api/realtime/poll/route.ts
-// ─────────────────────────────────────────────────────────────────
-// อัปเดตสำหรับ Vercel Marketplace Integration:
-//   SUPABASE_DATABASE_URL / DATABASE_URL → POSTGRES_URL_NON_POOLING
-//   (ต้องใช้ non-pooling สำหรับ pg LISTEN/NOTIFY)
-// ─────────────────────────────────────────────────────────────────
+// Path:    src/app/api/realtime/poll/route.ts
+// Purpose: Long-polling fallback for realtime updates when SSE is unavailable.
+//          Listens on the `realtime_changes` pg NOTIFY channel and returns
+//          the first notification payload within 20 seconds.
+// Used by: src/lib/useServerEvents.ts (pollFallback mode)
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 import { Client } from 'pg';
+import { POSTGRES_URL_NON_POOLING, isPostgresNonPoolingConfigured } from '@/lib/env';
 
-function getDbUrl(): string | undefined {
-  // Vercel Marketplace inject: POSTGRES_URL_NON_POOLING
-  // ใช้ non-pooling เสมอสำหรับ LISTEN/NOTIFY (pooler ไม่รองรับ)
-  return (
-    process.env.POSTGRES_URL_NON_POOLING ??
-    process.env.SUPABASE_DATABASE_URL ?? // legacy fallback
-    process.env.DATABASE_URL // legacy fallback
-  );
-}
-
-function isDbUrlValid(url ? : string) {
-  if (!url) return false;
-  try { new URL(url); return true; } catch { return false; }
-}
+// POSTGRES_URL_NON_POOLING is required for LISTEN/NOTIFY.
+// Connection poolers (Supavisor) terminate idle connections and do not support
+// long-lived LISTEN sessions. Only the non-pooling direct URL works here.
+const MAX_WAIT_MS = 20_000; // 20 second long-poll window
 
 export async function GET(req: Request) {
-  const DATABASE_URL = getDbUrl();
-  if (!isDbUrlValid(DATABASE_URL)) {
+  // Return 204 silently if DB URL is not configured
+  // — avoids noisy errors during development
+  if (!isPostgresNonPoolingConfigured()) {
     return new Response(null, { status: 204 });
   }
   
   let client: Client | null = null;
+  
   try {
-    client = new Client({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } as any });
+    client = new Client({
+      connectionString: POSTGRES_URL_NON_POOLING,
+      ssl: { rejectUnauthorized: false } as any,
+    });
     await client.connect();
     await client.query('LISTEN realtime_changes');
   } catch (err) {
@@ -52,16 +48,18 @@ export async function GET(req: Request) {
     
     client!.on('notification', onNotification);
     
-    const to = setTimeout(() => {
+    // Resolve with null after MAX_WAIT_MS — client reconnects and tries again
+    const timeout = setTimeout(() => {
       if (finished) return;
       finished = true;
       resolve(null);
-    }, 20_000);
+    }, MAX_WAIT_MS);
     
+    // Client disconnected — resolve immediately
     req.signal.addEventListener('abort', () => {
       if (finished) return;
       finished = true;
-      clearTimeout(to);
+      clearTimeout(timeout);
       resolve(null);
     });
   });
@@ -69,7 +67,9 @@ export async function GET(req: Request) {
   try {
     client.removeAllListeners('notification');
     await client.end();
-  } catch {}
+  } catch {
+    // Ignore cleanup errors — connection may already be closed
+  }
   
   if (!payload) return new Response(null, { status: 204 });
   

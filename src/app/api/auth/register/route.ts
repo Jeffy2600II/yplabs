@@ -1,16 +1,19 @@
-// src/app/api/auth/register/route.ts
+// Path:    src/app/api/auth/register/route.ts
+// Purpose: Public registration endpoint — creates a join request pending admin approval.
+//          Does NOT create an auth account directly; admin approval does that.
+// Used by: register/page.tsx
+
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { synthesizeEmail } from '@/lib/auth';
 import { createLogger } from '@/lib/serverLogger';
+import { SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } from '@/lib/env';
 
 const logger = createLogger('api/auth/register');
 
-// Vercel Marketplace: SUPABASE_URL (server-side, no NEXT_PUBLIC_ prefix)
-const supabase = createClient(
-  process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY ?? ''
-);
+// Uses service role to insert into council_join_requests without RLS restriction.
+// This is intentional — registration is a public action.
+const supabase = createClient(SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 export async function POST(req: NextRequest) {
   logger.request('POST');
@@ -46,6 +49,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'กรุณาเลือกปีการศึกษา' }, { status: 400 });
       }
       
+      // Check for duplicate pending request
       const { data: existing, error: dupErr } = await supabase
         .from('council_join_requests')
         .select('id')
