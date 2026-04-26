@@ -1,16 +1,12 @@
 // Path:    src/app/page.tsx
 // Purpose: Home page — displays today's zone status and duty roster.
-//          Uses dataCore.useData() directly so both authenticated and public
-//          fetches share the same reactive cache and invalidation bus.
+//          Uses dataCore.useData() with rtTick double-trigger pattern,
+//          identical to admin pages for consistent realtime behavior.
 // Used by: AppShell (root layout)
-//
-// Error logging strategy:
-//   - Fetch errors  → remoteLog immediately (actionable, needs fixing)
-//   - Realtime gaps → NOT logged (useRealtime handles reconnect; gap is expected)
 
 'use client';
 
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
@@ -19,8 +15,8 @@ import { useRealtime } from '@/lib/realtimeHooks';
 import { remoteLog } from '@/lib/remoteLogger';
 
 // ── URL constants ─────────────────────────────────────────────────
-// Must match the invalidate() calls in zone-check/page.tsx and duty/page.tsx
-// so cross-page cache invalidation works correctly.
+// ★ ต้องตรงกับ URL ที่ใช้ใน zone-check/page.tsx และ duty/page.tsx
+// เพื่อให้ cross-page cache invalidation ทำงานได้ถูกต้อง
 
 const ZONES_URL = '/api/public/zones/today';
 const DUTY_URL  = '/api/public/duty/today';
@@ -47,22 +43,27 @@ type DutyEntry = {
 export default function HomePage() {
   const { user, isAdmin, isMember, loading: authLoading } = useAuth();
 
+  // ★ rtTick: double-trigger pattern — เหมือนกับ admin pages ทุกตัว
+  // invalidate() แจ้ง subscribers ให้ refetch
+  // setRtTick() บังคับ force-fetch ผ่าน realtimeTick option
+  const [zonesTick, setZonesTick] = useState(0);
+  const [dutyTick, setDutyTick] = useState(0);
+
   const {
     data: zonesRaw,
     loading: loadingZones,
     error: errorZones,
     refresh: refreshZones,
-  } = useData<ZoneSummary[]>(ZONES_URL);
+  } = useData<ZoneSummary[]>(ZONES_URL, { realtimeTick: zonesTick });
 
   const {
     data: duties,
     loading: loadingDuties,
     error: errorDuties,
     refresh: refreshDuties,
-  } = useData<DutyEntry[]>(DUTY_URL);
+  } = useData<DutyEntry[]>(DUTY_URL, { realtimeTick: dutyTick });
 
-  // Report fetch errors to the server log so we can diagnose them immediately.
-  // Realtime gaps are NOT logged here — useRealtime manages its own reconnect cycle.
+  // Report fetch errors to server log for immediate diagnosis
   useEffect(() => {
     if (errorZones) {
       void remoteLog('error', '[home] zones fetch failed', { error: errorZones, url: ZONES_URL });
@@ -75,16 +76,23 @@ export default function HomePage() {
     }
   }, [errorDuties]);
 
-  // Realtime: Supabase pushes a row-change event → invalidate the relevant URL
-  // so every component subscribed to it refetches in the background.
+  // ★ Realtime: double-trigger — invalidate + setTick ทั้งคู่
+  // เหมือนกับ admin/duty/page.tsx และ admin/requests/page.tsx
   useRealtime({
     table: 'council_zone_checks',
-    onData: useCallback(() => { invalidate(ZONES_URL); }, []),
+    onData: useCallback(() => {
+      invalidate(ZONES_URL);
+      setZonesTick(n => n + 1);
+    }, []),
     debounceMs: 500,
   });
+
   useRealtime({
     table: 'council_duty',
-    onData: useCallback(() => { invalidate(DUTY_URL); }, []),
+    onData: useCallback(() => {
+      invalidate(DUTY_URL);
+      setDutyTick(n => n + 1);
+    }, []),
     debounceMs: 500,
   });
 
@@ -123,7 +131,7 @@ export default function HomePage() {
             ระบบสภานักเรียน โรงเรียนคำยางพิทยา
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <Link href="/login"    className="btn btn-gold">🔑 เข้าสู่ระบบ</Link>
+            <Link href="/login" className="btn btn-gold">🔑 เข้าสู่ระบบ</Link>
             <Link href="/register" className="btn" style={{ background: 'rgba(255,255,255,.12)', color: '#fff', border: '1px solid rgba(255,255,255,.20)' }}>
               ลงทะเบียน
             </Link>
@@ -181,21 +189,17 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* ── Error banners with retry ──────────────────────────────── */}
+      {/* ── Error banners ─────────────────────────────────────────── */}
       {errorZones && (
         <div className="alert alert-error" style={{ marginBottom: 12 }}>
           โหลดข้อมูลเขตไม่สำเร็จ
-          <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>
-            ลองใหม่
-          </button>
+          <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
         </div>
       )}
       {errorDuties && (
         <div className="alert alert-error" style={{ marginBottom: 12 }}>
           โหลดข้อมูลเวรไม่สำเร็จ
-          <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>
-            ลองใหม่
-          </button>
+          <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
         </div>
       )}
 
@@ -223,9 +227,8 @@ export default function HomePage() {
               <div key={z.zone} className={`zone-tile ${z.status}`}>
                 <div className="zone-name">{z.zone}</div>
                 <div className="zone-status" style={{ marginTop: 5 }}>
-                  {z.status === 'clean'   ? '✅ สะอาด' :
-                   z.status === 'dirty'   ? '❌ ไม่สะอาด' :
-                                            '⏳ รอตรวจ'}
+                  {z.status === 'clean'  ? '✅ สะอาด' :
+                   z.status === 'dirty'  ? '❌ ไม่สะอาด' : '⏳ รอตรวจ'}
                 </div>
                 {z.inspector && (
                   <div style={{ fontSize: 10, color: 'var(--t3)', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

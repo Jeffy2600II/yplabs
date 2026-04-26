@@ -3,8 +3,7 @@
 
 /**
  * /admin/page.tsx — แผงแอดมิน
- * ─────────────────────────────────────────────────────────────────
- * ★ useAdminCache → instant stale stats (0ms perceived latency)
+ * ★ useAuthData → instant stale stats (0ms perceived latency)
  * ★ Parallel requests → all stats load simultaneously
  * ★ Realtime: auto-refresh เมื่อมีคำขอใหม่
  */
@@ -14,7 +13,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { useAdminCache, invalidateCache } from '@/lib/adminCache';
+import { useAuthData, invalidate } from '@/lib/dataCore';
 import { useRealtime } from '@/lib/realtimeHooks';
 
 type YearRow = { year: number;closed: boolean };
@@ -33,9 +32,9 @@ export default function AdminPage() {
   }, [authLoading, isAdmin, router]);
   
   // ★ Both fetched in parallel automatically (separate cache keys)
-  const { data: years } = useAdminCache < YearRow[] > (YEARS_URL, { enabled: isAdmin });
-  const { data: requests } = useAdminCache < RequestRow[] > (REQUESTS_URL, {
-    realtimeDep: rtTick,
+  const { data: years } = useAuthData < YearRow[] > (YEARS_URL, { enabled: isAdmin });
+  const { data: requests } = useAuthData < RequestRow[] > (REQUESTS_URL, {
+    realtimeTick: rtTick,
     enabled: isAdmin,
   });
   
@@ -43,20 +42,18 @@ export default function AdminPage() {
   useRealtime({
     table: 'council_join_requests',
     onData: useCallback(() => {
-      invalidateCache(REQUESTS_URL);
+      invalidate(REQUESTS_URL);
       setRtTick(n => n + 1);
     }, []),
     debounceMs: 300,
     enabled: isAdmin,
   });
   
-  // Compute stats
   const activeYear = years?.[0]?.year ?? null;
   const pending = requests?.length ?? 0;
   
-  // Users count — fetched only if we have a year
   const usersUrl = activeYear ? `/api/admin/users?year=${activeYear}` : null;
-  const { data: users } = useAdminCache < any[] > (usersUrl ?? '', {
+  const { data: users } = useAuthData < any[] > (usersUrl ?? '', {
     enabled: isAdmin && !!activeYear,
   });
   
@@ -87,10 +84,10 @@ export default function AdminPage() {
       {/* Stats */}
       <div className="grid-4" style={{ marginBottom: 20 }}>
         {[
-          { label: 'รอพิจารณา',  value: pending,           sub: 'คำขอสมัคร',         color: 'var(--red)',   highlight: pending > 0 },
-          { label: 'สมาชิก',      value: users?.length ?? null, sub: `ปี ${activeYear ?? '—'}`, color: 'var(--brand)' },
-          { label: 'ปีในระบบ',   value: years?.length ?? null, sub: 'เก็บสูงสุด 3 ปี',  color: 'var(--gold)' },
-          { label: 'ปีล่าสุด',   value: activeYear,        sub: 'ปีการศึกษาปัจจุบัน',  color: 'var(--green)' },
+          { label: 'รอพิจารณา', value: pending, sub: 'คำขอสมัคร', color: 'var(--red)', highlight: pending > 0 },
+          { label: 'สมาชิก', value: users?.length ?? null, sub: `ปี ${activeYear ?? '—'}`, color: 'var(--brand)' },
+          { label: 'ปีในระบบ', value: years?.length ?? null, sub: 'เก็บสูงสุด 3 ปี', color: 'var(--gold)' },
+          { label: 'ปีล่าสุด', value: activeYear, sub: 'ปีการศึกษาปัจจุบัน', color: 'var(--green)' },
         ].map((s, i) => (
           <div key={i} className="stat-card" style={{ borderTop: `3px solid ${s.color}` }}>
             <div className="stat-label">{s.label}</div>

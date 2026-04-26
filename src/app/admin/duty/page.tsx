@@ -3,13 +3,9 @@
 
 /**
  * /admin/duty/page.tsx — จัดการเวรยืนหน้าโรงเรียน
- * ─────────────────────────────────────────────────────────────────
- * แก้ไขปัญหา: เดิม invalidate แค่ admin URL
- * ทำให้หน้า public (duty page, home page) ไม่อัปเดต
  *
- * Fix: หลังทุก mutation ให้ invalidate ทั้งสอง URL:
- *   - ADMIN_DUTY_URL  — อัปเดต table ใน admin page นี้
- *   - PUBLIC_DUTY_URL — อัปเดต home page + duty page ฝั่ง user
+ * หลัง mutation ทุกครั้ง invalidate ทั้ง admin URL + public URL
+ * เพื่อให้หน้า home + duty ฝั่ง user อัปเดตด้วย
  */
 
 import { useState, useCallback, useEffect } from 'react';
@@ -17,20 +13,17 @@ import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import { useRealtime } from '@/lib/realtimeHooks';
-import { useAdminCache } from '@/lib/adminCache';
-import { invalidate } from '@/lib/cache';
+import { useAuthData, invalidate } from '@/lib/dataCore';
 import { getFreshToken } from '@/lib/sessionUtils';
 import { getTodayTH } from '@/lib/clientDateUtils';
 
 // ── URL Constants ─────────────────────────────────────────────────
 
-/** URL ของ admin API (ใช้ใน admin page นี้) */
 function adminDutyUrl(date: string) {
   return `/api/admin/duty?date=${date}`;
 }
 
-/** URL สาธารณะ — ใช้ใน home page + duty page ฝั่ง user
- *  ต้อง invalidate URL นี้ด้วยทุกครั้งที่มี mutation */
+// ★ ต้อง invalidate URL นี้ด้วยทุกครั้งที่มี mutation เพื่อให้หน้า public อัปเดต
 const PUBLIC_DUTY_URL = '/api/public/duty/today';
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -76,12 +69,14 @@ export default function AdminDutyPage() {
 
   const dutyUrl = adminDutyUrl(selectedDate);
 
-  const { data: duties, loading } = useAdminCache<DutyEntry[]>(dutyUrl, {
-    realtimeDep: rtTick,
+  // ★ useAuthData แทน useAdminCache — ใช้ dataCore โดยตรง
+  const { data: duties, loading } = useAuthData<DutyEntry[]>(dutyUrl, {
+    realtimeTick: rtTick,
     enabled: isAdmin,
   });
   const dutyList = duties ?? [];
 
+  // ★ Double-trigger: invalidate + setRtTick ทั้งคู่ เหมือน pattern ใน admin pages อื่นๆ
   useRealtime({
     table: 'council_duty',
     onData: useCallback(() => {
@@ -114,7 +109,7 @@ export default function AdminDutyPage() {
     if (users.length === 0) void loadUsers();
   }
 
-  // ── Mutations — ทุก mutation invalidate ทั้ง admin + public URL ──
+  // ── Mutations ──────────────────────────────────────────────────
 
   async function addDuty(user: UserRow) {
     setActionId(`add-${user.auth_uid}`);
@@ -135,7 +130,6 @@ export default function AdminDutyPage() {
       if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
 
       setSuccess(`เพิ่ม ${user.full_name} เข้าเวรแล้ว ✅`);
-      // ★ invalidate ทั้ง admin URL + public URL
       invalidate(dutyUrl, PUBLIC_DUTY_URL);
       setRtTick(n => n + 1);
       setShowAddModal(false);
@@ -159,7 +153,6 @@ export default function AdminDutyPage() {
       if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
 
       setSuccess(`ลบ ${name} ออกแล้ว`);
-      // ★ invalidate ทั้ง admin URL + public URL
       invalidate(dutyUrl, PUBLIC_DUTY_URL);
       setRtTick(n => n + 1);
     } catch (e: any) {
@@ -182,7 +175,6 @@ export default function AdminDutyPage() {
       if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
 
       setSuccess(`✅ เช็คอิน ${name} สำเร็จ`);
-      // ★ invalidate ทั้ง admin URL + public URL
       invalidate(dutyUrl, PUBLIC_DUTY_URL);
       setRtTick(n => n + 1);
     } catch (e: any) {
@@ -205,7 +197,6 @@ export default function AdminDutyPage() {
       if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
 
       setSuccess(`ยกเลิกเช็คอิน ${name}`);
-      // ★ invalidate ทั้ง admin URL + public URL
       invalidate(dutyUrl, PUBLIC_DUTY_URL);
       setRtTick(n => n + 1);
     } catch (e: any) {
@@ -232,7 +223,7 @@ export default function AdminDutyPage() {
   );
   if (!isAdmin) return null;
 
-  // ── Render ──────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────
 
   return (
     <AppShell pageTitle="จัดการเวร">
@@ -257,7 +248,6 @@ export default function AdminDutyPage() {
             value={selectedDate}
             onChange={e => {
               setSelectedDate(e.target.value);
-              // invalidate URL เก่าก่อน (URL จะเปลี่ยนตาม selectedDate)
               invalidate(adminDutyUrl(e.target.value));
             }}
             style={{ width: 'auto' }}
@@ -278,33 +268,21 @@ export default function AdminDutyPage() {
       {error && (
         <div className="alert alert-error" style={{ marginBottom: 12 }}>
           {error}
-          <button
-            onClick={() => setError(null)}
-            style={{ marginLeft: 8, fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}
-          >×</button>
+          <button onClick={() => setError(null)} style={{ marginLeft: 8, fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>×</button>
         </div>
       )}
       {success && (
         <div className="alert alert-success" style={{ marginBottom: 12 }}>
           {success}
-          <button
-            onClick={() => setSuccess(null)}
-            style={{ marginLeft: 8, fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}
-          >×</button>
+          <button onClick={() => setSuccess(null)} style={{ marginLeft: 8, fontWeight: 700, background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>×</button>
         </div>
       )}
 
       {/* Duty list */}
       <div className="table-wrap">
-        <div style={{
-          padding: '11px 14px', background: 'var(--s2)',
-          borderBottom: '1px solid var(--b)',
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        }}>
+        <div style={{ padding: '11px 14px', background: 'var(--s2)', borderBottom: '1px solid var(--b)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontWeight: 700, fontSize: 13 }}>
-            รายชื่อเวร — {new Date(selectedDate + 'T00:00:00').toLocaleDateString('th-TH', {
-              weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-            })}
+            รายชื่อเวร — {new Date(selectedDate + 'T00:00:00').toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
           </span>
           <span className="badge badge-blue">{dutyList.length} คน</span>
         </div>
@@ -315,21 +293,12 @@ export default function AdminDutyPage() {
           <div className="empty-state">
             <div className="empty-icon">📋</div>
             <div>ยังไม่มีรายชื่อเวรสำหรับวันที่นี้</div>
-            <button onClick={openAddModal} className="btn btn-primary btn-sm" style={{ marginTop: 10 }}>
-              ＋ เพิ่มรายชื่อ
-            </button>
+            <button onClick={openAddModal} className="btn btn-primary btn-sm" style={{ marginTop: 10 }}>＋ เพิ่มรายชื่อ</button>
           </div>
         ) : (
           <table>
             <thead>
-              <tr>
-                <th>#</th>
-                <th>ชื่อ</th>
-                <th>รหัส</th>
-                <th>สถานะ</th>
-                <th>เวลา</th>
-                <th>Action</th>
-              </tr>
+              <tr><th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>Action</th></tr>
             </thead>
             <tbody>
               {dutyList.map((d, i) => (
@@ -350,27 +319,15 @@ export default function AdminDutyPage() {
                   <td>
                     <div style={{ display: 'flex', gap: 5 }}>
                       {d.checked_in ? (
-                        <button
-                          disabled={actionId !== null}
-                          onClick={() => adminUncheckin(d.id, d.student_name)}
-                          className="btn btn-ghost btn-sm"
-                        >
+                        <button disabled={actionId !== null} onClick={() => adminUncheckin(d.id, d.student_name)} className="btn btn-ghost btn-sm">
                           {actionId === `unci-${d.id}` ? '...' : 'ยกเลิก'}
                         </button>
                       ) : (
-                        <button
-                          disabled={actionId !== null}
-                          onClick={() => adminCheckin(d.id, d.student_name)}
-                          className="btn btn-success btn-sm"
-                        >
+                        <button disabled={actionId !== null} onClick={() => adminCheckin(d.id, d.student_name)} className="btn btn-success btn-sm">
                           {actionId === `ci-${d.id}` ? '...' : '✅ เช็คอิน'}
                         </button>
                       )}
-                      <button
-                        disabled={actionId !== null}
-                        onClick={() => removeDuty(d.id, d.student_name)}
-                        className="btn btn-danger btn-sm"
-                      >
+                      <button disabled={actionId !== null} onClick={() => removeDuty(d.id, d.student_name)} className="btn btn-danger btn-sm">
                         {actionId === d.id ? '...' : 'ลบ'}
                       </button>
                     </div>
@@ -386,72 +343,38 @@ export default function AdminDutyPage() {
       {showAddModal && (
         <div
           onClick={e => { if (e.target === e.currentTarget) setShowAddModal(false); }}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-            zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-          }}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
         >
-          <div style={{
-            background: 'var(--surface)', borderRadius: 'var(--r-xl)',
-            padding: 24, width: '100%', maxWidth: 480,
-            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-            maxHeight: '80vh', display: 'flex', flexDirection: 'column',
-          }}>
+          <div style={{ background: 'var(--surface)', borderRadius: 'var(--r-xl)', padding: 24, width: '100%', maxWidth: 480, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
               <div style={{ fontWeight: 800, fontSize: 16 }}>เพิ่มรายชื่อเวร</div>
-              <button
-                onClick={() => setShowAddModal(false)}
-                style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: 'var(--t3)' }}
-              >×</button>
+              <button onClick={() => setShowAddModal(false)} style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: 'var(--t3)' }}>×</button>
             </div>
             <div style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 12 }}>
-              วันที่: {new Date(selectedDate + 'T00:00:00').toLocaleDateString('th-TH', {
-                weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
-              })}
+              วันที่: {new Date(selectedDate + 'T00:00:00').toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
             </div>
             <div className="form-group" style={{ marginBottom: 12 }}>
-              <input
-                value={userSearch}
-                onChange={e => setUserSearch(e.target.value)}
-                placeholder="ค้นหาชื่อหรือรหัสนักเรียน..."
-                autoFocus
-              />
+              <input value={userSearch} onChange={e => setUserSearch(e.target.value)} placeholder="ค้นหาชื่อหรือรหัสนักเรียน..." autoFocus />
             </div>
             <div style={{ flex: 1, overflowY: 'auto' }}>
               {usersLoading ? (
                 <div className="loading-center"><div className="spinner" /></div>
               ) : filteredUsers.length === 0 ? (
-                <div className="empty-state" style={{ padding: '20px 0' }}>
-                  <div>ไม่พบสมาชิก</div>
-                </div>
+                <div className="empty-state" style={{ padding: '20px 0' }}><div>ไม่พบสมาชิก</div></div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {filteredUsers.slice(0, 30).map(u => {
                     const already = inDuty.has(u.auth_uid);
                     return (
-                      <div
-                        key={u.auth_uid}
-                        style={{
-                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                          padding: '10px 12px', borderRadius: 'var(--r-lg)',
-                          background: already ? 'var(--green-bg)' : 'var(--s2)',
-                          border: `1px solid ${already ? '#86efac' : 'var(--b)'}`,
-                        }}
-                      >
+                      <div key={u.auth_uid} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderRadius: 'var(--r-lg)', background: already ? 'var(--green-bg)' : 'var(--s2)', border: `1px solid ${already ? '#86efac' : 'var(--b)'}` }}>
                         <div>
                           <div style={{ fontWeight: 600, fontSize: 13 }}>{u.full_name}</div>
-                          <div style={{ fontSize: 11.5, color: 'var(--t3)' }}>
-                            {u.student_id ?? 'ไม่มีรหัส'} · ปี {u.year}
-                          </div>
+                          <div style={{ fontSize: 11.5, color: 'var(--t3)' }}>{u.student_id ?? 'ไม่มีรหัส'} · ปี {u.year}</div>
                         </div>
                         {already ? (
                           <span className="badge badge-green" style={{ fontSize: 11 }}>✓ อยู่แล้ว</span>
                         ) : (
-                          <button
-                            onClick={() => addDuty(u)}
-                            disabled={actionId !== null}
-                            className="btn btn-primary btn-sm"
-                          >
+                          <button onClick={() => addDuty(u)} disabled={actionId !== null} className="btn btn-primary btn-sm">
                             {actionId === `add-${u.auth_uid}` ? '...' : 'เพิ่ม'}
                           </button>
                         )}

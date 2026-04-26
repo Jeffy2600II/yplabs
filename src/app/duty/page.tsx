@@ -1,13 +1,7 @@
 // Path:    src/app/duty/page.tsx
 // Purpose: Duty roster page — shows today's duty list and allows member check-in.
-//          Reads from dataCore.useData() so it shares the reactive cache with the
-//          home page: when a check-in happens here, the home page updates too.
-// Used by: AppShell nav, home page "ดูรายละเอียด →" link
-//
-// Error logging strategy:
-//   - Fetch errors  → remoteLog immediately (needs investigation)
-//   - Check-in API errors → remoteLog + show inline alert to the user
-//   - Realtime reconnect → NOT logged (expected background noise)
+//          Uses rtTick double-trigger pattern identical to admin pages.
+//          Cross-page cache: invalidating DUTY_URL ที่นี่จะอัปเดต home page ด้วย
 
 'use client';
 
@@ -20,7 +14,7 @@ import { useRealtime } from '@/lib/realtimeHooks';
 import { useData, invalidate } from '@/lib/dataCore';
 import { remoteLog } from '@/lib/remoteLogger';
 
-// Shared URL key — must match home page so cross-page invalidation works
+// ★ Shared URL key — ต้องตรงกับ home page เพื่อให้ cross-page invalidation ทำงาน
 const DUTY_URL = '/api/public/duty/today';
 
 type DutyEntry = {
@@ -36,27 +30,34 @@ type DutyEntry = {
 export default function DutyPage() {
   const { user, isMember, loading: authLoading } = useAuth();
 
-  const { data: duties, loading, error: fetchError, refresh } = useData<DutyEntry[]>(DUTY_URL);
+  // ★ rtTick double-trigger — เหมือน admin pages ทุกตัว
+  const [dutyTick, setDutyTick] = useState(0);
+
+  const { data: duties, loading, error: fetchError, refresh } = useData<DutyEntry[]>(DUTY_URL, {
+    realtimeTick: dutyTick,
+  });
   const dutyList = duties ?? [];
 
-  // Log fetch errors immediately so they appear in Vercel function logs
   useEffect(() => {
     if (fetchError) {
       void remoteLog('error', '[duty] fetch failed', { error: fetchError, url: DUTY_URL });
     }
   }, [fetchError]);
 
-  // Realtime: push invalidation when any duty row changes
+  // ★ Double-trigger: invalidate + setDutyTick ทั้งคู่ เหมือน admin/duty/page.tsx
   useRealtime({
     table: 'council_duty',
-    onData: useCallback(() => { invalidate(DUTY_URL); }, []),
+    onData: useCallback(() => {
+      invalidate(DUTY_URL);
+      setDutyTick(n => n + 1);
+    }, []),
     debounceMs: 500,
   });
 
-  const [note, setNote]           = useState('');
-  const [checkingIn, setCheckingIn] = useState(false);
+  const [note, setNote]               = useState('');
+  const [checkingIn, setCheckingIn]   = useState(false);
   const [checkInError, setCheckInError] = useState<string | null>(null);
-  const [success, setSuccess]     = useState<string | null>(null);
+  const [success, setSuccess]         = useState<string | null>(null);
 
   const myEntry      = user ? dutyList.find(d => d.auth_uid === user.auth_uid) : null;
   const checkedCount = dutyList.filter(d => d.checked_in).length;
@@ -80,8 +81,9 @@ export default function DutyPage() {
 
       setSuccess(`เช็คอินสำเร็จแล้ว ✅${json.is_walkin ? ' (Walk-in)' : ''}`);
       setNote('');
-      // Invalidate shared URL → home page and this page both get fresh data
+      // ★ Double-trigger หลัง mutation — เหมือน admin mutations
       invalidate(DUTY_URL);
+      setDutyTick(n => n + 1);
     } catch (err: any) {
       const msg = err?.message ?? 'เกิดข้อผิดพลาด';
       setCheckInError(msg);
@@ -132,13 +134,11 @@ export default function DutyPage() {
       {fetchError && (
         <div className="alert alert-error" style={{ marginBottom: 14 }}>
           โหลดข้อมูลไม่สำเร็จ
-          <button onClick={refresh} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>
-            ลองใหม่
-          </button>
+          <button onClick={refresh} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
         </div>
       )}
 
-      {/* Check-in card — only shown if member hasn't checked in yet */}
+      {/* Check-in card */}
       {isMember && !myEntry?.checked_in && !authLoading && (
         <div className="card" style={{ borderLeft: '4px solid var(--brand)', marginBottom: 16 }}>
           {myEntry ? (
@@ -209,9 +209,7 @@ export default function DutyPage() {
         ) : (
           <table>
             <thead>
-              <tr>
-                <th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>หมายเหตุ</th>
-              </tr>
+              <tr><th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>หมายเหตุ</th></tr>
             </thead>
             <tbody>
               {dutyList.map((d, i) => (

@@ -1,12 +1,11 @@
 'use client';
 
 /* src/app/admin/zones/page.tsx
-   Admin zones page — more defensive: call refresh when records missing and on server events,
-   show error UI and retry button.
+   Admin zones page — uses dataCore + useServerEvents for reliable realtime.
 */
 
 import { useServerEvents } from '@/lib/useServerEvents';
-import { useAdminCache, invalidateCache } from '@/lib/adminCache';
+import { useAuthData, invalidate } from '@/lib/dataCore';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
@@ -48,12 +47,11 @@ export default function AdminZonesPage() {
 
   if (!authLoading && !isAdmin) { router.replace('/'); return null; }
 
-  const { data: records, loading, refresh } = useAdminCache<ZoneRecord[]>(zonesUrl, {
-    realtimeDep: rtTick,
+  const { data: records, loading, refresh } = useAuthData<ZoneRecord[]>(zonesUrl, {
+    realtimeTick: rtTick,
     enabled: isAdmin,
   });
 
-  // Ensure initial refresh if records missing (defensive)
   useEffect(() => {
     if (!isAdmin) return;
     if (!records) {
@@ -62,7 +60,6 @@ export default function AdminZonesPage() {
           setFetchError(null);
           await refresh();
         } catch (err: any) {
-          console.error('[admin/zones] initial refresh error', err);
           setFetchError(String(err?.message ?? err));
         }
       })();
@@ -70,18 +67,14 @@ export default function AdminZonesPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
-  // Subscribe to events -> invalidate and refresh
   useServerEvents((message) => {
     try {
       const table = message?.table;
       if (table === 'council_zone_checks') {
-        invalidateCache(zonesUrl);
-        // bump tick to make sure useAdminCache notices
+        invalidate(zonesUrl);
         setRtTick(n => n + 1);
-        // try to refresh immediately (best-effort)
         void (async () => {
           try { setFetchError(null); await refresh(); } catch (err: any) {
-            console.warn('[admin/zones] refresh after event failed', err);
             setFetchError(String(err?.message ?? err));
           }
         })();
@@ -121,7 +114,7 @@ export default function AdminZonesPage() {
       </div>
 
       {fetchError && (
-        <div className="alert alert-danger" style={{ marginBottom: 12 }}>
+        <div className="alert alert-error" style={{ marginBottom: 12 }}>
           <div>ไม่สามารถโหลดข้อมูล: {fetchError}</div>
           <div style={{ marginTop: 8 }}>
             <button className="btn btn-ghost btn-sm" onClick={() => void refresh()}>ลองใหม่</button>
@@ -129,7 +122,6 @@ export default function AdminZonesPage() {
         </div>
       )}
 
-      {/* Filters + Stats + Table (UI unchanged) */}
       <div className="card" style={{ marginBottom: 18, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div className="form-group">
           <label className="form-label">จากวันที่</label>
@@ -202,7 +194,8 @@ export default function AdminZonesPage() {
               {filtered.map(r => (
                 <tr key={r.id}>
                   <td style={{ fontSize: 12.5, color: 'var(--t3)', whiteSpace: 'nowrap' }}>
-                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })} <span style={{ fontSize: 11 }}>{new Date(r.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</span>
+                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}{' '}
+                    <span style={{ fontSize: 11 }}>{new Date(r.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</span>
                   </td>
                   <td style={{ fontWeight: 600 }}>{r.zone}</td>
                   <td>{r.status === 'clean' ? <span className="badge badge-green">✅ สะอาด</span> : <span className="badge badge-red">❌ ไม่สะอาด</span>}</td>
@@ -219,7 +212,7 @@ export default function AdminZonesPage() {
       {photoModal && (
         <div onClick={() => setPhotoModal(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)', zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
           <div onClick={e => e.stopPropagation()} style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }}>
-            <button onClick={() => setPhotoModal(null)} aria-label="close" style={{ position: 'absolute', top: -14, right: -14, zIndex: 1, background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>×</button>
+            <button onClick={() => setPhotoModal(null)} style={{ position: 'absolute', top: -14, right: -14, zIndex: 1, background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>×</button>
             <img src={photoModal} alt="zone check photo" style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain', display: 'block' }} />
             <a href={photoModal} target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm" style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.06)' }}>เปิดใน Google Drive ↗</a>
           </div>

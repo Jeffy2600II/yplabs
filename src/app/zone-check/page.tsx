@@ -1,14 +1,7 @@
 // Path:    src/app/zone-check/page.tsx
 // Purpose: Zone inspection page — members record each zone's cleanliness.
-//          Reads server state from dataCore so locked (already-saved) zones
-//          reflect the DB in real time. Invalidates the shared ZONES_URL after
-//          each successful submission so the home page updates immediately.
-// Used by: AppShell nav, home page "ตรวจเขตสะอาด →" link
-//
-// Error logging strategy:
-//   - Server state fetch error  → remoteLog immediately
-//   - Submission error per zone → remoteLog immediately + inline alert
-//   - Realtime reconnect gaps   → NOT logged (expected; useRealtime handles it)
+//          Uses rtTick double-trigger pattern identical to admin pages.
+//          Invalidating ZONES_URL ที่นี่จะอัปเดต home page ด้วย
 
 'use client';
 
@@ -22,7 +15,7 @@ import { remoteLog } from '@/lib/remoteLogger';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
 
-// Shared URL key — must match home page so cross-page invalidation works
+// ★ Shared URL key — ต้องตรงกับ home page เพื่อให้ cross-page invalidation ทำงาน
 const ZONES_URL = '/api/public/zones/today';
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -66,10 +59,18 @@ function initLocal(): Record<string, LocalZone> {
 export default function ZoneCheckPage() {
   const { isMember, user, loading: authLoading } = useAuth();
 
-  const { data: serverZones, loading: serverLoading, error: fetchError } =
-    useData<ServerZone[]>(ZONES_URL, { enabled: !authLoading });
+  // ★ rtTick double-trigger — เหมือน admin pages ทุกตัว
+  // ไม่ใช้ useRealtime ที่นี่เพราะ zone-check เป็นหน้า write-only
+  // (เขียนผลแล้วก็เสร็จ ไม่ต้องรับ push จากคนอื่น)
+  // แต่หลัง submit จะ invalidate + tick เพื่อให้ server state refresh
+  const [zonesTick, setZonesTick] = useState(0);
 
-  // Report fetch errors so they show up in Vercel logs immediately
+  const { data: serverZones, loading: serverLoading, error: fetchError } =
+    useData<ServerZone[]>(ZONES_URL, {
+      enabled: !authLoading,
+      realtimeTick: zonesTick,
+    });
+
   useEffect(() => {
     if (fetchError) {
       void remoteLog('error', '[zone-check] server state fetch failed', {
@@ -85,8 +86,8 @@ export default function ZoneCheckPage() {
   const [submitProgress, setSubmitProgress] = useState<{
     zone: string; done: number; total: number;
   } | null>(null);
-  const [done, setDone]     = useState(false);
-  const [error, setError]   = useState<string | null>(null);
+  const [done, setDone]   = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Derived: merge server (locked) + local (editable)
   const zones: ZoneView[] = useMemo(() => {
@@ -168,14 +169,16 @@ export default function ZoneCheckPage() {
         if (local[zone].preview) URL.revokeObjectURL(local[zone].preview!);
       }
 
-      // Invalidate shared URL → home page gets fresh zone data immediately
+      // ★ Double-trigger หลัง submit สำเร็จ — home page จะได้รับข้อมูลใหม่ทันที
       invalidate(ZONES_URL);
+      setZonesTick(n => n + 1);
       setDone(true);
 
     } catch (err: any) {
       setError(err?.message ?? 'เกิดข้อผิดพลาด');
-      // Even on partial failure, invalidate so successfully-saved zones show up
+      // แม้จะ fail บางส่วน ก็ invalidate เพื่อให้เขตที่บันทึกแล้วแสดงผล
       invalidate(ZONES_URL);
+      setZonesTick(n => n + 1);
     } finally {
       setSubmitting(false);
       setSubmitProgress(null);
@@ -233,14 +236,12 @@ export default function ZoneCheckPage() {
         </div>
       ) : (
         <>
-          {/* Fetch error */}
           {fetchError && (
             <div className="alert alert-error" style={{ marginBottom: 14 }}>
               โหลดผลตรวจไม่สำเร็จ — ข้อมูลที่แสดงอาจไม่ตรงกับความเป็นจริง
             </div>
           )}
 
-          {/* First-load skeleton */}
           {isFirstLoad && (
             <div className="card" style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
               <div className="spinner" />
@@ -250,7 +251,6 @@ export default function ZoneCheckPage() {
 
           {!isFirstLoad && (
             <>
-              {/* Stats */}
               <div className="grid-4" style={{ marginBottom: 16 }}>
                 <div className="stat-card" style={{ borderTop: '3px solid var(--brand)' }}>
                   <div className="stat-label">ตรวจแล้ว</div>
@@ -281,7 +281,6 @@ export default function ZoneCheckPage() {
                 </div>
               )}
 
-              {/* Progress bar */}
               <div className="card" style={{ marginBottom: 14, padding: '14px 18px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
                   <span style={{ fontWeight: 700 }}>ความคืบหน้าวันนี้</span>
@@ -303,8 +302,8 @@ export default function ZoneCheckPage() {
           {/* Zone cards */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
             {zones.map(({ zone, status, note, file, preview, saved, savedBy, savedAt }) => {
-              const isOpen       = expanded === zone;
-              const borderColor  =
+              const isOpen      = expanded === zone;
+              const borderColor =
                 status === 'clean' ? (saved ? '#4ADE80' : '#86EFAC') :
                 status === 'dirty' ? (saved ? '#F87171' : '#FCA5A5') : 'var(--border)';
               const bgColor =
@@ -456,9 +455,9 @@ export default function ZoneCheckPage() {
               disabled={submitting || newPending === 0}
               className="btn btn-primary btn-full btn-lg"
             >
-              {submitting          ? '🔄 กำลังบันทึก...' :
+              {submitting             ? '🔄 กำลังบันทึก...' :
                newPending === 0 && savedCount === ZONES.length ? '✅ บันทึกครบทุกเขตแล้ว' :
-               newPending === 0   ? '📋 เลือกสถานะเขตที่ต้องการบันทึก' :
+               newPending === 0      ? '📋 เลือกสถานะเขตที่ต้องการบันทึก' :
                `📤 บันทึกผลตรวจ ${newPending} เขต`}
             </button>
           )}

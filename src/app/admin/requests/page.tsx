@@ -2,7 +2,7 @@
 
 /**
  * /admin/requests/page.tsx — คำขอสมัครสมาชิก
- * ★ useAdminCache → instant stale data, 0ms perceived latency
+ * ★ useAuthData → instant stale data, 0ms perceived latency
  * ★ Realtime debounced → auto-refresh เมื่อมีคำขอใหม่
  */
 
@@ -10,9 +10,8 @@ import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import Link from 'next/link';
 import { useRealtime } from '@/lib/realtimeHooks';
-import { useAdminCache, invalidateCache } from '@/lib/adminCache';
+import { useAuthData, invalidate } from '@/lib/dataCore';
 import { getFreshToken } from '@/lib/sessionUtils';
 
 const REQUESTS_URL = '/api/admin/requests';
@@ -34,17 +33,15 @@ export default function AdminRequestsPage() {
   const [rtTick, setRtTick] = useState(0);
   const [actionId, setActionId] = useState < string | null > (null);
   
-  // ★ Instant stale data + background refresh
-  const { data: requests, loading, refresh } = useAdminCache < RequestRow[] > (REQUESTS_URL, {
-    realtimeDep: rtTick,
+  const { data: requests, loading, refresh } = useAuthData < RequestRow[] > (REQUESTS_URL, {
+    realtimeTick: rtTick,
     enabled: isAdmin,
   });
   
-  // ★ Auto-refresh เมื่อมีคำขอใหม่
   useRealtime({
     table: 'council_join_requests',
     onData: useCallback(() => {
-      invalidateCache(REQUESTS_URL);
+      invalidate(REQUESTS_URL);
       setRtTick(n => n + 1);
     }, []),
     debounceMs: 300,
@@ -67,7 +64,7 @@ export default function AdminRequestsPage() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      invalidateCache(REQUESTS_URL);
+      invalidate(REQUESTS_URL);
       setRtTick(n => n + 1);
     } catch (e: any) { alert(e?.message ?? 'อนุมัติล้มเหลว'); }
     finally { setActionId(null); }
@@ -84,7 +81,7 @@ export default function AdminRequestsPage() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      invalidateCache(REQUESTS_URL);
+      invalidate(REQUESTS_URL);
       setRtTick(n => n + 1);
     } catch (e: any) { alert(e?.message ?? 'ล้มเหลว'); }
     finally { setActionId(null); }
@@ -112,7 +109,6 @@ export default function AdminRequestsPage() {
         </div>
       </div>
 
-      {/* Show stale skeleton if loading first time */}
       {loading && reqList.length === 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {[1, 2, 3].map(i => (
@@ -133,9 +129,7 @@ export default function AdminRequestsPage() {
                 <div style={{ flex: 1, minWidth: 200 }}>
                   <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>{r.full_name}</div>
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
-                    {r.student_id && (
-                      <span style={{ fontSize: 13, color: 'var(--t3)' }}>🎓 รหัส: <strong style={{ color: 'var(--t)' }}>{r.student_id}</strong></span>
-                    )}
+                    {r.student_id && <span style={{ fontSize: 13, color: 'var(--t3)' }}>🎓 รหัส: <strong style={{ color: 'var(--t)' }}>{r.student_id}</strong></span>}
                     {r.email && <span style={{ fontSize: 13, color: 'var(--t3)' }}>📧 {r.email}</span>}
                     {r.year && <span style={{ fontSize: 13, color: 'var(--t3)' }}>📅 ปี {r.year}</span>}
                     <span className="badge badge-blue">{r.account_type ?? 'student'}</span>
