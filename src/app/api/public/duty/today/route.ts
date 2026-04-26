@@ -2,6 +2,15 @@
 // Purpose: Public endpoint — returns today's duty roster with check-in status.
 //          No authentication required; used by home page and duty page.
 // Used by: src/app/page.tsx, src/app/duty/page.tsx
+//
+// WHY force-dynamic:
+//   Without this, Next.js 14 App Router caches GET handlers at the Vercel edge.
+//   A single cached response gets served to ALL users worldwide until redeployment.
+//   Admin routes avoid this bug because their Authorization header makes Vercel
+//   treat each request as unique. Public routes must opt out of caching explicitly.
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -22,10 +31,16 @@ export async function GET() {
   if (error) {
     console.error('[api/public/duty/today] Supabase error:', error.message);
     // Return empty array instead of error — degraded but functional
-    return NextResponse.json([], { status: 200 });
+    return NextResponse.json([], {
+      status: 200,
+      headers: { 'Cache-Control': 'no-store' },
+    });
   }
   
   return NextResponse.json(data ?? [], {
-    headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' },
+    headers: {
+      // no-store: never cache at the CDN or browser layer — data changes throughout the day
+      'Cache-Control': 'no-store',
+    },
   });
 }

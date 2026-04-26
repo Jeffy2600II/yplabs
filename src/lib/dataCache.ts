@@ -1,21 +1,17 @@
-/* src/lib/dataCache.ts */
-/**
- * dataCache.ts — Compatibility re-export
- * ─────────────────────────────────────────────────────────────────
- * ไฟล์นี้มีไว้เพื่อ backward compatibility เท่านั้น
- * ระบบจริงอยู่ที่ src/lib/cache.ts
- *
- * ห้ามเขียนโค้ดใหม่ลงในไฟล์นี้ — ให้ import จาก cache.ts โดยตรง
- */
+// Path:    src/lib/dataCache.ts
+// Purpose: Backward-compatibility shim — re-exports from dataCore.ts
+//          All new code should import from dataCore.ts directly.
+// Used by: legacy imports only
 
 export {
-  useQuery,
-  useQuery as useApiCache,
+  useData,
+  useData as useQuery,
+  useData as useApiCache,
   invalidate,
   invalidate as invalidateCache,
-  invalidateAll,
+  invalidate as invalidateAll,
   invalidateCachePrefix,
   prefetch,
-} from './cache';
+} from './dataCore';
 
-export type { QueryOptions, QueryResult } from './cache';
+export type { DataOptions, DataResult, QueryOptions, QueryResult } from './dataCore';

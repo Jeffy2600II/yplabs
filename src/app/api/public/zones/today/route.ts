@@ -14,7 +14,6 @@ import { SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } from '@/lib/env';
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
 
 export async function GET() {
-  // Validate server config before attempting DB connection
   if (!SERVER_SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     return new Response(
       JSON.stringify({ error: 'Server not configured — missing Supabase env vars.' }),
@@ -22,7 +21,6 @@ export async function GET() {
     );
   }
 
-  // Service role bypasses RLS — appropriate for server-to-server public read
   const sb = createClient(SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
@@ -30,7 +28,6 @@ export async function GET() {
   try {
     const today = getTodayTH();
 
-    // Fetch all records for today, descending by created_at so first match = latest
     const { data, error } = await sb
       .from('council_zone_checks')
       .select('zone, status, inspector_name, note, created_at, check_date')
@@ -52,7 +49,6 @@ export async function GET() {
       if (!latestPerZone[r.zone]) latestPerZone[r.zone] = r;
     });
 
-    // Return all zones with their current status (pending if not yet checked)
     const result = ZONES.map(z => ({
       zone: z,
       status: latestPerZone[z]?.status ?? 'pending',
@@ -66,8 +62,8 @@ export async function GET() {
       status: 200,
       headers: {
         'Content-Type': 'application/json',
-        // No caching — zone status changes throughout the day
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        // no-store: zone status changes continuously throughout the day
+        'Cache-Control': 'no-store',
       },
     });
 
