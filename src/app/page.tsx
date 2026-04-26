@@ -1,30 +1,28 @@
-/* src/app/page.tsx */
+// Path:    src/app/page.tsx
+// Purpose: Home page — displays today's zone status and duty roster.
+//          Uses dataCore.useData() directly so both authenticated and public
+//          fetches share the same reactive cache and invalidation bus.
+// Used by: AppShell (root layout)
+//
+// Error logging strategy:
+//   - Fetch errors  → remoteLog immediately (actionable, needs fixing)
+//   - Realtime gaps → NOT logged (useRealtime handles reconnect; gap is expected)
+
 'use client';
 
-/**
- * หน้าแรก (Home)
- * ─────────────────────────────────────────────────────────────────
- * ★ Fix: ใช้ useQuery() จาก cache.ts แทน manual fetch + useState
- *   → ข้อมูลอัปเดตทันทีเมื่อ invalidate() ถูกเรียกจากหน้าอื่น
- *   → visibilitychange handler ใน cache.ts รีเฟรชข้อมูลเมื่อกลับมาที่ tab
- *   → Supabase Realtime เป็น bonus signal ไม่ใช่เงื่อนไขหลัก
- *
- * Data flow:
- *   useQuery(ZONES_URL) ← invalidate() จาก zone-check/page.tsx
- *   useQuery(DUTY_URL)  ← invalidate() จาก duty/page.tsx + admin/duty/page.tsx
- */
-
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
-import { useQuery, invalidate } from '@/lib/cache';
+import { useData, invalidate } from '@/lib/dataCore';
 import { useRealtime } from '@/lib/realtimeHooks';
+import { remoteLog } from '@/lib/remoteLogger';
 
 // ── URL constants ─────────────────────────────────────────────────
-/** ต้องตรงกับที่ใช้ใน zone-check/page.tsx เพื่อให้ invalidate() ทำงานข้ามหน้า */
+// Must match the invalidate() calls in zone-check/page.tsx and duty/page.tsx
+// so cross-page cache invalidation works correctly.
+
 const ZONES_URL = '/api/public/zones/today';
-/** ต้องตรงกับที่ใช้ใน duty/page.tsx และ admin/duty/page.tsx */
 const DUTY_URL  = '/api/public/duty/today';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
@@ -49,14 +47,36 @@ type DutyEntry = {
 export default function HomePage() {
   const { user, isAdmin, isMember, loading: authLoading } = useAuth();
 
-  // ★ useQuery — reactive, อ่าน cache ทันที, refetch เมื่อ invalidate() หรือ tab กลับมา
-  const { data: zonesRaw, loading: loadingZones, error: errorZones, refresh: refreshZones } =
-    useQuery<ZoneSummary[]>(ZONES_URL);
+  const {
+    data: zonesRaw,
+    loading: loadingZones,
+    error: errorZones,
+    refresh: refreshZones,
+  } = useData<ZoneSummary[]>(ZONES_URL);
 
-  const { data: duties, loading: loadingDuties, error: errorDuties, refresh: refreshDuties } =
-    useQuery<DutyEntry[]>(DUTY_URL);
+  const {
+    data: duties,
+    loading: loadingDuties,
+    error: errorDuties,
+    refresh: refreshDuties,
+  } = useData<DutyEntry[]>(DUTY_URL);
 
-  // Supabase Realtime — bonus signal (ไม่บังคับ)
+  // Report fetch errors to the server log so we can diagnose them immediately.
+  // Realtime gaps are NOT logged here — useRealtime manages its own reconnect cycle.
+  useEffect(() => {
+    if (errorZones) {
+      void remoteLog('error', '[home] zones fetch failed', { error: errorZones, url: ZONES_URL });
+    }
+  }, [errorZones]);
+
+  useEffect(() => {
+    if (errorDuties) {
+      void remoteLog('error', '[home] duty fetch failed', { error: errorDuties, url: DUTY_URL });
+    }
+  }, [errorDuties]);
+
+  // Realtime: Supabase pushes a row-change event → invalidate the relevant URL
+  // so every component subscribed to it refetches in the background.
   useRealtime({
     table: 'council_zone_checks',
     onData: useCallback(() => { invalidate(ZONES_URL); }, []),
@@ -68,9 +88,10 @@ export default function HomePage() {
     debounceMs: 500,
   });
 
-  // Derived
-  const zoneList: ZoneSummary[] = zonesRaw ?? ZONES.map(z => ({ zone: z, status: 'pending', inspector: null }));
-  const dutyList: DutyEntry[]   = duties ?? [];
+  // Derived state
+  const zoneList: ZoneSummary[] =
+    zonesRaw ?? ZONES.map(z => ({ zone: z, status: 'pending', inspector: null }));
+  const dutyList: DutyEntry[] = duties ?? [];
 
   const cleanCount   = zoneList.filter(z => z.status === 'clean').length;
   const dirtyCount   = zoneList.filter(z => z.status === 'dirty').length;
@@ -85,7 +106,7 @@ export default function HomePage() {
   return (
     <AppShell pageTitle="หน้าหลัก">
 
-      {/* ── Hero (ผู้เยี่ยมชม) ──────────────────────────────────── */}
+      {/* ── Hero (guest) ─────────────────────────────────────────── */}
       {!isMember && !authLoading && (
         <div style={{
           background: 'linear-gradient(135deg, #0C1120 0%, #1E3EAB 100%)',
@@ -110,26 +131,32 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* ── Stat Cards ───────────────────────────────────────────── */}
+      {/* ── Stat cards ───────────────────────────────────────────── */}
       <div className="grid-4" style={{ marginBottom: 18 }}>
         <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
           <div className="stat-label">เขตสะอาด</div>
           <div className="stat-value" style={{ color: 'var(--green)' }}>
-            {loadingZones && !zonesRaw ? <div className="skeleton" style={{ height: 28, width: 40, borderRadius: 6 }} /> : cleanCount}
+            {loadingZones && !zonesRaw
+              ? <div className="skeleton" style={{ height: 28, width: 40, borderRadius: 6 }} />
+              : cleanCount}
           </div>
           <div className="stat-sub">จาก {ZONES.length} เขต</div>
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--red)' }}>
           <div className="stat-label">ไม่สะอาด</div>
           <div className="stat-value" style={{ color: dirtyCount > 0 ? 'var(--red)' : 'var(--t3)' }}>
-            {loadingZones && !zonesRaw ? <div className="skeleton" style={{ height: 28, width: 30, borderRadius: 6 }} /> : dirtyCount}
+            {loadingZones && !zonesRaw
+              ? <div className="skeleton" style={{ height: 28, width: 30, borderRadius: 6 }} />
+              : dirtyCount}
           </div>
           <div className="stat-sub">เขต</div>
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--amber)' }}>
           <div className="stat-label">รอตรวจ</div>
           <div className="stat-value" style={{ color: 'var(--amber)' }}>
-            {loadingZones && !zonesRaw ? <div className="skeleton" style={{ height: 28, width: 30, borderRadius: 6 }} /> : pendingCount}
+            {loadingZones && !zonesRaw
+              ? <div className="skeleton" style={{ height: 28, width: 30, borderRadius: 6 }} />
+              : pendingCount}
           </div>
           <div className="stat-sub">เขต</div>
         </div>
@@ -138,14 +165,13 @@ export default function HomePage() {
           <div className="stat-value">
             {loadingDuties && !duties
               ? <div className="skeleton" style={{ height: 28, width: 48, borderRadius: 6 }} />
-              : <>{dutyChecked}<span style={{ fontSize: 16, color: 'var(--t3)' }}>/{dutyList.length}</span></>
-            }
+              : <>{dutyChecked}<span style={{ fontSize: 16, color: 'var(--t3)' }}>/{dutyList.length}</span></>}
           </div>
           <div className="stat-sub">คน</div>
         </div>
       </div>
 
-      {/* ── My status (สมาชิก) ───────────────────────────────────── */}
+      {/* ── My check-in status (members) ─────────────────────────── */}
       {isMember && myEntry?.checked_in && (
         <div className="alert alert-success" style={{ marginBottom: 14 }}>
           ✅ คุณเช็คอินเวรแล้วเมื่อ{' '}
@@ -155,21 +181,25 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* ── Error banners ─────────────────────────────────────────── */}
+      {/* ── Error banners with retry ──────────────────────────────── */}
       {errorZones && (
         <div className="alert alert-error" style={{ marginBottom: 12 }}>
           โหลดข้อมูลเขตไม่สำเร็จ
-          <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
+          <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>
+            ลองใหม่
+          </button>
         </div>
       )}
       {errorDuties && (
         <div className="alert alert-error" style={{ marginBottom: 12 }}>
           โหลดข้อมูลเวรไม่สำเร็จ
-          <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
+          <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>
+            ลองใหม่
+          </button>
         </div>
       )}
 
-      {/* ── Zone Panel ───────────────────────────────────────────── */}
+      {/* ── Zone panel ───────────────────────────────────────────── */}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
@@ -190,10 +220,7 @@ export default function HomePage() {
         ) : (
           <div className="zone-grid">
             {zoneList.map(z => (
-              <div
-                key={z.zone}
-                className={`zone-tile ${z.status}`}
-              >
+              <div key={z.zone} className={`zone-tile ${z.status}`}>
                 <div className="zone-name">{z.zone}</div>
                 <div className="zone-status" style={{ marginTop: 5 }}>
                   {z.status === 'clean'   ? '✅ สะอาด' :
@@ -217,7 +244,7 @@ export default function HomePage() {
         )}
       </div>
 
-      {/* ── Duty Panel ───────────────────────────────────────────── */}
+      {/* ── Duty panel ───────────────────────────────────────────── */}
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>

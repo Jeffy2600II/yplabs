@@ -1,23 +1,26 @@
-/* src/app/duty/page.tsx */
+// Path:    src/app/duty/page.tsx
+// Purpose: Duty roster page — shows today's duty list and allows member check-in.
+//          Reads from dataCore.useData() so it shares the reactive cache with the
+//          home page: when a check-in happens here, the home page updates too.
+// Used by: AppShell nav, home page "ดูรายละเอียด →" link
+//
+// Error logging strategy:
+//   - Fetch errors  → remoteLog immediately (needs investigation)
+//   - Check-in API errors → remoteLog + show inline alert to the user
+//   - Realtime reconnect → NOT logged (expected background noise)
+
 'use client';
 
-/**
- * หน้าเวรยืนหน้าโรงเรียน (ฝั่งสมาชิก)
- * ─────────────────────────────────────────────────────────────────
- * - useQuery(DUTY_URL) — reactive: อัปเดตทันทีเมื่อ invalidate() ถูกเรียก
- * - invalidate(DUTY_URL) หลัง check-in → ทั้ง duty page + home page update
- * - Supabase Realtime เป็น bonus (ไม่บังคับ)
- */
-
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { getFreshToken } from '@/lib/sessionUtils';
 import { useRealtime } from '@/lib/realtimeHooks';
-import { useQuery, invalidate } from '@/lib/cache';
+import { useData, invalidate } from '@/lib/dataCore';
+import { remoteLog } from '@/lib/remoteLogger';
 
-/** URL ของ public API สำหรับเวรวันนี้ */
+// Shared URL key — must match home page so cross-page invalidation works
 const DUTY_URL = '/api/public/duty/today';
 
 type DutyEntry = {
@@ -33,29 +36,35 @@ type DutyEntry = {
 export default function DutyPage() {
   const { user, isMember, loading: authLoading } = useAuth();
 
-  // ★ useQuery — reactive, อ่าน cache ทันที และ refetch เมื่อ invalidate() ถูกเรียก
-  const { data: duties, loading } = useQuery<DutyEntry[]>(DUTY_URL);
+  const { data: duties, loading, error: fetchError, refresh } = useData<DutyEntry[]>(DUTY_URL);
   const dutyList = duties ?? [];
 
-  // Supabase Realtime เป็น bonus signal
+  // Log fetch errors immediately so they appear in Vercel function logs
+  useEffect(() => {
+    if (fetchError) {
+      void remoteLog('error', '[duty] fetch failed', { error: fetchError, url: DUTY_URL });
+    }
+  }, [fetchError]);
+
+  // Realtime: push invalidation when any duty row changes
   useRealtime({
     table: 'council_duty',
     onData: useCallback(() => { invalidate(DUTY_URL); }, []),
     debounceMs: 500,
   });
 
-  const [note, setNote] = useState('');
+  const [note, setNote]           = useState('');
   const [checkingIn, setCheckingIn] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  const [checkInError, setCheckInError] = useState<string | null>(null);
+  const [success, setSuccess]     = useState<string | null>(null);
 
-  const myEntry = user ? dutyList.find(d => d.auth_uid === user.auth_uid) : null;
+  const myEntry      = user ? dutyList.find(d => d.auth_uid === user.auth_uid) : null;
   const checkedCount = dutyList.filter(d => d.checked_in).length;
   const pendingCount = dutyList.length - checkedCount;
 
   async function handleCheckIn() {
     setCheckingIn(true);
-    setError(null);
+    setCheckInError(null);
     setSuccess(null);
     try {
       const token = await getFreshToken();
@@ -71,11 +80,15 @@ export default function DutyPage() {
 
       setSuccess(`เช็คอินสำเร็จแล้ว ✅${json.is_walkin ? ' (Walk-in)' : ''}`);
       setNote('');
-
-      // ★ invalidate → duty page + home page รับแจ้ง → refetch อัตโนมัติ
+      // Invalidate shared URL → home page and this page both get fresh data
       invalidate(DUTY_URL);
-    } catch (e: any) {
-      setError(e?.message ?? 'เกิดข้อผิดพลาด');
+    } catch (err: any) {
+      const msg = err?.message ?? 'เกิดข้อผิดพลาด';
+      setCheckInError(msg);
+      void remoteLog('error', '[duty] check-in failed', {
+        error: msg,
+        uid: user?.auth_uid?.slice(-6),
+      });
     } finally {
       setCheckingIn(false);
     }
@@ -108,12 +121,24 @@ export default function DutyPage() {
         </div>
         <div className="stat-card" style={{ borderTop: '3px solid var(--amber)' }}>
           <div className="stat-label">รอเช็คอิน</div>
-          <div className="stat-value" style={{ color: pendingCount > 0 ? 'var(--amber)' : 'var(--t3)' }}>{pendingCount}</div>
+          <div className="stat-value" style={{ color: pendingCount > 0 ? 'var(--amber)' : 'var(--t3)' }}>
+            {pendingCount}
+          </div>
           <div className="stat-sub">คน</div>
         </div>
       </div>
 
-      {/* Check-in card */}
+      {/* Fetch error */}
+      {fetchError && (
+        <div className="alert alert-error" style={{ marginBottom: 14 }}>
+          โหลดข้อมูลไม่สำเร็จ
+          <button onClick={refresh} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>
+            ลองใหม่
+          </button>
+        </div>
+      )}
+
+      {/* Check-in card — only shown if member hasn't checked in yet */}
       {isMember && !myEntry?.checked_in && !authLoading && (
         <div className="card" style={{ borderLeft: '4px solid var(--brand)', marginBottom: 16 }}>
           {myEntry ? (
@@ -133,8 +158,8 @@ export default function DutyPage() {
             <label className="form-label">หมายเหตุ (ไม่บังคับ)</label>
             <input value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น มาถึงแล้ว" />
           </div>
-          {error && <div className="alert alert-error" style={{ marginBottom: 10 }}>{error}</div>}
-          {success && <div className="alert alert-success" style={{ marginBottom: 10 }}>{success}</div>}
+          {checkInError && <div className="alert alert-error" style={{ marginBottom: 10 }}>{checkInError}</div>}
+          {success      && <div className="alert alert-success" style={{ marginBottom: 10 }}>{success}</div>}
           <button onClick={handleCheckIn} disabled={checkingIn} className="btn btn-success btn-full btn-lg">
             {checkingIn ? '🔄 กำลังเช็คอิน...' : '✅ เช็คอิน — ฉันมาถึงแล้ว'}
           </button>
