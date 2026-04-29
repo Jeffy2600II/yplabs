@@ -4,16 +4,11 @@
 // Used by: register/page.tsx
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { supabase } from '@/lib/apiHelper';
 import { synthesizeEmail } from '@/lib/auth';
 import { createLogger } from '@/lib/serverLogger';
-import { SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } from '@/lib/env';
 
 const logger = createLogger('api/auth/register');
-
-// Uses service role to insert into council_join_requests without RLS restriction.
-// This is intentional — registration is a public action.
-const supabase = createClient(SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 export async function POST(req: NextRequest) {
   logger.request('POST');

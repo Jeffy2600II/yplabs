@@ -11,6 +11,7 @@ import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { fetchWithAuth } from '@/lib/sessionUtils';
 import { useData, invalidate } from '@/lib/dataCore';
+import { useRealtime } from '@/lib/realtimeHooks';
 import { remoteLog } from '@/lib/remoteLogger';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
@@ -60,15 +61,23 @@ export default function ZoneCheckPage() {
   const { isMember, user, loading: authLoading } = useAuth();
 
   // ★ rtTick double-trigger — เหมือน admin pages ทุกตัว
-  // ไม่ใช้ useRealtime ที่นี่เพราะ zone-check เป็นหน้า write-only
-  // (เขียนผลแล้วก็เสร็จ ไม่ต้องรับ push จากคนอื่น)
-  // แต่หลัง submit จะ invalidate + tick เพื่อให้ server state refresh
   const [zonesTick, setZonesTick] = useState(0);
+
+  // ★ Realtime: รับ push เมื่อมีคนบันทึกผลเขตใหม่
+  useRealtime({
+    table: 'council_zone_checks',
+    onData: useCallback(() => {
+      invalidate(ZONES_URL);
+      setZonesTick(n => n + 1);
+    }, []),
+    debounceMs: 500,
+  });
 
   const { data: serverZones, loading: serverLoading, error: fetchError } =
     useData<ServerZone[]>(ZONES_URL, {
       enabled: !authLoading,
       realtimeTick: zonesTick,
+      pollIntervalMs: 30_000,
     });
 
   useEffect(() => {

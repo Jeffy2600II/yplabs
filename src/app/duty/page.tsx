@@ -35,6 +35,7 @@ export default function DutyPage() {
 
   const { data: duties, loading, error: fetchError, refresh } = useData<DutyEntry[]>(DUTY_URL, {
     realtimeTick: dutyTick,
+    pollIntervalMs: 30_000,
   });
   const dutyList = duties ?? [];
 

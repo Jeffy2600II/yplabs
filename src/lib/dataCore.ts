@@ -21,7 +21,7 @@ import { getFreshToken } from './sessionUtils';
 /** Client-side stale threshold. Short because server-side CDN caching is now
  *  disabled (force-dynamic on all API routes). Keeps the browser feeling snappy
  *  while still deduplicating burst requests on the same page. */
-const TTL_MS = 10_000; // 10 seconds
+const TTL_MS = 5_000; // 5 seconds
 
 // ─── In-memory store (per browser session) ───────────────────────
 
@@ -131,6 +131,9 @@ export type DataOptions = {
   /** When this counter increments, force a fresh fetch regardless of TTL.
    *  Used by Realtime hooks to push updates. */
   realtimeTick?: number;
+  /** Polling interval in ms. When set, refetches at this interval regardless
+   *  of TTL. Acts as a fallback when realtime push fails or is delayed. */
+  pollIntervalMs?: number;
 };
 
 export type DataResult<T> = {
@@ -155,7 +158,7 @@ export function useData<T = any>(
   url: string,
   options: DataOptions = {}
 ): DataResult<T> {
-  const { headers, enabled = true, realtimeTick } = options;
+  const { headers, enabled = true, realtimeTick, pollIntervalMs } = options;
 
   ensureGlobalListeners();
 
@@ -231,6 +234,13 @@ export function useData<T = any>(
   useEffect(() => {
     return subscribe(url, () => void load(true));
   }, [url, load]);
+
+  // Polling: periodic refetch as a fallback when realtime push is delayed or fails
+  useEffect(() => {
+    if (!pollIntervalMs || !enabled) return;
+    const id = setInterval(() => void load(true), pollIntervalMs);
+    return () => clearInterval(id);
+  }, [pollIntervalMs, enabled, load]);
 
   const refresh = useCallback(() => void load(true), [load]);
 

@@ -54,14 +54,14 @@ export default function HomePage() {
     loading: loadingZones,
     error: errorZones,
     refresh: refreshZones,
-  } = useData<ZoneSummary[]>(ZONES_URL, { realtimeTick: zonesTick });
+  } = useData<ZoneSummary[]>(ZONES_URL, { realtimeTick: zonesTick, pollIntervalMs: 30_000 });
 
   const {
     data: duties,
     loading: loadingDuties,
     error: errorDuties,
     refresh: refreshDuties,
-  } = useData<DutyEntry[]>(DUTY_URL, { realtimeTick: dutyTick });
+  } = useData<DutyEntry[]>(DUTY_URL, { realtimeTick: dutyTick, pollIntervalMs: 30_000 });
 
   // Report fetch errors to server log for immediate diagnosis
   useEffect(() => {

@@ -15,13 +15,8 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { supabase } from '@/lib/apiHelper';
 import { synthesizeEmail } from '@/lib/auth';
-import { SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } from '@/lib/env';
-
-// Server-only admin client — uses SUPABASE_URL (not NEXT_PUBLIC_)
-// because this route runs on the server and NEXT_PUBLIC_ vars are browser-only
-const supabase = createClient(SERVER_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
