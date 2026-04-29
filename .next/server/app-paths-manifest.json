@@ -1,3 +1,6 @@
 {
-  "/page": "app/page.js"
+  "/page": "app/page.js",
+  "/api/debug/log/route": "app/api/debug/log/route.js",
+  "/api/public/zones/today/route": "app/api/public/zones/today/route.js",
+  "/api/public/duty/today/route": "app/api/public/duty/today/route.js"
 }
