@@ -13,13 +13,14 @@ import { useAuth } from '@/context/AuthContext';
 import { useData, invalidate } from '@/lib/dataCore';
 import { useRealtime } from '@/lib/realtimeHooks';
 import { remoteLog } from '@/lib/remoteLogger';
+import { getTodayTH } from '@/lib/clientDateUtils';
 
 // ── URL constants ─────────────────────────────────────────────────
-// ★ ต้องตรงกับ URL ที่ใช้ใน zone-check/page.tsx และ duty/page.tsx
-// เพื่อให้ cross-page cache invalidation ทำงานได้ถูกต้อง
-
-const ZONES_URL = '/api/public/zones/today';
-const DUTY_URL  = '/api/public/duty/today';
+// NOTE: keep UI unchanged — but route data fetching to central API.
+// Use client-side today (Thailand) to query central endpoint for "today".
+const TODAY = getTodayTH();
+const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector_name,note,created_at,check_date')}`;
+const DUTY_URL  = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
 
