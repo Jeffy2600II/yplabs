@@ -1,19 +1,19 @@
-/**
- * Central data API (read-only GET).
- * Query params:
- *  - resource (required) : table name (whitelisted)
- *  - filters (optional)  : JSON object for equality filters, e.g. {"duty_date":"2026-05-06"}
- *  - select (optional)   : supabase select string, default '*'
- *  - cache (optional)    : 'no-store'|'stale'|'public' (see Cache-Control)
- *
- * Security:
- *  - Only whitelisted resources allowed.
- *  - Some resources return limited data unless caller authenticated.
- */
-
 import { NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabaseAdmin';
 import type { NextRequest } from 'next/server';
+
+/**
+ * Central data API (read-only GET).
+ * - Returns raw rows (array) for compatibility with existing front-end.
+ * - Whitelisted resources only.
+ * - Auth checks for admin-only and auth-limited resources.
+ *
+ * Query params:
+ *  - resource (required) : table name (e.g. council_duty)
+ *  - filters (optional)  : JSON object of equality filters
+ *  - select (optional)   : supabase select string, default '*'
+ *  - cache (optional)    : 'no-store'|'stale'|'public'  (controls Cache-Control header)
+ */
 
 const PUBLIC_RESOURCES = new Set([
   'council_duty',
@@ -22,7 +22,7 @@ const PUBLIC_RESOURCES = new Set([
 ]);
 
 const AUTH_LIMITED_RESOURCES = new Set([
-  'council_join_requests', // read only own requests
+  'council_join_requests',
 ]);
 
 const ADMIN_ONLY = new Set([
@@ -50,7 +50,7 @@ export async function GET(req: NextRequest) {
   
   const supabase = getSupabaseAdmin();
   
-  // If resource requires auth/owner filter, attempt to resolve caller
+  // Resolve caller UID if Authorization header present
   let callerUid: string | null = null;
   const authHeader = req.headers.get('authorization') ?? req.headers.get('Authorization');
   if (authHeader) {
@@ -65,11 +65,11 @@ export async function GET(req: NextRequest) {
     }
   }
   
-  // If ADMIN_ONLY -> must be admin in council_users
+  // Admin-only resource check
   if (ADMIN_ONLY.has(resource)) {
     if (!callerUid) return NextResponse.json({ error: 'authorization required' }, { status: 401 });
-    const { data: row } = await supabase.from('council_users').select('role,approved,disabled').eq('auth_uid', callerUid).limit(1).maybeSingle();
-    if (!row || row.role !== 'admin' || !row.approved || row.disabled) {
+    const { data: row, error: rerr } = await supabase.from('council_users').select('role,approved,disabled').eq('auth_uid', callerUid).limit(1).maybeSingle();
+    if (rerr || !row || row.role !== 'admin' || !row.approved || row.disabled) {
       return NextResponse.json({ error: 'admin required' }, { status: 403 });
     }
   }
@@ -81,28 +81,37 @@ export async function GET(req: NextRequest) {
   const filters = parseJSONSafe(filtersRaw);
   if (filters && typeof filters === 'object') {
     for (const [k, v] of Object.entries(filters as Record < string, any > )) {
-      // allow null explicitly
       if (v === null) query = query.is(k, null);
       else query = query.eq(k, v as any);
     }
   }
   
-  // If resource is AUTH_LIMITED (e.g. join requests) then restrict to caller
+  // Auth-limited: restrict to caller's rows (if applicable)
   if (AUTH_LIMITED_RESOURCES.has(resource)) {
     if (!callerUid) {
-      // no auth -> return empty list
-      return NextResponse.json([], { status: 200, headers: { 'Cache-Control': 'no-store' } });
+      // no auth -> return empty array to keep UI stable
+      const emptyRes = NextResponse.json([], { status: 200 });
+      emptyRes.headers.set('Cache-Control', 'no-store');
+      return emptyRes;
     }
-    query = query.eq('auth_uid', callerUid).or(`auth_uid.eq.${callerUid},email.eq.${callerUid}`);
+    // Assume table has auth_uid column
+    query = query.eq('auth_uid', callerUid);
   }
   
   try {
     const { data, error } = await query;
     if (error) {
+      // For public endpoints, degrade to empty array (keeps UI from crashing)
+      if (PUBLIC_RESOURCES.has(resource) || AUTH_LIMITED_RESOURCES.has(resource)) {
+        const res = NextResponse.json([], { status: 200 });
+        res.headers.set('Cache-Control', 'no-store');
+        return res;
+      }
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
     
-    const res = NextResponse.json({ data });
+    // Return raw rows (array or object depending on select/maybeSingle)
+    const res = NextResponse.json(data ?? []);
     if (cacheMode === 'public') {
       res.headers.set('Cache-Control', 's-maxage=60, stale-while-revalidate=30');
     } else if (cacheMode === 'stale') {
