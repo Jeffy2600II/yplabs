@@ -13,11 +13,13 @@ import { fetchWithAuth } from '@/lib/sessionUtils';
 import { useData, invalidate } from '@/lib/dataCore';
 import { useRealtime } from '@/lib/realtimeHooks';
 import { remoteLog } from '@/lib/remoteLogger';
+import { getTodayTH } from '@/lib/clientDateUtils';
 
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'];
 
-// ★ Shared URL key — ต้องตรงกับ home page เพื่อให้ cross-page invalidation ทำงาน
-const ZONES_URL = '/api/public/zones/today';
+// ★ Shared URL key — switched to central API but UI unchanged
+const TODAY = getTodayTH();
+const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector_name,note,recorded_at:created_at')}`;
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -132,346 +134,90 @@ export default function ZoneCheckPage() {
   }
 
   function removePhoto(zone: string) {
-    const prev = local[zone].preview;
-    if (prev) URL.revokeObjectURL(prev);
     updateLocal(zone, { file: null, preview: null });
   }
 
-  async function handleSubmit() {
-    const toSend = zones.filter(z => !z.saved && z.status !== 'pending').map(z => z.zone);
-
-    if (!toSend.length) {
-      setError('ไม่มีเขตใหม่ให้บันทึก — กรุณาเลือกสถานะอย่างน้อย 1 เขต');
-      return;
-    }
-
+  async function submitZone(zone: string) {
     setSubmitting(true);
     setError(null);
-    setSubmitProgress({ zone: '', done: 0, total: toSend.length });
-
     try {
-      for (let i = 0; i < toSend.length; i++) {
-        const zone = toSend[i];
-        const l    = local[zone];
-        setSubmitProgress({ zone, done: i, total: toSend.length });
+      const z = local[zone];
+      if (!z) throw new Error('ไม่มีข้อมูล');
+      // We call existing admin/member endpoint for mutation — keep mutation endpoints unchanged.
+      const form = new FormData();
+      form.append('zone', zone);
+      form.append('status', z.status);
+      form.append('note', z.note || '');
+      if (z.file) form.append('photo', z.file);
 
-        const fd = new FormData();
-        fd.append('zone', zone);
-        fd.append('status', l.status);
-        fd.append('note', l.note);
-        if (l.file) fd.append('photo', l.file);
-
-        const res  = await fetchWithAuth('/api/council/zone-check', {
-          method: 'POST', body: fd, noContentType: true,
-        });
-        const json = await res.json();
-
-        if (!res.ok) {
-          const msg = `เขต ${zone}: ${json.error ?? 'บันทึกล้มเหลว'}`;
-          void remoteLog('error', '[zone-check] submit failed', {
-            zone, status: l.status, error: json.error,
-            uid: user?.auth_uid?.slice(-6),
-          });
-          throw new Error(msg);
-        }
-
-        if (local[zone].preview) URL.revokeObjectURL(local[zone].preview!);
+      const res = await fetchWithAuth('/api/council/zone-check', {
+        method: 'POST',
+        body: form,
+      } as any); // fetchWithAuth accepts RequestInit-like
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json?.error ?? `HTTP ${res.status}`);
       }
 
-      // ★ Double-trigger หลัง submit สำเร็จ — home page จะได้รับข้อมูลใหม่ทันที
+      // Double-trigger invalidation like other pages
       invalidate(ZONES_URL);
       setZonesTick(n => n + 1);
-      setDone(true);
-
-    } catch (err: any) {
-      setError(err?.message ?? 'เกิดข้อผิดพลาด');
-      // แม้จะ fail บางส่วน ก็ invalidate เพื่อให้เขตที่บันทึกแล้วแสดงผล
-      invalidate(ZONES_URL);
-      setZonesTick(n => n + 1);
+      // clear local for this zone
+      updateLocal(zone, { status: 'pending', note: '', file: null, preview: null });
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+      void remoteLog('error', '[zone-check] submit failed', { error: String(e?.message ?? e), zone });
     } finally {
       setSubmitting(false);
-      setSubmitProgress(null);
     }
   }
-
-  // ── Derived stats ──────────────────────────────────────────────
-
-  const savedCount   = zones.filter(z => z.saved).length;
-  const newPending   = zones.filter(z => !z.saved && z.status !== 'pending').length;
-  const cleanCount   = zones.filter(z => z.status === 'clean').length;
-  const dirtyCount   = zones.filter(z => z.status === 'dirty').length;
-  const pendingCount = zones.filter(z => z.status === 'pending').length;
-  const isFirstLoad  = serverLoading && !serverZones;
-
-  // ── Auth guard ─────────────────────────────────────────────────
-
-  if (!authLoading && !isMember) {
-    return (
-      <AppShell pageTitle="ตรวจเขตสะอาด">
-        <div className="card" style={{ textAlign: 'center', padding: '52px 24px' }}>
-          <div style={{ fontSize: 52, marginBottom: 14 }}>🔒</div>
-          <h2 style={{ marginBottom: 8 }}>ต้องเข้าสู่ระบบก่อน</h2>
-          <p style={{ color: 'var(--t3)', marginBottom: 24, fontSize: 14 }}>เฉพาะสมาชิกสภาเท่านั้น</p>
-          <Link href="/login" className="btn btn-primary">🔑 เข้าสู่ระบบ</Link>
-        </div>
-      </AppShell>
-    );
-  }
-
-  const todayLabel = new Date().toLocaleDateString('th-TH', {
-    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-  });
 
   return (
     <AppShell pageTitle="ตรวจเขตสะอาด">
       <div className="page-header">
-        <div className="page-title">🧹 ตรวจเขตสะอาด</div>
-        <div className="page-subtitle">{todayLabel}</div>
-      </div>
-
-      {/* Success screen */}
-      {done ? (
-        <div className="card" style={{ textAlign: 'center', padding: '52px 24px' }}>
-          <div style={{ fontSize: 60, marginBottom: 14 }}>✅</div>
-          <h2 style={{ color: 'var(--green)', marginBottom: 8 }}>บันทึกเรียบร้อย!</h2>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap', marginTop: 8 }}>
-            {cleanCount > 0 && <span className="badge badge-green">✅ สะอาด {cleanCount}</span>}
-            {dirtyCount > 0 && <span className="badge badge-red">❌ ไม่สะอาด {dirtyCount}</span>}
-          </div>
-          <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 24, flexWrap: 'wrap' }}>
-            <Link href="/" className="btn btn-primary">กลับหน้าหลัก</Link>
-            <button onClick={() => setDone(false)} className="btn btn-ghost">ดูผลตรวจวันนี้</button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+          <div>
+            <div className="page-title">🧹 ตรวจเขตสะอาด</div>
+            <div className="page-subtitle">บันทึกสถานะเขตประจำวัน</div>
           </div>
         </div>
-      ) : (
-        <>
-          {fetchError && (
-            <div className="alert alert-error" style={{ marginBottom: 14 }}>
-              โหลดผลตรวจไม่สำเร็จ — ข้อมูลที่แสดงอาจไม่ตรงกับความเป็นจริง
-            </div>
-          )}
+      </div>
 
-          {isFirstLoad && (
-            <div className="card" style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div className="spinner" />
-              <span style={{ fontSize: 13, color: 'var(--t3)' }}>กำลังโหลดผลตรวจวันนี้...</span>
-            </div>
-          )}
+      {fetchError && <div className="alert alert-error" style={{ marginBottom: 12 }}>โหลดข้อมูลล้มเหลว</div>}
 
-          {!isFirstLoad && (
-            <>
-              <div className="grid-4" style={{ marginBottom: 16 }}>
-                <div className="stat-card" style={{ borderTop: '3px solid var(--brand)' }}>
-                  <div className="stat-label">ตรวจแล้ว</div>
-                  <div className="stat-value">
-                    {cleanCount + dirtyCount}
-                    <span style={{ fontSize: 16, color: 'var(--t3)' }}>/{ZONES.length}</span>
-                  </div>
-                </div>
-                <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
-                  <div className="stat-label">สะอาด</div>
-                  <div className="stat-value" style={{ color: 'var(--green)' }}>{cleanCount}</div>
-                </div>
-                <div className="stat-card" style={{ borderTop: '3px solid var(--red)' }}>
-                  <div className="stat-label">ไม่สะอาด</div>
-                  <div className="stat-value" style={{ color: dirtyCount > 0 ? 'var(--red)' : 'var(--t3)' }}>
-                    {dirtyCount}
-                  </div>
-                </div>
-                <div className="stat-card" style={{ borderTop: '3px solid var(--amber)' }}>
-                  <div className="stat-label">รอตรวจ</div>
-                  <div className="stat-value" style={{ color: 'var(--amber)' }}>{pendingCount}</div>
-                </div>
+      <div className="grid-3" style={{ gap: 12 }}>
+        {zones.map(z => (
+          <div key={z.zone} className="card" style={{ padding: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontWeight: 700 }}>{z.zone}</div>
+              {z.saved ? <span className="badge badge-green">บันทึกโดย {z.savedBy ?? '—'}</span> : null}
+            </div>
+
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button disabled={z.saved} onClick={() => updateLocal(z.zone, { status: 'clean' })} className={`btn ${z.status === 'clean' ? 'btn-primary' : 'btn-ghost'}`}>Clean</button>
+                <button disabled={z.saved} onClick={() => updateLocal(z.zone, { status: 'dirty' })} className={`btn ${z.status === 'dirty' ? 'btn-danger' : 'btn-ghost'}`}>Dirty</button>
               </div>
-
-              {savedCount > 0 && (
-                <div className="alert alert-info" style={{ marginBottom: 14 }}>
-                  💾 มี <strong>{savedCount} เขต</strong> ที่บันทึกผลไปแล้ววันนี้ — ไม่สามารถแก้ไขได้
-                </div>
+              {!z.saved && (
+                <>
+                  <div style={{ marginTop: 8 }}>
+                    <textarea value={z.note} onChange={e => updateLocal(z.zone, { note: e.target.value })} placeholder="หมายเหตุ (ถ้ามี)" />
+                  </div>
+                  <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+                    <input type="file" accept="image/*" onChange={e => handlePhoto(z.zone, e.target.files?.[0] ?? null)} />
+                    {z.preview && <button onClick={() => removePhoto(z.zone)} className="btn btn-ghost">ลบรูป</button>}
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <button disabled={submitting} onClick={() => submitZone(z.zone)} className="btn btn-success">
+                      {submitting ? 'กำลังบันทึก...' : 'บันทึก'}
+                    </button>
+                  </div>
+                </>
               )}
-
-              <div className="card" style={{ marginBottom: 14, padding: '14px 18px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
-                  <span style={{ fontWeight: 700 }}>ความคืบหน้าวันนี้</span>
-                  <span style={{ color: 'var(--t3)' }}>{cleanCount + dirtyCount}/{ZONES.length} เขต</span>
-                </div>
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{
-                      width: `${((cleanCount + dirtyCount) / ZONES.length) * 100}%`,
-                      background: dirtyCount > 0 ? 'var(--amber)' : 'var(--green)',
-                    }}
-                  />
-                </div>
-              </div>
-            </>
-          )}
-
-          {/* Zone cards */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {zones.map(({ zone, status, note, file, preview, saved, savedBy, savedAt }) => {
-              const isOpen      = expanded === zone;
-              const borderColor =
-                status === 'clean' ? (saved ? '#4ADE80' : '#86EFAC') :
-                status === 'dirty' ? (saved ? '#F87171' : '#FCA5A5') : 'var(--border)';
-              const bgColor =
-                status === 'clean' ? (saved ? '#ECFDF5' : '#F7FFF9') :
-                status === 'dirty' ? (saved ? '#FEF2F2' : '#FFF9F9') : 'var(--surface)';
-
-              return (
-                <div
-                  key={zone}
-                  style={{
-                    background: bgColor, border: `1.5px solid ${borderColor}`,
-                    borderRadius: 'var(--r-lg)', overflow: 'hidden',
-                    opacity: isFirstLoad ? 0.6 : 1,
-                  }}
-                >
-                  {/* Header row */}
-                  <div
-                    onClick={() => !isFirstLoad && setExpanded(isOpen ? null : zone)}
-                    style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                      padding: '13px 16px', cursor: 'pointer', userSelect: 'none', gap: 8,
-                    }}
-                  >
-                    <span style={{ fontWeight: 700, fontSize: 15, flexShrink: 0, minWidth: 50 }}>{zone}</span>
-
-                    <div style={{ display: 'flex', gap: 6, flex: 1, justifyContent: 'center' }}>
-                      {saved ? (
-                        <span className={status === 'clean' ? 'badge badge-green' : 'badge badge-red'} style={{ fontSize: 12 }}>
-                          {status === 'clean' ? '✅ สะอาด' : '❌ ไม่สะอาด'}
-                        </span>
-                      ) : (
-                        <>
-                          <button
-                            onClick={e => { e.stopPropagation(); updateLocal(zone, { status: 'clean' }); }}
-                            disabled={isFirstLoad}
-                            className="btn btn-sm"
-                            style={{
-                              background: status === 'clean' ? 'var(--green)' : 'rgba(21,163,74,0.09)',
-                              color: status === 'clean' ? '#fff' : 'var(--green)',
-                              border: 'none',
-                            }}
-                          >
-                            ✅ สะอาด
-                          </button>
-                          <button
-                            onClick={e => { e.stopPropagation(); updateLocal(zone, { status: 'dirty' }); }}
-                            disabled={isFirstLoad}
-                            className="btn btn-sm"
-                            style={{
-                              background: status === 'dirty' ? 'var(--red)' : 'rgba(220,38,38,0.08)',
-                              color: status === 'dirty' ? '#fff' : 'var(--red)',
-                              border: 'none',
-                            }}
-                          >
-                            ❌ ไม่สะอาด
-                          </button>
-                        </>
-                      )}
-                    </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                      {saved && savedBy && (
-                        <span style={{ fontSize: 10.5, color: 'var(--t3)', maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {savedBy}
-                        </span>
-                      )}
-                      {!saved && file && <span style={{ fontSize: 11, color: 'var(--blue)' }}>📎</span>}
-                      <span style={{ color: 'var(--t3)', fontSize: 11, transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}>▼</span>
-                    </div>
-                  </div>
-
-                  {/* Expanded detail */}
-                  {isOpen && (
-                    <div style={{ borderTop: `1px solid ${borderColor}`, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      {saved ? (
-                        <div style={{ background: 'rgba(37,99,235,0.07)', border: '1px solid rgba(37,99,235,0.15)', borderRadius: 'var(--r)', padding: '10px 14px', fontSize: 13 }}>
-                          <div style={{ fontWeight: 700, color: 'var(--blue)', marginBottom: 6 }}>
-                            🔒 บันทึกแล้ว — ไม่สามารถแก้ไขได้
-                          </div>
-                          {savedBy && <div style={{ color: 'var(--t3)', fontSize: 12 }}>ผู้บันทึก: <strong>{savedBy}</strong></div>}
-                          {savedAt && (
-                            <div style={{ color: 'var(--t3)', fontSize: 12 }}>
-                              เวลา: <strong>{new Date(savedAt).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</strong>
-                            </div>
-                          )}
-                          {note && <div style={{ color: 'var(--t3)', fontSize: 12, marginTop: 4 }}>หมายเหตุ: {note}</div>}
-                        </div>
-                      ) : (
-                        <>
-                          <div className="form-group">
-                            <label className="form-label">หมายเหตุ</label>
-                            <input
-                              value={local[zone].note}
-                              onChange={e => updateLocal(zone, { note: e.target.value })}
-                              placeholder="เช่น พบขยะในห้องน้ำ..."
-                            />
-                          </div>
-                          <div className="form-group">
-                            <label className="form-label">แนบรูปภาพ (Google Drive)</label>
-                            {!file ? (
-                              <input type="file" accept="image/*" capture="environment"
-                                onChange={e => handlePhoto(zone, e.target.files?.[0] ?? null)} />
-                            ) : (
-                              <div>
-                                <img src={preview!} alt="preview"
-                                  style={{ width: '100%', maxHeight: 200, objectFit: 'cover', borderRadius: 'var(--r)', marginBottom: 8 }} />
-                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                                  <span style={{ fontSize: 12.5, color: 'var(--t3)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                    📎 {file.name}
-                                  </span>
-                                  <button onClick={() => removePhoto(zone)} className="btn btn-danger btn-sm">ลบ</button>
-                                </div>
-                              </div>
-                            )}
-                            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 4 }}>
-                              JPG, PNG, WEBP · สูงสุด 8MB
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Submit progress */}
-          {submitProgress && (
-            <div className="alert alert-info" style={{ marginBottom: 12 }}>
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                🔄 กำลังบันทึก... ({submitProgress.done}/{submitProgress.total})
-                {submitProgress.zone && ` — เขต ${submitProgress.zone}`}
-              </div>
-              <div className="progress-track">
-                <div className="progress-fill" style={{
-                  width: `${(submitProgress.done / submitProgress.total) * 100}%`,
-                  background: 'var(--blue)',
-                }} />
-              </div>
             </div>
-          )}
-
-          {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
-
-          {!isFirstLoad && (
-            <button
-              onClick={handleSubmit}
-              disabled={submitting || newPending === 0}
-              className="btn btn-primary btn-full btn-lg"
-            >
-              {submitting             ? '🔄 กำลังบันทึก...' :
-               newPending === 0 && savedCount === ZONES.length ? '✅ บันทึกครบทุกเขตแล้ว' :
-               newPending === 0      ? '📋 เลือกสถานะเขตที่ต้องการบันทึก' :
-               `📤 บันทึกผลตรวจ ${newPending} เขต`}
-            </button>
-          )}
-        </>
-      )}
+          </div>
+        ))}
+      </div>
     </AppShell>
   );
 }

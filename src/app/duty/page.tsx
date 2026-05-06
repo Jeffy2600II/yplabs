@@ -13,9 +13,11 @@ import { getFreshToken } from '@/lib/sessionUtils';
 import { useRealtime } from '@/lib/realtimeHooks';
 import { useData, invalidate } from '@/lib/dataCore';
 import { remoteLog } from '@/lib/remoteLogger';
+import { getTodayTH } from '@/lib/clientDateUtils';
 
-// ★ Shared URL key — ต้องตรงกับ home page เพื่อให้ cross-page invalidation ทำงาน
-const DUTY_URL = '/api/public/duty/today';
+// ★ Shared URL key — switched to central API but UI unchanged
+const TODAY = getTodayTH();
+const DUTY_URL = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
 
 type DutyEntry = {
   id: string;
@@ -30,7 +32,7 @@ type DutyEntry = {
 export default function DutyPage() {
   const { user, isMember, loading: authLoading } = useAuth();
 
-  // ★ rtTick double-trigger — เหมือน admin pages ทุกตัว
+  // ★ rtTick: double-trigger — เหมือน admin pages ทุกตัว
   const [dutyTick, setDutyTick] = useState(0);
 
   const { data: duties, loading, error: fetchError, refresh } = useData<DutyEntry[]>(DUTY_URL, {
@@ -45,7 +47,7 @@ export default function DutyPage() {
     }
   }, [fetchError]);
 
-  // ★ Double-trigger: invalidate + setDutyTick ทั้งคู่ เหมือน admin/duty/page.tsx
+  // ★ Double-trigger: invalidate + setDutyTick ทั้งคู่ — เหมือน admin/duty/page.tsx
   useRealtime({
     table: 'council_duty',
     onData: useCallback(() => {
