@@ -19,16 +19,18 @@ const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2',
 
 // ★ Shared URL key — switched to central API but UI unchanged
 const TODAY = getTodayTH();
-const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector_name,note,recorded_at:created_at')}`;
+// Select raw columns from DB (we map names below to keep compatibility with original UI)
+const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector_name,note,created_at,check_date')}`;
 
 // ── Types ─────────────────────────────────────────────────────────
 
 type ServerZone = {
   zone: string;
   status: 'clean' | 'dirty' | 'pending';
-  inspector: string | null;
-  note: string | null;
-  recorded_at: string | null;
+  inspector_name?: string | null;
+  note?: string | null;
+  created_at?: string | null;
+  check_date?: string | null;
 };
 
 type LocalZone = {
@@ -57,7 +59,7 @@ function initLocal(): Record<string, LocalZone> {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
+// ──────────────��──────────────────────────────────────────────────
 
 export default function ZoneCheckPage() {
   const { isMember, user, loading: authLoading } = useAuth();
@@ -103,20 +105,32 @@ export default function ZoneCheckPage() {
   // Derived: merge server (locked) + local (editable)
   const zones: ZoneView[] = useMemo(() => {
     return ZONES.map(z => {
-      const server   = serverZones?.find(s => s.zone === z);
-      const isLocked = server && server.status !== 'pending';
+      // serverZones may be rows from DB: inspector_name + created_at
+      const server = serverZones?.find(s => s.zone === z);
+      const isLocked = !!(server && server.status && server.status !== 'pending');
 
       if (isLocked) {
         return {
-          zone: z, status: server!.status,
-          note: server!.note ?? '', file: null, preview: null,
-          saved: true, savedBy: server!.inspector, savedAt: server!.recorded_at,
+          zone: z,
+          status: server!.status,
+          note: server!.note ?? '',
+          file: null,
+          preview: null,
+          saved: true,
+          savedBy: server!.inspector_name ?? null,
+          savedAt: server!.created_at ?? null,
         };
       }
 
       return {
-        zone: z, ...local[z],
-        saved: false, savedBy: null, savedAt: null,
+        zone: z,
+        status: local[z].status,
+        note: local[z].note,
+        file: local[z].file,
+        preview: local[z].preview,
+        saved: false,
+        savedBy: null,
+        savedAt: null,
       };
     });
   }, [serverZones, local]);
@@ -143,17 +157,21 @@ export default function ZoneCheckPage() {
     try {
       const z = local[zone];
       if (!z) throw new Error('ไม่มีข้อมูล');
-      // We call existing admin/member endpoint for mutation — keep mutation endpoints unchanged.
+
       const form = new FormData();
       form.append('zone', zone);
       form.append('status', z.status);
       form.append('note', z.note || '');
       if (z.file) form.append('photo', z.file);
 
+      // IMPORTANT: pass noContentType: true so fetchWithAuth DOES NOT set Content-Type header
       const res = await fetchWithAuth('/api/council/zone-check', {
         method: 'POST',
         body: form,
-      } as any); // fetchWithAuth accepts RequestInit-like
+        noContentType: true,
+      } as any);
+
+      // fetchWithAuth returns a Response object — check status
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
         throw new Error(json?.error ?? `HTTP ${res.status}`);
@@ -183,7 +201,7 @@ export default function ZoneCheckPage() {
         </div>
       </div>
 
-      {fetchError && <div className="alert alert-error" style={{ marginBottom: 12 }}>โหลดข้อมูลล้มเหลว</div>}
+      { (error || fetchError) && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error ? error : 'โหลดข้อมูลล้มเหลว'}</div> }
 
       <div className="grid-3" style={{ gap: 12 }}>
         {zones.map(z => (
