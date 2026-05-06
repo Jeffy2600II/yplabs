@@ -36,8 +36,9 @@ export default function AdminYearsPage() {
     setLoading(true);
     try {
       const token = await getToken();
-      const res = await fetch('/api/admin/years', { headers: { Authorization: `Bearer ${token ?? ''}` } });
-      setYears(res.ok ? await res.json() : []);
+      const res = await fetch('/api/data?resource=council_years&select=year,closed', { headers: { Authorization: `Bearer ${token ?? ''}` } });
+      const json = await res.json();
+      setYears(res.ok ? (json ?? []) : []);
     } catch {}
     setLoading(false);
   }
@@ -76,7 +77,7 @@ export default function AdminYearsPage() {
   const sorted = [...years].sort((a, b) => b.year - a.year);
   const retained = sorted.slice(0, 3).map(y => y.year);
 
-  if (authLoading) return <AppShell pageTitle="ปีการศึกษา"><div className="loading-center"><div className="spinner" /></div></AppShell>;
+  if (authLoading) return <AppShell pageTitle="ปีการศึก���า"><div className="loading-center"><div className="spinner" /></div></AppShell>;
   if (!isAdmin) return null;
 
   return (

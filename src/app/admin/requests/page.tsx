@@ -14,7 +14,8 @@ import { useRealtime } from '@/lib/realtimeHooks';
 import { useAuthData, invalidate } from '@/lib/dataCore';
 import { getFreshToken } from '@/lib/sessionUtils';
 
-const REQUESTS_URL = '/api/admin/requests';
+// Use central API for reads
+const REQUESTS_URL = '/api/data?resource=council_join_requests&select=id,full_name,student_id,year,email,message,account_type,created_at';
 
 type RequestRow = {
   id: string;

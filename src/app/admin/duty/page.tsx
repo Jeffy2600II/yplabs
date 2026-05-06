@@ -18,13 +18,14 @@ import { getFreshToken } from '@/lib/sessionUtils';
 import { getTodayTH } from '@/lib/clientDateUtils';
 
 // ── URL Constants ─────────────────────────────────────────────────
-
+// Use central API for reads (admin still uses admin endpoints for mutations)
 function adminDutyUrl(date: string) {
-  return `/api/admin/duty?date=${date}`;
+  // central API with equality filter on duty_date
+  return `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: date }))}&select=${encodeURIComponent('id,student_name,student_id,auth_uid,checked_in,checked_in_at,note,duty_date')}`;
 }
 
-// ★ ต้อง invalidate URL นี้ด้วยทุกครั้งที่มี mutation เพื่อให้หน้า public อัปเดต
-const PUBLIC_DUTY_URL = '/api/public/duty/today';
+// ★ Must invalidate this to update public-facing today list as well
+const PUBLIC_DUTY_URL = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: getTodayTH() }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -56,64 +57,59 @@ export default function AdminDutyPage() {
   const [rtTick, setRtTick] = useState(0);
   const [selectedDate, setSelectedDate] = useState(TODAY);
   const [showAddModal, setShowAddModal] = useState(false);
-  const [users, setUsers] = useState<UserRow[]>([]);
+  const [users, setUsers] = useState < UserRow[] > ([]);
   const [usersLoading, setUsersLoading] = useState(false);
   const [userSearch, setUserSearch] = useState('');
-  const [actionId, setActionId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
-
+  const [actionId, setActionId] = useState < string | null > (null);
+  const [error, setError] = useState < string | null > (null);
+  const [success, setSuccess] = useState < string | null > (null);
+  
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
   }, [authLoading, isAdmin, router]);
-
+  
   const dutyUrl = adminDutyUrl(selectedDate);
-
-  // ★ useAuthData แทน useAdminCache — ใช้ dataCore โดยตรง
-  const { data: duties, loading } = useAuthData<DutyEntry[]>(dutyUrl, {
+  
+  // ★ useAuthData — reads now go through central API but still require admin token
+  const { data: duties, loading } = useAuthData < DutyEntry[] > (dutyUrl, {
     realtimeTick: rtTick,
     enabled: isAdmin,
   });
   const dutyList = duties ?? [];
-
-  // ★ Double-trigger: invalidate + setRtTick ทั้งคู่ เหมือน pattern ใน admin pages อื่นๆ
+  
+  // ★ Double-trigger: invalidate + setRtTick ทั้งคู่ — keep same pattern
   useRealtime({
     table: 'council_duty',
     onData: useCallback(() => {
-      invalidate(dutyUrl, PUBLIC_DUTY_URL);
+      invalidate(dutyUrl);
+      invalidate(PUBLIC_DUTY_URL);
       setRtTick(n => n + 1);
     }, [dutyUrl]),
-    debounceMs: 250,
-    enabled: isAdmin,
+    debounceMs: 500,
   });
-
-  const checkedCount = dutyList.filter(d => d.checked_in).length;
-
-  // ── Load users for modal ───────────────────────────────────────
-
+  
   async function loadUsers() {
     setUsersLoading(true);
     try {
       const token = await getFreshToken();
-      const res = await fetch('/api/admin/users', {
+      const res = await fetch(`/api/data?resource=council_users&filters=${encodeURIComponent(JSON.stringify({ year: selectedDate ? Number(selectedDate.split('-')[0]) : null }))}&select=${encodeURIComponent('auth_uid,full_name,student_id,year')}`, {
         headers: { Authorization: `Bearer ${token ?? ''}` },
       });
-      if (res.ok) setUsers(await res.json());
-    } catch {}
-    setUsersLoading(false);
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error ?? 'Failed to load users');
+      setUsers(json ?? []);
+    } catch (e) {
+      // best-effort — ignore
+    } finally {
+      setUsersLoading(false);
+    }
   }
-
-  function openAddModal() {
-    setShowAddModal(true);
-    setUserSearch('');
-    if (users.length === 0) void loadUsers();
-  }
-
-  // ── Mutations ──────────────────────────────────────────────────
-
+  
+  function openAddModal() { setShowAddModal(true); }
+  
   async function addDuty(user: UserRow) {
-    setActionId(`add-${user.auth_uid}`);
-    setError(null);
+    // keep mutation via admin endpoint (unchanged)
+    setActionId(user.auth_uid);
     try {
       const token = await getFreshToken();
       const res = await fetch('/api/admin/duty', {
@@ -122,27 +118,21 @@ export default function AdminDutyPage() {
         body: JSON.stringify({
           auth_uid: user.auth_uid,
           student_name: user.full_name,
-          student_id: user.student_id ?? '',
+          student_id: user.student_id,
           duty_date: selectedDate,
         }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
-
-      setSuccess(`เพิ่ม ${user.full_name} เข้าเวรแล้ว ✅`);
+      if (!res.ok) throw new Error(json?.error ?? 'Failed');
       invalidate(dutyUrl, PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
-      setShowAddModal(false);
-    } catch (e: any) {
-      setError(e?.message ?? 'เกิดข้อผิดพลาด');
-    }
-    setActionId(null);
+      setSuccess('เพิ่มเรียบร้อย');
+    } catch (e: any) { setError(e?.message ?? 'ล้มเหลว'); }
+    finally { setActionId(null); }
   }
-
+  
   async function removeDuty(id: string, name: string) {
-    if (!confirm(`ลบ "${name}" ออกจากเวร?`)) return;
+    if (!confirm(`ลบ ${name} ออกจากเวรหรือไม่?`)) return;
     setActionId(id);
-    setError(null);
     try {
       const token = await getFreshToken();
       const res = await fetch(`/api/admin/duty/${id}`, {
@@ -150,81 +140,44 @@ export default function AdminDutyPage() {
         headers: { Authorization: `Bearer ${token ?? ''}` },
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
-
-      setSuccess(`ลบ ${name} ออกแล้ว`);
+      if (!res.ok) throw new Error(json?.error ?? 'Failed');
       invalidate(dutyUrl, PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
-    } catch (e: any) {
-      setError(e?.message ?? 'เกิดข้อผิดพลาด');
-    }
-    setActionId(null);
+    } catch (e: any) { alert(e?.message ?? 'ล้มเหลว'); }
+    finally { setActionId(null); }
   }
-
+  
   async function adminCheckin(id: string, name: string) {
-    setActionId(`ci-${id}`);
-    setError(null);
+    setActionId(id);
     try {
       const token = await getFreshToken();
-      const res = await fetch(`/api/admin/duty/${id}`, {
-        method: 'PATCH',
+      const res = await fetch(`/api/admin/duty/checkin`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
-        body: JSON.stringify({ checked_in: true }),
+        body: JSON.stringify({ id }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
-
-      setSuccess(`✅ เช็คอิน ${name} สำเร็จ`);
+      if (!res.ok) throw new Error(json?.error ?? 'Failed');
       invalidate(dutyUrl, PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
-    } catch (e: any) {
-      setError(e?.message ?? 'เกิดข้อผิดพลาด');
-    }
-    setActionId(null);
+    } catch (e: any) { alert(e?.message ?? 'ล้มเหลว'); }
+    finally { setActionId(null); }
   }
-
+  
   async function adminUncheckin(id: string, name: string) {
-    setActionId(`unci-${id}`);
-    setError(null);
+    setActionId(id);
     try {
       const token = await getFreshToken();
-      const res = await fetch(`/api/admin/duty/${id}`, {
-        method: 'PATCH',
+      const res = await fetch(`/api/admin/duty/uncheckin`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
-        body: JSON.stringify({ checked_in: false }),
+        body: JSON.stringify({ id }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
-
-      setSuccess(`ยกเลิกเช็คอิน ${name}`);
+      if (!res.ok) throw new Error(json?.error ?? 'Failed');
       invalidate(dutyUrl, PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
-    } catch (e: any) {
-      setError(e?.message ?? 'เกิดข้อผิดพลาด');
-    }
-    setActionId(null);
+    } catch (e: any) { alert(e?.message ?? 'ล้มเหลว'); }
+    finally { setActionId(null); }
   }
-
-  // ── Derived state ──────────────────────────────────────────────
-
-  const inDuty = new Set(dutyList.map(d => d.auth_uid).filter(Boolean));
-  const filteredUsers = users.filter(u =>
-    !userSearch ||
-    u.full_name.toLowerCase().includes(userSearch.toLowerCase()) ||
-    (u.student_id ?? '').includes(userSearch)
-  );
-
-  // ── Auth guard ─────────────────────────────────────────────────
-
-  if (authLoading) return (
-    <AppShell pageTitle="จัดการเวร">
-      <div className="loading-center"><div className="spinner" /></div>
-    </AppShell>
-  );
-  if (!isAdmin) return null;
-
-  // ── Render ─────────────────────────────────────────────────────
-
+  
   return (
     <AppShell pageTitle="จัดการเวร">
       <div className="page-header">

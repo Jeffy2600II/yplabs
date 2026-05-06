@@ -53,7 +53,7 @@ export default function AdminUsersPage() {
   async function loadYears() {
     try {
       const token = await getToken();
-      const res = await fetch('/api/admin/years', { headers: { Authorization: `Bearer ${token ?? ''}` } });
+      const res = await fetch('/api/data?resource=council_years&select=year,closed', { headers: { Authorization: `Bearer ${token ?? ''}` } });
       const json = await res.json();
       const ys: number[] = (json ?? []).map((r: any) => r.year);
       setYears(ys);
@@ -65,7 +65,7 @@ export default function AdminUsersPage() {
     setLoading(true);
     try {
       const token = await getToken();
-      const res = await fetch(`/api/admin/users?year=${year}`, {
+      const res = await fetch(`/api/data?resource=council_users&filters=${encodeURIComponent(JSON.stringify({ year }))}&select=${encodeURIComponent('id,auth_uid,full_name,student_id,email,year,role,approved,disabled,account_type,created_at')}`, {
         headers: { Authorization: `Bearer ${token ?? ''}` },
       });
       const json = await res.json();

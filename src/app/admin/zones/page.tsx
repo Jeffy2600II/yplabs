@@ -25,6 +25,7 @@ type ZoneRecord = {
 };
 
 function buildUrl(from: string, to: string) {
+  // Keep admin endpoint for flexible from/to queries (server handles range)
   return `/api/admin/zones?from=${from}&to=${to}`;
 }
 

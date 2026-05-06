@@ -19,8 +19,9 @@ import { useRealtime } from '@/lib/realtimeHooks';
 type YearRow = { year: number;closed: boolean };
 type RequestRow = { id: string };
 
-const YEARS_URL = '/api/admin/years';
-const REQUESTS_URL = '/api/admin/requests';
+// Use central API for reads
+const YEARS_URL = '/api/data?resource=council_years&select=year,closed';
+const REQUESTS_URL = '/api/data?resource=council_join_requests&select=id,full_name,student_id,year,email,message,account_type,created_at';
 
 export default function AdminPage() {
   const { isAdmin, loading: authLoading } = useAuth();
@@ -52,7 +53,7 @@ export default function AdminPage() {
   const activeYear = years?.[0]?.year ?? null;
   const pending = requests?.length ?? 0;
   
-  const usersUrl = activeYear ? `/api/admin/users?year=${activeYear}` : null;
+  const usersUrl = activeYear ? `/api/data?resource=council_users&filters=${encodeURIComponent(JSON.stringify({ year: activeYear }))}&select=id,auth_uid,full_name,student_id,email,year,role,approved,disabled,account_type,created_at` : null;
   const { data: users } = useAuthData < any[] > (usersUrl ?? '', {
     enabled: isAdmin && !!activeYear,
   });
@@ -64,7 +65,7 @@ export default function AdminPage() {
     { title: 'จัดการบัญชี', desc: 'เพิ่ม / แก้ไข / ลบ / Role', icon: '👥', href: '/admin/users', badge: users?.length },
     { title: 'จัดการเวร', desc: 'กำหนด roster ยืนหน้าโรงเรียน', icon: '📋', href: '/admin/duty' },
     { title: 'รายงานเขตสะอาด', desc: 'ดูผลตรวจเขตย้อนหลัง', icon: '📊', href: '/admin/zones' },
-    { title: 'ปีการศึกษา', desc: 'จัดการปี + 3-year retention', icon: '📅', href: '/admin/years', badge: years?.length },
+    { title: '���ีการศึกษา', desc: 'จัดการปี + 3-year retention', icon: '📅', href: '/admin/years', badge: years?.length },
   ];
   
   if (authLoading) return (

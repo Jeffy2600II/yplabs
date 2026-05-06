@@ -48,7 +48,7 @@ export default function AdminUsersNewPage() {
   async function loadYears() {
     try {
       const token = await getToken();
-      const res = await fetch('/api/admin/years', { headers: { Authorization: `Bearer ${token ?? ''}` } });
+      const res = await fetch('/api/data?resource=council_years&select=year,closed', { headers: { Authorization: `Bearer ${token ?? ''}` } });
       const json = await res.json();
       const ys: number[] = (json ?? []).filter((r: any) => !r.closed).map((r: any) => r.year);
       setYears(ys);
