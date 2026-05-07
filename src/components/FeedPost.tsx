@@ -13,12 +13,11 @@ type Post = {
 
 type Props = {
   post: Post;
-  compact ? : boolean; // if true, show more compact version
+  compact ? : boolean;
 };
 
 export default function FeedPost({ post, compact = false }: Props) {
   const { zone, status, inspector, note, photo_urls = [], recorded_at } = post;
-  const [open, setOpen] = useState(false);
   const [photoSrc, setPhotoSrc] = useState < string | null > (null);
   const [expanded, setExpanded] = useState(false);
   
@@ -30,17 +29,12 @@ export default function FeedPost({ post, compact = false }: Props) {
   
   const snippet = (note ?? '').slice(0, 160);
   
-  function openPhoto(src: string) {
-    setPhotoSrc(src);
-    setOpen(true);
-  }
-  
   return (
     <>
-      <article className="feed-post">
+      <article className="feed-post" aria-labelledby={`post-${post.id ?? zone}`}>
         <header className="feed-post-header">
           <div className="feed-post-left">
-            <div className="post-author">{inspector ?? 'ไม่ระบุ'}</div>
+            <div id={`post-${post.id ?? zone}`} className="post-author">{inspector ?? 'ไม่ระบุ'}</div>
             <div className="post-meta">
               <span className="post-zone">{zone}</span>
               <span className={`post-status ${statusLabel.cls}`}>{statusLabel.text}</span>
@@ -69,9 +63,9 @@ export default function FeedPost({ post, compact = false }: Props) {
         </div>
 
         {photo_urls.length > 0 && (
-          <div className="post-photos">
+          <div className="post-photos" role="list">
             {photo_urls.slice(0, 4).map((src, i) => (
-              <button key={i} className="photo-thumb" onClick={() => openPhoto(src)} aria-label={`เปิดรูป ${i + 1}`}>
+              <button key={i} className="photo-thumb" onClick={() => setPhotoSrc(src)} aria-label={`เปิดรูป ${i + 1}`} role="listitem">
                 <img src={src} alt={`photo-${i}`} loading="lazy" />
                 {i === 3 && photo_urls.length > 4 && <div className="more-overlay">+{photo_urls.length - 4}</div>}
               </button>
@@ -89,8 +83,7 @@ export default function FeedPost({ post, compact = false }: Props) {
         </footer>
       </article>
 
-      <PhotoModal src={photoSrc} onClose={() => setOpen(false)} alt={`${zone} photo`} />
-      {/* Note: modal shown only when photoSrc is set; open state not required because PhotoModal is controlled by photoSrc */}
+      <PhotoModal src={photoSrc} onClose={() => setPhotoSrc(null)} alt={`${zone} photo`} />
     </>
   );
 }

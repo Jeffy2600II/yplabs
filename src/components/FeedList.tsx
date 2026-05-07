@@ -16,7 +16,6 @@ type Props = {
 };
 
 export default function FeedList({ rows }: Props) {
-  // Normalize photo_url -> photo_urls array for FeedPost
   const posts = rows.map(r => ({
     id: r.id,
     zone: r.zone,
@@ -32,7 +31,7 @@ export default function FeedList({ rows }: Props) {
   }
   
   return (
-    <div className="feed-list">
+    <div className="feed-list" aria-live="polite">
       {posts.map(p => <FeedPost key={p.id ?? p.zone} post={p} />)}
     </div>
   );

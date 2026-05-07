@@ -12,13 +12,13 @@ import { getTodayTH } from '@/lib/clientDateUtils';
 import FeedList from '@/components/FeedList';
 import '@/styles/feed.css';
 
-// central API URLs (unchanged)
+// central API URLs (alias inspector:inspector_name, recorded_at:created_at)
 const TODAY = getTodayTH();
-const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('id,zone,status,inspector:inspector_name,note,photo_url,created_at:recorded_at')}`;
+const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('id,zone,status,inspector:inspector_name,note,photo_url,recorded_at:created_at')}`;
 const DUTY_URL  = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,auth_uid')}`;
 
 export default function HomePage() {
-  const { user, isMember, loading: authLoading } = useAuth();
+  const { user, isMember } = useAuth();
 
   const [zonesTick, setZonesTick] = useState(0);
   const [dutyTick, setDutyTick] = useState(0);
@@ -53,7 +53,7 @@ export default function HomePage() {
   });
 
   const posts = (zonesRaw ?? []).map((r: any) => ({
-    id: r.id ?? r.zone,
+    id: r.id,
     zone: r.zone,
     status: r.status,
     inspector: r.inspector,
