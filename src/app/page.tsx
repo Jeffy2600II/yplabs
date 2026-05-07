@@ -9,16 +9,15 @@ import { useRealtime } from '@/lib/realtimeHooks';
 import { remoteLog } from '@/lib/remoteLogger';
 import { getTodayTH } from '@/lib/clientDateUtils';
 
-import FeedList from '@/components/FeedList';
-import '@/styles/feed.css';
+import ZoneGrid from '@/components/ZoneGrid';
 
-// central API URLs (alias inspector:inspector_name, recorded_at:created_at)
+// central API URLs
 const TODAY = getTodayTH();
-const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('id,zone,status,inspector:inspector_name,note,photo_url,recorded_at:created_at')}`;
+const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector:inspector_name,note,photo_url,recorded_at:created_at')}`;
 const DUTY_URL  = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,auth_uid')}`;
 
 export default function HomePage() {
-  const { user, isMember } = useAuth();
+  const { user, isMember, loading: authLoading } = useAuth();
 
   const [zonesTick, setZonesTick] = useState(0);
   const [dutyTick, setDutyTick] = useState(0);
@@ -35,15 +34,6 @@ export default function HomePage() {
   }, [errorDuties]);
 
   useRealtime({
-    table: 'council_zone_checks',
-    onData: useCallback(() => {
-      invalidate(ZONES_URL);
-      setZonesTick(n => n + 1);
-    }, []),
-    debounceMs: 500,
-  });
-
-  useRealtime({
     table: 'council_duty',
     onData: useCallback(() => {
       invalidate(DUTY_URL);
@@ -52,30 +42,31 @@ export default function HomePage() {
     debounceMs: 500,
   });
 
-  const posts = (zonesRaw ?? []).map((r: any) => ({
-    id: r.id,
-    zone: r.zone,
-    status: r.status,
-    inspector: r.inspector,
-    note: r.note,
-    photo_urls: r.photo_url ? [r.photo_url] : [],
-    recorded_at: r.recorded_at ?? null,
-  }));
+  useRealtime({
+    table: 'council_zone_checks',
+    onData: useCallback(() => {
+      invalidate(ZONES_URL);
+      setZonesTick(n => n + 1);
+    }, []),
+    debounceMs: 500,
+  });
 
+  const zoneList = (zonesRaw ?? []).length ? zonesRaw : [];
   const dutyList = (duties ?? []);
 
   const todayTH = new Date().toLocaleDateString('th-TH', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
   });
 
+  // --- RENDER: only two sections: 1) Duty roster (top) 2) Zone checks (below)
   return (
     <AppShell pageTitle="หน้าหลัก">
-      {/* 1) Duty roster on top */}
+      {/* --- 1) Duty roster (TOP) --- */}
       <div className="card" style={{ marginBottom: 14 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 14 }}>🏫 เวรยืนหน้าโรงเรียน</div>
-            <div style={{ fontSize: 12, color: 'var(--t3)' }}>{todayTH}</div>
+            <div style={{ fontWeight: 800, fontSize: 14, fontFamily: 'var(--font-ui)' }}>🏫 เวรยืนหน้าโรงเรียน</div>
+            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 2 }}>{todayTH}</div>
           </div>
           <span className="badge badge-blue">{dutyList.length} คน</span>
         </div>
@@ -102,45 +93,70 @@ export default function HomePage() {
                 }}
               >
                 <div>
-                  <div style={{ fontWeight: 600 }}>{d.student_name}{d.auth_uid === user?.auth_uid && <span className="badge badge-blue" style={{ marginLeft: 8, fontSize: 10 }}>คุณ</span>}</div>
-                  <div style={{ fontSize: 12, color: 'var(--t3)', fontFamily: 'var(--font-mono)' }}>{d.student_id}</div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    {d.student_name}
+                    {d.auth_uid === user?.auth_uid && (
+                      <span className="badge badge-blue" style={{ marginLeft: 6, fontSize: 9 }}>คุณ</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--t3)', fontFamily: 'var(--font-mono)' }}>{d.student_id}</div>
                 </div>
                 <div style={{ textAlign: 'right' }}>
                   {d.checked_in ? <span className="badge badge-green">✓ มาแล้ว</span> : <span className="badge badge-gray">รอ</span>}
-                  {d.checked_in_at && <div style={{ fontSize: 11, color: 'var(--t3)', marginTop: 6 }}>{new Date(d.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</div>}
+                  {d.checked_in && d.checked_in_at && <div style={{ fontSize: 11, color: 'var(--t3)', marginTop: 4 }}>{new Date(d.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</div>}
                 </div>
               </div>
             ))}
           </div>
         )}
 
-        {isMember && <div style={{ marginTop: 12 }}><Link href="/duty" className="btn btn-ghost btn-sm">ดูรายละเอียด →</Link></div>}
+        {isMember && (
+          <div style={{ marginTop: 12 }}>
+            <Link href="/duty" className="btn btn-ghost btn-sm">ดูรายละเอียด →</Link>
+          </div>
+        )}
       </div>
 
-      {/* 2) Feed of zone-check posts */}
+      {/* --- 2) Zone checks (SECOND) --- */}
       <div className="card">
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
-            <div style={{ fontWeight:800 }}>🧹 สถานะเขตสะอาด</div>
-            <div style={{ fontSize: 12, color: 'var(--t3)' }}>{todayTH}</div>
+            <div style={{ fontWeight: 800, fontSize: 14, fontFamily: 'var(--font-ui)' }}>🧹 สถานะเขตสะอาด</div>
+            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 2 }}>{todayTH}</div>
           </div>
-          <div style={{ fontSize: 12, color: 'var(--t3)' }}><span className="rt-dot" /> อัปเดต</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--green)' }}>
+            <span className="rt-dot" />อัปเดตอัตโนมัติ
+          </div>
         </div>
 
         {loadingZones && !zonesRaw ? (
-          <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-            {[...Array(6)].map((_,i) => <div key={i} className="skeleton" style={{ height: 88, borderRadius: 'var(--r-lg)' }} />)}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 7 }}>
+            {Array.from({ length: 9 }).map((_, i) => <div key={i} className="skeleton" style={{ height: 80, borderRadius: 'var(--r-lg)' }} />)}
           </div>
         ) : (
-          <FeedList rows={posts} />
+          <ZoneGrid zones={zoneList} />
         )}
 
-        {isMember && <div style={{ marginTop: 12 }}><Link href="/zone-check" className="btn btn-ghost btn-sm">ตรวจเขตสะอาด →</Link></div>}
+        {isMember && (
+          <div style={{ marginTop: 12 }}>
+            <Link href="/zone-check" className="btn btn-ghost btn-sm">ตรวจเขตสะอาด →</Link>
+          </div>
+        )}
       </div>
 
-      {/* Minimal error banners */}
-      {errorDuties && <div className="alert alert-error" style={{ marginTop:12 }}>โหลดข้อมูลเวรไม่สำเร็จ <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft:10 }}>ลองใหม่</button></div>}
-      {errorZones && <div className="alert alert-error" style={{ marginTop:12 }}>โหลดข้อมูลเขตไม่สำเร็จ <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft:10 }}>ลองใหม่</button></div>}
+      {/* Error banners (kept but minimal) */}
+      {errorDuties && (
+        <div className="alert alert-error" style={{ marginTop: 12 }}>
+          โหลดข้อมูลเวรไม่สำเร็จ
+          <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
+        </div>
+      )}
+      {errorZones && (
+        <div className="alert alert-error" style={{ marginTop: 12 }}>
+          โหลดข้อมูลเขตไม่สำเร็จ
+          <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
+        </div>
+      )}
     </AppShell>
   );
 }
