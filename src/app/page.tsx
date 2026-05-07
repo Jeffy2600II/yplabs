@@ -10,15 +10,14 @@ import { remoteLog } from '@/lib/remoteLogger';
 import { getTodayTH } from '@/lib/clientDateUtils';
 
 import ZoneGrid from '@/components/ZoneGrid';
-import DutySummary from '@/components/DutySummary';
 
-// central API URLs (unchanged behavior)
+// central API URLs
 const TODAY = getTodayTH();
 const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector:inspector_name,note,photo_url,recorded_at:created_at')}`;
 const DUTY_URL  = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,auth_uid')}`;
 
 export default function HomePage() {
-  const { user, isAdmin, isMember, loading: authLoading } = useAuth();
+  const { user, isMember, loading: authLoading } = useAuth();
 
   const [zonesTick, setZonesTick] = useState(0);
   const [dutyTick, setDutyTick] = useState(0);
@@ -35,19 +34,19 @@ export default function HomePage() {
   }, [errorDuties]);
 
   useRealtime({
-    table: 'council_zone_checks',
+    table: 'council_duty',
     onData: useCallback(() => {
-      invalidate(ZONES_URL);
-      setZonesTick(n => n + 1);
+      invalidate(DUTY_URL);
+      setDutyTick(n => n + 1);
     }, []),
     debounceMs: 500,
   });
 
   useRealtime({
-    table: 'council_duty',
+    table: 'council_zone_checks',
     onData: useCallback(() => {
-      invalidate(DUTY_URL);
-      setDutyTick(n => n + 1);
+      invalidate(ZONES_URL);
+      setZonesTick(n => n + 1);
     }, []),
     debounceMs: 500,
   });
@@ -59,54 +58,11 @@ export default function HomePage() {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
   });
 
+  // --- RENDER: only two sections: 1) Duty roster (top) 2) Zone checks (below)
   return (
     <AppShell pageTitle="หน้าหลัก">
-      {/* Top: Duty summary (moved up per request) */}
-      <DutySummary dutyList={dutyList} currentUserUid={user?.auth_uid ?? null} />
-
-      {/* Error banners */}
-      {errorZones && (
-        <div className="alert alert-error" style={{ marginBottom: 12 }}>
-          โหลดข้อมูลเขตไม่สำเร็จ
-          <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
-        </div>
-      )}
-      {errorDuties && (
-        <div className="alert alert-error" style={{ marginBottom: 12 }}>
-          โหลดข้อมูลเวรไม่สำเร็จ
-          <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
-        </div>
-      )}
-
-      {/* Zone panel — grid of tiles with note + photo support */}
+      {/* --- 1) Duty roster (TOP) --- */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 14, fontFamily: 'var(--font-ui)' }}>🧹 สถานะเขตสะอาด</div>
-            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 2 }}>{todayTH}</div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--green)' }}>
-            <span className="rt-dot" />อัปเดตอัตโนมัติ
-          </div>
-        </div>
-
-        {loadingZones && !zonesRaw ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 7 }}>
-            {Array.from({ length: 9 }).map((_, i) => <div key={i} className="skeleton" style={{ height: 80, borderRadius: 'var(--r-lg)' }} />)}
-          </div>
-        ) : (
-          <ZoneGrid zones={zoneList} />
-        )}
-
-        {isMember && (
-          <div style={{ marginTop: 12 }}>
-            <Link href="/zone-check" className="btn btn-ghost btn-sm">ตรวจเขตสะอาด →</Link>
-          </div>
-        )}
-      </div>
-
-      {/* Duty panel (compact list) */}
-      <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
             <div style={{ fontWeight: 800, fontSize: 14, fontFamily: 'var(--font-ui)' }}>🏫 เวรยืนหน้าโรงเรียน</div>
@@ -160,6 +116,47 @@ export default function HomePage() {
           </div>
         )}
       </div>
+
+      {/* --- 2) Zone checks (SECOND) --- */}
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14, fontFamily: 'var(--font-ui)' }}>🧹 สถานะเขตสะอาด</div>
+            <div style={{ fontSize: 11.5, color: 'var(--t3)', marginTop: 2 }}>{todayTH}</div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--green)' }}>
+            <span className="rt-dot" />อัปเดตอัตโนมัติ
+          </div>
+        </div>
+
+        {loadingZones && !zonesRaw ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 7 }}>
+            {Array.from({ length: 9 }).map((_, i) => <div key={i} className="skeleton" style={{ height: 80, borderRadius: 'var(--r-lg)' }} />)}
+          </div>
+        ) : (
+          <ZoneGrid zones={zoneList} />
+        )}
+
+        {isMember && (
+          <div style={{ marginTop: 12 }}>
+            <Link href="/zone-check" className="btn btn-ghost btn-sm">ตรวจเขตสะอาด →</Link>
+          </div>
+        )}
+      </div>
+
+      {/* Error banners (kept but minimal) */}
+      {errorDuties && (
+        <div className="alert alert-error" style={{ marginTop: 12 }}>
+          โหลดข้อมูลเวรไม่สำเร็จ
+          <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
+        </div>
+      )}
+      {errorZones && (
+        <div className="alert alert-error" style={{ marginTop: 12 }}>
+          โหลดข้อมูลเขตไม่สำเร็จ
+          <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
+        </div>
+      )}
     </AppShell>
   );
 }
