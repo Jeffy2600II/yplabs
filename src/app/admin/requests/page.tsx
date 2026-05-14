@@ -1,6 +1,7 @@
 // Path:    src/app/admin/requests/page.tsx
 // Purpose: Admin page for reviewing and actioning pending member join requests.
 //          Approve creates an auth account; reject permanently deletes the request.
+//          Reject uses ConfirmDialog with clear consequence copy (Medium severity).
 // Used by: AppShell navigation (/admin/requests)
 
 'use client';
@@ -8,6 +9,7 @@
 import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { useAuth } from '@/context/AuthContext';
 import { useRealtime } from '@/lib/realtimeHooks';
 import { useAuthData, invalidate } from '@/lib/dataCore';
@@ -28,7 +30,6 @@ type RequestRow = {
 // ── Constants ─────────────────────────────────────────────────────
 const REQUESTS_URL = '/api/data?resource=council_join_requests&select=id,full_name,student_id,year,email,message,account_type,created_at';
 
-// Per-type display config — drives avatar gradient and label
 const TYPE_CONFIG: Record < string, { label: string;icon: string;gradient: string } > = {
   student: { label: 'นักเรียน', icon: '👩‍🎓', gradient: 'linear-gradient(135deg,#8A8EF8,#5B5BD6)' },
   teacher: { label: 'ครู', icon: '👨‍🏫', gradient: 'linear-gradient(135deg,#6EE7B7,#059669)' },
@@ -54,8 +55,11 @@ function timeSince(iso: string): string {
 export default function AdminRequestsPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
+  
   const [rtTick, setRtTick] = useState(0);
   const [actionId, setActionId] = useState < string | null > (null);
+  // Confirm dialog: only for reject (Medium severity — irreversible)
+  const [rejectTarget, setRejectTarget] = useState < { id: string;name: string } | null > (null);
   
   const { data: requests, loading, refresh } = useAuthData < RequestRow[] > (REQUESTS_URL, {
     realtimeTick: rtTick,
@@ -74,7 +78,6 @@ export default function AdminRequestsPage() {
   const reqList = requests ?? [];
   
   async function approve(id: string): Promise < void > {
-    if (!confirm('อนุมัติคำขอนี้?')) return;
     setActionId(id);
     try {
       const token = await getFreshToken();
@@ -94,10 +97,13 @@ export default function AdminRequestsPage() {
     }
   }
   
-  // ⚠️ DESTRUCTIVE ZONE: permanently deletes the join request row — cannot be recovered
-  async function reject(id: string, name: string): Promise < void > {
-    if (!confirm(`ปฏิเสธและลบคำขอของ "${name}" ถาวร?`)) return;
+  // ⚠️ DESTRUCTIVE ZONE: permanently deletes the join request — Medium severity.
+  //    User must re-submit if rejected by mistake. Confirm dialog required.
+  async function rejectConfirmed(): Promise < void > {
+    if (!rejectTarget) return;
+    const { id } = rejectTarget;
     setActionId(id);
+    setRejectTarget(null);
     try {
       const token = await getFreshToken();
       const res = await fetch(`/api/admin/requests/${id}`, {
@@ -123,6 +129,19 @@ export default function AdminRequestsPage() {
   
   return (
     <AppShell pageTitle="คำขอสมัครสมาชิก" pendingCount={reqList.length}>
+
+      {/* ⚠️ DESTRUCTIVE ZONE: reject deletes request permanently */}
+      <ConfirmDialog
+        open={rejectTarget !== null}
+        variant="danger"
+        title={`ปฏิเสธคำขอของ ${rejectTarget?.name ?? ''}?`}
+        description={`คำขอสมัครจะถูกลบถาวร ${rejectTarget?.name ?? ''} จะต้องส่งคำขอใหม่อีกครั้ง`}
+        confirmLabel="ปฏิเสธและลบ"
+        loading={actionId !== null}
+        onConfirm={() => void rejectConfirmed()}
+        onCancel={() => setRejectTarget(null)}
+      />
+
       {/* Header */}
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
         <div>
@@ -138,7 +157,6 @@ export default function AdminRequestsPage() {
         </div>
       </div>
 
-      {/* Pending notice */}
       {!loading && reqList.length > 0 && (
         <div className="card fade-up" style={{ marginBottom: 16, borderLeft: '3px solid var(--amber)', display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ fontSize: 22 }}>⏳</div>
@@ -149,7 +167,6 @@ export default function AdminRequestsPage() {
         </div>
       )}
 
-      {/* List */}
       {loading && reqList.length === 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {[1, 2, 3].map(i => (
@@ -185,7 +202,6 @@ export default function AdminRequestsPage() {
                   }}>
                     {getInitials(r.full_name)}
                   </div>
-
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 800, fontSize: 15.5, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       {r.full_name}
@@ -193,17 +209,15 @@ export default function AdminRequestsPage() {
                     </div>
                     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--text-3)' }}>
                       {r.student_id && <span>🎓 <strong style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>{r.student_id}</strong></span>}
-                      {r.email && <span>📧 {r.email}</span>}
-                      {r.year  && <span>📅 ปี {r.year}</span>}
+                      {r.email      && <span>📧 {r.email}</span>}
+                      {r.year       && <span>📅 ปี {r.year}</span>}
                     </div>
                   </div>
-
                   <div style={{ fontSize: 11, color: 'var(--text-4)', flexShrink: 0, textAlign: 'right' }}>
                     {timeSince(r.created_at)}
                   </div>
                 </div>
 
-                {/* Message (progressive disclosure — only shown when present) */}
                 {r.message && (
                   <div style={{ padding: '10px 16px', background: 'var(--surface-2)', borderBottom: '1px solid var(--border)', fontSize: 13, color: 'var(--text-3)', fontStyle: 'italic', lineHeight: 1.55 }}>
                     "{r.message}"
@@ -216,8 +230,12 @@ export default function AdminRequestsPage() {
                     {new Date(r.created_at).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
                   </span>
 
-                  {/* ⚠️ DESTRUCTIVE ZONE: permanently deletes the request row */}
-                  <button disabled={actionId !== null} onClick={() => void reject(r.id, r.full_name)} className="btn btn-danger btn-sm">
+                  {/* ⚠️ DESTRUCTIVE ZONE: opens confirm dialog before deleting */}
+                  <button
+                    disabled={actionId !== null}
+                    onClick={() => setRejectTarget({ id: r.id, name: r.full_name })}
+                    className="btn btn-danger btn-sm"
+                  >
                     ❌ ปฏิเสธ
                   </button>
 

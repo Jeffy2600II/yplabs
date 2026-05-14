@@ -1,6 +1,6 @@
 // Path:    src/app/admin/users/page.tsx
 // Purpose: Admin page for listing, searching, editing, and deleting member accounts.
-//          Replaces the old table layout with mobile-first card rows.
+//          Delete uses type-to-confirm (High severity). Disable uses confirm dialog.
 // Used by: AppShell navigation (/admin/users)
 
 'use client';
@@ -8,6 +8,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { useAuth } from '@/context/AuthContext';
 import { getBrowserSupabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
@@ -27,12 +28,18 @@ type UserRow = {
   created_at: string;
 };
 
+// ── Confirm dialog state shape ─────────────────────────────────────
+type ConfirmState =
+  | { open: false }
+  | { open: true; action: 'delete';  user: UserRow }
+  | { open: true; action: 'disable'; user: UserRow }
+  | { open: true; action: 'enable';  user: UserRow };
+
 // ── Constants ─────────────────────────────────────────────────────
-const YEARS_URL  = '/api/data?resource=council_years&select=year,closed';
-const USERS_PATH = '/api/data?resource=council_users';
+const YEARS_URL    = '/api/data?resource=council_years&select=year,closed';
+const USERS_PATH   = '/api/data?resource=council_users';
 const USERS_SELECT = 'id,auth_uid,full_name,student_id,email,year,role,approved,disabled,account_type,created_at';
 
-// Gradient palette for avatars — deterministic by name hash
 const AVATAR_GRADIENTS = [
   'linear-gradient(135deg,#8A8EF8,#5B5BD6)',
   'linear-gradient(135deg,#6EE7B7,#059669)',
@@ -75,6 +82,8 @@ export default function AdminUsersPage() {
   const [addingYear, setAddingYear]     = useState(false);
   const [newYearInput, setNewYearInput] = useState('');
   const [pageError, setPageError]       = useState<string | null>(null);
+  // Centralized confirm state — replaces all window.confirm() calls
+  const [confirm, setConfirm]           = useState<ConfirmState>({ open: false });
 
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
@@ -126,15 +135,15 @@ export default function AdminUsersPage() {
       if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
       if (selectedYear !== null) await loadUsers(selectedYear);
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'แก้ไขล้มเหลว');
+      setPageError(err instanceof Error ? err.message : 'แก้ไขล้มเหลว');
     } finally {
       setActionId(null);
     }
   }
 
-  // ⚠️ DESTRUCTIVE ZONE: permanent account deletion — removes both council_users row and Supabase auth user
-  async function deleteUser(authUid: string, name: string): Promise<void> {
-    if (!confirm(`ลบบัญชี "${name}" ออกจากระบบถาวร?\nการกระทำนี้ไม่สามารถยกเลิกได้`)) return;
+  // ⚠️ DESTRUCTIVE ZONE: permanent account deletion — High severity
+  //    Requires type-to-confirm (Layer 3) before API call is made.
+  async function deleteUser(authUid: string): Promise<void> {
     setActionId(authUid);
     try {
       const token = await getSessionToken();
@@ -146,14 +155,15 @@ export default function AdminUsersPage() {
       if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
       if (selectedYear !== null) await loadUsers(selectedYear);
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'ลบบัญชีล้มเหลว');
+      setPageError(err instanceof Error ? err.message : 'ลบบัญชีล้มเหลว');
     } finally {
       setActionId(null);
+      setConfirm({ open: false });
     }
   }
 
   async function resetPassword(authUid: string, name: string): Promise<void> {
-    if (!confirm(`รีเซ็ตรหัสผ่านของ "${name}" เป็นรหัสนักเรียน?`)) return;
+    if (!window.confirm(`รีเซ็ตรหัสผ่านของ "${name}" เป็นรหัสนักเรียน?`)) return;
     setActionId(authUid);
     try {
       const token = await getSessionToken();
@@ -163,9 +173,11 @@ export default function AdminUsersPage() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      setPageError(null);
+      // Show success inline instead of alert
       alert('รีเซ็ตสำเร็จ ✅');
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'รีเซ็ตรหัสผ่านล้มเหลว');
+      setPageError(err instanceof Error ? err.message : 'รีเซ็ตรหัสผ่านล้มเหลว');
     } finally {
       setActionId(null);
     }
@@ -173,7 +185,7 @@ export default function AdminUsersPage() {
 
   async function addYear(): Promise<void> {
     const y = Number(newYearInput.trim());
-    if (!y || !Number.isInteger(y)) { alert('กรอกเลขปีที่ถูกต้อง'); return; }
+    if (!y || !Number.isInteger(y)) { setPageError('กรอกเลขปีที่ถูกต้อง'); return; }
     setAddingYear(true);
     try {
       const token = await getSessionToken();
@@ -187,10 +199,19 @@ export default function AdminUsersPage() {
       setNewYearInput('');
       await loadYears();
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'เพิ่มปีล้มเหลว');
+      setPageError(err instanceof Error ? err.message : 'เพิ่มปีล้มเหลว');
     } finally {
       setAddingYear(false);
     }
+  }
+
+  // ── Handle confirmed action from dialog ───────────────────────
+  async function handleConfirmedAction(): Promise<void> {
+    if (!confirm.open) return;
+    if (confirm.action === 'delete')  await deleteUser(confirm.user.auth_uid);
+    if (confirm.action === 'disable') await patchUser(confirm.user.auth_uid, { disabled: true });
+    if (confirm.action === 'enable')  await patchUser(confirm.user.auth_uid, { disabled: false });
+    setConfirm({ open: false });
   }
 
   const filtered = users.filter(u =>
@@ -207,8 +228,52 @@ export default function AdminUsersPage() {
   );
   if (!isAdmin) return null;
 
+  // Build confirm dialog props based on current state
+  const confirmDialogProps = (() => {
+    if (!confirm.open) return null;
+    if (confirm.action === 'delete') return {
+      variant: 'danger' as const,
+      title: `ลบบัญชี ${confirm.user.full_name}?`,
+      description: `บัญชีและข้อมูลทั้งหมดของ ${confirm.user.full_name} จะถูกลบถาวร ไม่สามารถกู้คืนได้`,
+      confirmLabel: 'ลบบัญชีถาวร',
+      // Type-to-confirm: user must type the full name (Layer 3 — High severity)
+      typeToConfirm: confirm.user.full_name,
+      typeToConfirmHint: 'พิมพ์ชื่อ-นามสกุลเพื่อยืนยัน',
+    };
+    if (confirm.action === 'disable') return {
+      variant: 'warning' as const,
+      title: `ปิดบัญชี ${confirm.user.full_name}?`,
+      description: `${confirm.user.full_name} จะไม่สามารถเข้าสู่ระบบได้จนกว่าจะเปิดบัญชีอีกครั้ง`,
+      confirmLabel: 'ปิดบัญชี',
+    };
+    if (confirm.action === 'enable') return {
+      variant: 'primary' as const,
+      title: `เปิดบัญชี ${confirm.user.full_name}?`,
+      description: `${confirm.user.full_name} จะสามารถเข้าสู่ระบบได้อีกครั้ง`,
+      confirmLabel: 'เปิดบัญชี',
+    };
+    return null;
+  })();
+
   return (
     <AppShell pageTitle="จัดการบัญชีสมาชิก">
+
+      {/* Confirm dialog */}
+      {confirmDialogProps && (
+        <ConfirmDialog
+          open={confirm.open}
+          variant={confirmDialogProps.variant}
+          title={confirmDialogProps.title}
+          description={confirmDialogProps.description}
+          confirmLabel={confirmDialogProps.confirmLabel}
+          typeToConfirm={'typeToConfirm' in confirmDialogProps ? confirmDialogProps.typeToConfirm : undefined}
+          typeToConfirmHint={'typeToConfirmHint' in confirmDialogProps ? confirmDialogProps.typeToConfirmHint : undefined}
+          loading={actionId !== null}
+          onConfirm={() => void handleConfirmedAction()}
+          onCancel={() => setConfirm({ open: false })}
+        />
+      )}
+
       {/* Header */}
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
         <div>
@@ -262,7 +327,6 @@ export default function AdminUsersPage() {
         ))}
       </div>
 
-      {/* Page-level error */}
       {pageError && (
         <div className="alert alert-error" style={{ marginBottom: 14 }}>
           {pageError}
@@ -299,15 +363,8 @@ export default function AdminUsersPage() {
           </div>
 
           {filtered.map((u, idx) => (
-            <div
-              key={u.auth_uid}
-              className="data-item"
-              style={{ '--stagger': idx } as React.CSSProperties}
-            >
-              <div
-                className="data-item-avatar"
-                style={{ background: avatarGradient(u.full_name) }}
-              >
+            <div key={u.auth_uid} className="data-item" style={{ '--stagger': idx } as React.CSSProperties}>
+              <div className="data-item-avatar" style={{ background: avatarGradient(u.full_name) }}>
                 {getInitials(u.full_name)}
               </div>
 
@@ -342,17 +399,44 @@ export default function AdminUsersPage() {
                   <option value="admin">⭐ admin</option>
                 </select>
 
-                {u.disabled
-                  ? <button disabled={actionId !== null} onClick={() => void patchUser(u.auth_uid, { disabled: false })} className="btn btn-success btn-sm">เปิด</button>
-                  : <button disabled={actionId !== null} onClick={() => void patchUser(u.auth_uid, { disabled: true  })} className="btn btn-ghost btn-sm">ปิด</button>
-                }
-
-                {u.account_type === 'student' && (
-                  <button disabled={actionId !== null} onClick={() => void resetPassword(u.auth_uid, u.full_name)} className="btn btn-ghost btn-sm" title="รีเซ็ตรหัสผ่านเป็นรหัสนักเรียน">🔑</button>
+                {/* Disable/enable — uses confirm dialog */}
+                {u.disabled ? (
+                  <button
+                    disabled={actionId !== null}
+                    onClick={() => setConfirm({ open: true, action: 'enable', user: u })}
+                    className="btn btn-success btn-sm"
+                  >
+                    เปิด
+                  </button>
+                ) : (
+                  <button
+                    disabled={actionId !== null}
+                    onClick={() => setConfirm({ open: true, action: 'disable', user: u })}
+                    className="btn btn-ghost btn-sm"
+                  >
+                    ปิด
+                  </button>
                 )}
 
-                {/* ⚠️ DESTRUCTIVE ZONE: delete account — btn-danger intentionally NOT primary */}
-                <button disabled={actionId !== null} onClick={() => void deleteUser(u.auth_uid, u.full_name)} className="btn btn-danger btn-sm">ลบ</button>
+                {u.account_type === 'student' && (
+                  <button
+                    disabled={actionId !== null}
+                    onClick={() => void resetPassword(u.auth_uid, u.full_name)}
+                    className="btn btn-ghost btn-sm"
+                    title="รีเซ็ตรหัสผ่านเป็นรหัสนักเรียน"
+                  >
+                    🔑
+                  </button>
+                )}
+
+                {/* ⚠️ DESTRUCTIVE ZONE: High severity — type-to-confirm required */}
+                <button
+                  disabled={actionId !== null}
+                  onClick={() => setConfirm({ open: true, action: 'delete', user: u })}
+                  className="btn btn-danger btn-sm"
+                >
+                  ลบ
+                </button>
               </div>
             </div>
           ))}

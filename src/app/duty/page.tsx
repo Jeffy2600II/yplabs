@@ -1,12 +1,14 @@
 // Path:    src/app/duty/page.tsx
 // Purpose: Member-facing duty roster page — shows today's duty list, progress bar,
-//          and allows members to self check-in (or walk-in).
+//          and allows members to self check-in with confirmation safety.
+//          Check-in is hidden behind an expand step to prevent accidental taps.
 // Used by: AppShell navigation (/duty), home page "ดูทั้งหมด" link
 
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
 import AppShell from '@/components/AppShell';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { getFreshToken } from '@/lib/sessionUtils';
@@ -27,9 +29,9 @@ type DutyEntry = {
 };
 
 // ── Constants ─────────────────────────────────────────────────────
-const TODAY    = getTodayTH();
-const DUTY_URL = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
-const CHECKIN_URL = '/api/council/duty/checkin';
+const TODAY          = getTodayTH();
+const DUTY_URL       = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
+const CHECKIN_URL    = '/api/council/duty/checkin';
 const POLL_INTERVAL_MS = 30_000;
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -65,17 +67,26 @@ export default function DutyPage() {
 
   useRealtime({ table: 'council_duty', onData: handleRealtimeUpdate, debounceMs: 500 });
 
-  const [note, setNote]               = useState('');
-  const [checkingIn, setCheckingIn]   = useState(false);
-  const [checkInError, setCheckInError] = useState<string | null>(null);
-  const [success, setSuccess]         = useState<string | null>(null);
+  const [note, setNote]                     = useState('');
+  const [checkingIn, setCheckingIn]         = useState(false);
+  const [checkInError, setCheckInError]     = useState<string | null>(null);
+  const [success, setSuccess]               = useState<string | null>(null);
+  // Safety: check-in section collapsed by default — prevents accidental taps
+  const [checkinExpanded, setCheckinExpanded] = useState(false);
+  // Safety: confirmation dialog before committing check-in
+  const [showCheckinConfirm, setShowCheckinConfirm] = useState(false);
 
   const myEntry      = user ? dutyList.find(d => d.auth_uid === user.auth_uid) : null;
   const checkedCount = dutyList.filter(d => d.checked_in).length;
   const pendingCount = dutyList.length - checkedCount;
   const progress     = dutyList.length ? Math.round((checkedCount / dutyList.length) * 100) : 0;
+  const isWalkin     = isMember && !myEntry;
 
-  async function handleCheckIn(): Promise<void> {
+  // ── Check-in (only runs after confirmation dialog confirms) ────
+  // ⚠️ DESTRUCTIVE ZONE: check-in creates an immutable attendance record.
+  //    Members cannot undo this themselves; only admin can uncheckin.
+  async function handleConfirmedCheckin(): Promise<void> {
+    setShowCheckinConfirm(false);
     setCheckingIn(true);
     setCheckInError(null);
     setSuccess(null);
@@ -93,6 +104,7 @@ export default function DutyPage() {
 
       setSuccess(`เช็คอินสำเร็จแล้ว ✅${json.is_walkin ? ' (Walk-in)' : ''}`);
       setNote('');
+      setCheckinExpanded(false);
       invalidate(DUTY_URL);
       setDutyTick(n => n + 1);
     } catch (err: unknown) {
@@ -110,6 +122,25 @@ export default function DutyPage() {
 
   return (
     <AppShell pageTitle="เวรหน้าโรงเรียน">
+
+      {/* ── Safety confirmation for check-in ─────────────────────── */}
+      {/* ⚠️ DESTRUCTIVE ZONE: attendance record is immutable by member */}
+      <ConfirmDialog
+        open={showCheckinConfirm}
+        variant="primary"
+        title={isWalkin ? 'ยืนยัน Walk-in?' : 'ยืนยันการเช็คอิน?'}
+        description={
+          isWalkin
+            ? 'การเช็คอิน Walk-in จะบันทึกว่าคุณมาถึงแล้ว ไม่สามารถยกเลิกได้ด้วยตัวเอง'
+            : 'การเช็คอินจะบันทึกว่าคุณมาถึงแล้ว หากเช็คอินผิดพลาดต้องให้แอดมินยกเลิกให้'
+        }
+        confirmLabel="ยืนยัน — มาถึงแล้ว"
+        cancelLabel="ยังไม่ใช่ตอนนี้"
+        loading={checkingIn}
+        onConfirm={() => void handleConfirmedCheckin()}
+        onCancel={() => setShowCheckinConfirm(false)}
+      />
+
       {/* Header */}
       <div className="page-header">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
@@ -123,7 +154,7 @@ export default function DutyPage() {
         </div>
       </div>
 
-      {/* Stats + progress card */}
+      {/* Stats + progress */}
       <div className="card fade-up" style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', gap: 20, marginBottom: 12 }}>
           <div style={{ flex: 1 }}>
@@ -148,7 +179,6 @@ export default function DutyPage() {
         </div>
       </div>
 
-      {/* Fetch error */}
       {fetchError && (
         <div className="alert alert-error" style={{ marginBottom: 14 }}>
           โหลดข้อมูลไม่สำเร็จ
@@ -156,33 +186,69 @@ export default function DutyPage() {
         </div>
       )}
 
-      {/* Self check-in card — shown only to unauthenticated members */}
+      {/* ── Check-in card — collapsed by default (safety design) ── */}
       {isMember && !myEntry?.checked_in && !authLoading && (
-        <div className="card fade-up" style={{ borderLeft: '4px solid var(--brand)', marginBottom: 16 }}>
-          {myEntry ? (
-            <>
-              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 3 }}>🏫 คุณมีรายชื่อในเวรวันนี้</div>
-              <div style={{ color: 'var(--text-3)', fontSize: 13, marginBottom: 14 }}>กดเช็คอินเมื่อมาถึงหน้าโรงเรียน</div>
-            </>
-          ) : (
-            <>
-              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 3 }}>🏫 Walk-in เข้าร่วมวันนี้</div>
-              <div style={{ color: 'var(--text-3)', fontSize: 13, marginBottom: 14 }}>ไม่ได้อยู่ในรายชื่อเวร แต่เช็คอิน Walk-in ได้เลย</div>
-            </>
-          )}
-          <div className="form-group" style={{ marginBottom: 12 }}>
-            <label className="form-label">หมายเหตุ (ไม่บังคับ)</label>
-            <input value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น มาถึงแล้ว" />
+        <div
+          className="card fade-up"
+          style={{
+            borderLeft: `4px solid ${checkinExpanded ? 'var(--brand)' : 'var(--border-2)'}`,
+            marginBottom: 16,
+            transition: 'border-color var(--dur)',
+          }}
+        >
+          {/* Header row — always visible */}
+          <div
+            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+            onClick={() => setCheckinExpanded(v => !v)}
+          >
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13.5 }}>
+                {isWalkin ? '🚶 Walk-in เข้าร่วมวันนี้' : '🏫 คุณมีรายชื่อในเวรวันนี้'}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
+                {isWalkin
+                  ? 'ไม่ได้อยู่ในรายชื่อ แต่เช็คอินได้'
+                  : 'กดเพื่อเปิดและเช็คอิน'}
+              </div>
+            </div>
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ flexShrink: 0, fontSize: 12 }}
+              onClick={e => { e.stopPropagation(); setCheckinExpanded(v => !v); }}
+            >
+              {checkinExpanded ? 'ยุบ ▲' : 'เช็คอิน ▼'}
+            </button>
           </div>
-          {checkInError && <div className="alert alert-error" style={{ marginBottom: 10 }}>{checkInError}</div>}
-          {success      && <div className="alert alert-success" style={{ marginBottom: 10 }}>{success}</div>}
-          <button onClick={() => void handleCheckIn()} disabled={checkingIn} className="btn btn-success btn-full btn-lg">
-            {checkingIn ? '🔄 กำลังเช็คอิน...' : '✅ เช็คอิน — ฉันมาถึงแล้ว'}
-          </button>
+
+          {/* Expanded content — only visible when user deliberately opens it */}
+          {checkinExpanded && (
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border)', animation: 'fadeIn .18s var(--ease) both' }}>
+              <div className="form-group" style={{ marginBottom: 12 }}>
+                <label className="form-label">หมายเหตุ (ไม่บังคับ)</label>
+                <input value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น มาถึงแล้ว" />
+              </div>
+
+              {checkInError && <div className="alert alert-error" style={{ marginBottom: 10 }}>{checkInError}</div>}
+              {success      && <div className="alert alert-success" style={{ marginBottom: 10 }}>{success}</div>}
+
+              {/* Opens confirm dialog — not immediate action */}
+              <button
+                onClick={() => setShowCheckinConfirm(true)}
+                disabled={checkingIn}
+                className="btn btn-success btn-full btn-lg"
+              >
+                {checkingIn ? '🔄 กำลังเช็คอิน...' : '✅ เช็คอิน — ฉันมาถึงแล้ว'}
+              </button>
+
+              <div style={{ fontSize: 11, color: 'var(--text-4)', textAlign: 'center', marginTop: 8 }}>
+                การเช็คอินไม่สามารถยกเลิกได้ด้วยตัวเอง
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Already checked-in confirmation */}
+      {/* Already checked-in */}
       {isMember && myEntry?.checked_in && (
         <div className="alert alert-success fade-up" style={{ marginBottom: 16 }}>
           ✅ คุณเช็คอินแล้วเมื่อ{' '}
@@ -222,7 +288,6 @@ export default function DutyPage() {
           <div className="empty-state">
             <div className="empty-icon">📋</div>
             <div>ยังไม่มีรายชื่อเวรสำหรับวันนี้</div>
-            {isMember && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-3)' }}>กดเช็คอิน Walk-in ด้านบนได้เลย</div>}
           </div>
         ) : (
           dutyList.map((d, idx) => (
@@ -234,7 +299,6 @@ export default function DutyPage() {
                 animationDelay: `${Math.min(idx, 8) * 30}ms`,
               }}
             >
-              {/* Avatar with status dot */}
               <div style={{ position: 'relative', flexShrink: 0 }}>
                 <div
                   className="post-avatar"

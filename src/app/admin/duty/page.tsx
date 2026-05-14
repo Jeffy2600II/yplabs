@@ -1,12 +1,14 @@
 // Path:    src/app/admin/duty/page.tsx
 // Purpose: Admin duty roster management — add/remove members from daily duty,
 //          check-in and undo check-in on behalf of members.
+//          All destructive actions use ConfirmDialog (not window.confirm).
 // Used by: AppShell navigation (/admin/duty)
 
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
 import AppShell from '@/components/AppShell';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import { useRealtime } from '@/lib/realtimeHooks';
@@ -33,10 +35,19 @@ type UserRow = {
   year: number;
 };
 
+// ── Confirm dialog state shape ─────────────────────────────────────
+type ConfirmState = {
+  open:    boolean;
+  action:  'remove' | 'checkin' | 'uncheckin' | null;
+  id:      string;
+  name:    string;
+};
+
+const CLOSED_CONFIRM: ConfirmState = { open: false, action: null, id: '', name: '' };
+
 // ── Constants ─────────────────────────────────────────────────────
-const TODAY = typeof window !== 'undefined' ? getTodayTH() : new Date().toISOString().split('T')[0];
-const USERS_URL  = '/api/data?resource=council_users&select=auth_uid,full_name,student_id,year';
-// Public URL must be invalidated after any mutation so home page updates too
+const TODAY          = typeof window !== 'undefined' ? getTodayTH() : new Date().toISOString().split('T')[0];
+const USERS_URL      = '/api/data?resource=council_users&select=auth_uid,full_name,student_id,year';
 const PUBLIC_DUTY_URL = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: getTodayTH() }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -57,15 +68,17 @@ export default function AdminDutyPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
 
-  const [rtTick, setRtTick]           = useState(0);
-  const [selectedDate, setSelectedDate] = useState(TODAY);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [users, setUsers]             = useState<UserRow[]>([]);
-  const [usersLoading, setUsersLoading] = useState(false);
-  const [userSearch, setUserSearch]   = useState('');
-  const [actionId, setActionId]       = useState<string | null>(null);
-  const [error, setError]             = useState<string | null>(null);
-  const [success, setSuccess]         = useState<string | null>(null);
+  const [rtTick, setRtTick]               = useState(0);
+  const [selectedDate, setSelectedDate]   = useState(TODAY);
+  const [showAddModal, setShowAddModal]   = useState(false);
+  const [users, setUsers]                 = useState<UserRow[]>([]);
+  const [usersLoading, setUsersLoading]   = useState(false);
+  const [userSearch, setUserSearch]       = useState('');
+  const [actionId, setActionId]           = useState<string | null>(null);
+  const [error, setError]                 = useState<string | null>(null);
+  const [success, setSuccess]             = useState<string | null>(null);
+  // Centralized confirm dialog state — replaces all window.confirm() calls
+  const [confirm, setConfirm]             = useState<ConfirmState>(CLOSED_CONFIRM);
 
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
@@ -77,11 +90,10 @@ export default function AdminDutyPage() {
     realtimeTick: rtTick,
     enabled: isAdmin,
   });
-  const dutyList   = duties ?? [];
+  const dutyList     = duties ?? [];
   const checkedCount = dutyList.filter(d => d.checked_in).length;
   const pendingCount = dutyList.length - checkedCount;
 
-  // Invalidate both admin URL and public URL so home page reflects changes
   const handleRealtimeUpdate = useCallback(() => {
     invalidate(dutyUrl);
     invalidate(PUBLIC_DUTY_URL);
@@ -89,6 +101,12 @@ export default function AdminDutyPage() {
   }, [dutyUrl]);
 
   useRealtime({ table: 'council_duty', onData: handleRealtimeUpdate, debounceMs: 500 });
+
+  function refreshDuty(): void {
+    invalidate(dutyUrl);
+    invalidate(PUBLIC_DUTY_URL);
+    setRtTick(n => n + 1);
+  }
 
   async function loadUsers(): Promise<void> {
     setUsersLoading(true);
@@ -99,7 +117,6 @@ export default function AdminDutyPage() {
       const json: UserRow[] = await res.json();
       setUsers(json ?? []);
     } catch (err: unknown) {
-      // Surface to user so they know the list is unavailable
       setError(`โหลดรายชื่อสมาชิกล้มเหลว: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setUsersLoading(false);
@@ -110,12 +127,6 @@ export default function AdminDutyPage() {
     setShowAddModal(true);
     setUserSearch('');
     if (users.length === 0) void loadUsers();
-  }
-
-  function refreshDuty(): void {
-    invalidate(dutyUrl);
-    invalidate(PUBLIC_DUTY_URL);
-    setRtTick(n => n + 1);
   }
 
   async function addDuty(user: UserRow): Promise<void> {
@@ -145,65 +156,71 @@ export default function AdminDutyPage() {
     }
   }
 
-  // ⚠️ DESTRUCTIVE ZONE: removes duty entry — cannot be recovered without re-adding
-  async function removeDuty(id: string, name: string): Promise<void> {
-    if (!confirm(`ลบ ${name} ออกจากเวรหรือไม่?`)) return;
+  // ── Confirmed action dispatcher ────────────────────────────────
+  async function handleConfirmedAction(): Promise<void> {
+    const { action, id, name } = confirm;
+    setConfirm(CLOSED_CONFIRM);
     setActionId(id);
+
     try {
       const token = await getFreshToken();
-      const res   = await fetch(`/api/admin/duty/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token ?? ''}` },
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+
+      if (action === 'remove') {
+        // ⚠️ DESTRUCTIVE ZONE: permanently removes duty entry
+        const res  = await fetch(`/api/admin/duty/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token ?? ''}` } });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+
+      } else if (action === 'checkin') {
+        const res  = await fetch('/api/admin/duty/checkin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
+          body: JSON.stringify({ id }),
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+
+      } else if (action === 'uncheckin') {
+        const res  = await fetch('/api/admin/duty/uncheckin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
+          body: JSON.stringify({ id }),
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      }
+
       refreshDuty();
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'ลบรายชื่อล้มเหลว');
+      setError(err instanceof Error ? err.message : 'ดำเนินการล้มเหลว');
     } finally {
       setActionId(null);
     }
   }
 
-  async function adminCheckin(id: string, name: string): Promise<void> {
-    if (!confirm(`ยืนยันเช็กชื่อ ${name}?`)) return;
-    setActionId(id);
-    try {
-      const token = await getFreshToken();
-      const res   = await fetch('/api/admin/duty/checkin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
-        body: JSON.stringify({ id }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
-      refreshDuty();
-    } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'เช็กอินล้มเหลว');
-    } finally {
-      setActionId(null);
-    }
-  }
+  // ── Confirm dialog copy by action type ────────────────────────
+  const CONFIRM_COPY: Record<NonNullable<ConfirmState['action']>, { title: (name: string) => string; description: string; label: string; variant: 'danger' | 'warning' | 'primary' }> = {
+    remove: {
+      title:       name => `ลบ ${name} ออกจากเวร?`,
+      description: 'รายชื่อจะถูกลบออก (สามารถเพิ่มกลับได้ภายหลัง)',
+      label:       'ลบออก',
+      variant:     'danger',
+    },
+    checkin: {
+      title:       name => `เช็กอินแทน ${name}?`,
+      description: 'ระบบจะบันทึกเวลาเช็กอินปัจจุบัน',
+      label:       'เช็กอิน',
+      variant:     'primary',
+    },
+    uncheckin: {
+      title:       name => `ยกเลิกเช็กอินของ ${name}?`,
+      description: 'เวลาเช็กอินจะถูกล้าง สมาชิกจะกลับเป็นสถานะรอ',
+      label:       'ยกเลิกเช็กอิน',
+      variant:     'warning',
+    },
+  };
 
-  async function adminUncheckin(id: string, name: string): Promise<void> {
-    if (!confirm(`ยกเลิกเช็กชื่อของ ${name}?`)) return;
-    setActionId(id);
-    try {
-      const token = await getFreshToken();
-      const res   = await fetch('/api/admin/duty/uncheckin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
-        body: JSON.stringify({ id }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
-      refreshDuty();
-    } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'ยกเลิกเช็กอินล้มเหลว');
-    } finally {
-      setActionId(null);
-    }
-  }
+  const currentCopy = confirm.action ? CONFIRM_COPY[confirm.action] : null;
 
   const filteredUsers = users.filter(u =>
     !userSearch ||
@@ -213,6 +230,21 @@ export default function AdminDutyPage() {
 
   return (
     <AppShell pageTitle="จัดการเวร — แอดมิน">
+
+      {/* Confirm dialog */}
+      {currentCopy && (
+        <ConfirmDialog
+          open={confirm.open}
+          variant={currentCopy.variant}
+          title={currentCopy.title(confirm.name)}
+          description={currentCopy.description}
+          confirmLabel={currentCopy.label}
+          loading={actionId !== null}
+          onConfirm={() => void handleConfirmedAction()}
+          onCancel={() => setConfirm(CLOSED_CONFIRM)}
+        />
+      )}
+
       {/* Header */}
       <div className="page-header">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
@@ -270,7 +302,7 @@ export default function AdminDutyPage() {
         </div>
       )}
 
-      {/* Duty card list */}
+      {/* Duty list */}
       <div className="data-list">
         <div className="data-list-header">
           <span className="data-list-title">
@@ -307,7 +339,6 @@ export default function AdminDutyPage() {
                 background: d.checked_in ? 'rgba(14,161,88,0.03)' : undefined,
               } as React.CSSProperties}
             >
-              {/* Avatar with check indicator */}
               <div style={{ position: 'relative', flexShrink: 0 }}>
                 <div
                   className="data-item-avatar"
@@ -348,11 +379,32 @@ export default function AdminDutyPage() {
 
               <div className="data-item-actions">
                 {!d.checked_in
-                  ? <button disabled={actionId !== null} onClick={() => void adminCheckin(d.id, d.student_name)} className="btn btn-success btn-sm">เช็กอิน</button>
-                  : <button disabled={actionId !== null} onClick={() => void adminUncheckin(d.id, d.student_name)} className="btn btn-ghost btn-sm">ยกเลิก</button>
+                  ? (
+                    <button
+                      disabled={actionId !== null}
+                      onClick={() => setConfirm({ open: true, action: 'checkin', id: d.id, name: d.student_name })}
+                      className="btn btn-success btn-sm"
+                    >
+                      เช็กอิน
+                    </button>
+                  ) : (
+                    <button
+                      disabled={actionId !== null}
+                      onClick={() => setConfirm({ open: true, action: 'uncheckin', id: d.id, name: d.student_name })}
+                      className="btn btn-ghost btn-sm"
+                    >
+                      ยกเลิก
+                    </button>
+                  )
                 }
-                {/* ⚠️ DESTRUCTIVE ZONE: removes duty row permanently */}
-                <button disabled={actionId !== null} onClick={() => void removeDuty(d.id, d.student_name)} className="btn btn-danger btn-sm">ลบ</button>
+                {/* ⚠️ DESTRUCTIVE ZONE: removes duty row — btn-danger, not primary */}
+                <button
+                  disabled={actionId !== null}
+                  onClick={() => setConfirm({ open: true, action: 'remove', id: d.id, name: d.student_name })}
+                  className="btn btn-danger btn-sm"
+                >
+                  ลบ
+                </button>
               </div>
             </div>
           ))
@@ -371,19 +423,14 @@ export default function AdminDutyPage() {
               </div>
               <button onClick={() => setShowAddModal(false)} className="btn btn-ghost btn-sm">✕ ปิด</button>
             </div>
-
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
               <input placeholder="ค้นหาชื่อ หรือ รหัส..." value={userSearch} onChange={e => setUserSearch(e.target.value)} autoFocus />
             </div>
-
             <div style={{ flex: 1, overflowY: 'auto' }}>
               {usersLoading ? (
                 <div className="loading-center" style={{ padding: 32 }}><div className="spinner" /></div>
               ) : filteredUsers.map(u => (
-                <div
-                  key={u.auth_uid}
-                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}
-                >
+                <div key={u.auth_uid} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <div className="data-item-avatar" style={{ width: 32, height: 32, fontSize: 10, background: 'linear-gradient(135deg,#C7CAF8,#8A8EF8)' }}>
                       {getInitials(u.full_name)}
