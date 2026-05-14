@@ -1,18 +1,19 @@
+// Path:    src/app/admin/zones/page.tsx
+// Purpose: Admin report view for zone cleanliness checks — date-range filter,
+//          per-zone summary tiles, and a post-card feed matching the home page.
+// Used by: AppShell navigation (/admin/zones)
+
 'use client';
 
-/* src/app/admin/zones/page.tsx
-   Admin zones page — uses dataCore + useServerEvents for reliable realtime.
-*/
-
-import { useServerEvents } from '@/lib/useServerEvents';
-import { useAuthData, invalidate } from '@/lib/dataCore';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
+import { useAuthData, invalidate } from '@/lib/dataCore';
+import { useServerEvents } from '@/lib/useServerEvents';
+import { remoteLog } from '@/lib/remoteLogger';
 
-const ZONES = ['ม.1/1','ม.1/2','ม.2/1','ม.2/2','ม.3/1','ม.3/2','ม.4','ม.5','ม.6'];
-
+// ── Types ─────────────────────────────────────────────────────────
 type ZoneRecord = {
   id: string;
   zone: string;
@@ -24,122 +25,152 @@ type ZoneRecord = {
   check_date: string;
 };
 
-function buildUrl(from: string, to: string) {
-  // Keep admin endpoint for flexible from/to queries (server handles range)
+// ── Constants ─────────────────────────────────────────────────────
+const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'] as const;
+
+function buildAdminZonesUrl(from: string, to: string): string {
   return `/api/admin/zones?from=${from}&to=${to}`;
 }
 
+function defaultDateFrom(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 7);
+  return d.toISOString().split('T')[0];
+}
+
+// ── Helpers ───────────────────────────────────────────────────────
+function getInitials(name: string): string {
+  return name.trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+}
+
+function timeSince(iso: string): string {
+  const diffMin = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
+  if (diffMin < 1)  return 'เมื่อกี้';
+  if (diffMin < 60) return `${diffMin} นาทีที่แล้ว`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24)  return `${diffHr} ชม. ที่แล้ว`;
+  return new Date(iso).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' });
+}
+
+// ── Component ─────────────────────────────────────────────────────
 export default function AdminZonesPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
 
-  const [dateFrom, setDateFrom] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() - 7);
-    return d.toISOString().split('T')[0];
-  });
-  const [dateTo, setDateTo] = useState(() => new Date().toISOString().split('T')[0]);
+  const [dateFrom, setDateFrom]     = useState(defaultDateFrom);
+  const [dateTo, setDateTo]         = useState(() => new Date().toISOString().split('T')[0]);
   const [filterZone, setFilterZone] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [photoModal, setPhotoModal] = useState<string | null>(null);
-  const [rtTick, setRtTick] = useState(0);
+  const [rtTick, setRtTick]         = useState(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  const zonesUrl = buildUrl(dateFrom, dateTo);
-
   if (!authLoading && !isAdmin) { router.replace('/'); return null; }
+
+  const zonesUrl = buildAdminZonesUrl(dateFrom, dateTo);
 
   const { data: records, loading, refresh } = useAuthData<ZoneRecord[]>(zonesUrl, {
     realtimeTick: rtTick,
     enabled: isAdmin,
   });
 
+  // Trigger initial load when isAdmin becomes true
   useEffect(() => {
-    if (!isAdmin) return;
-    if (!records) {
-      (async () => {
-        try {
-          setFetchError(null);
-          await refresh();
-        } catch (err: any) {
-          setFetchError(String(err?.message ?? err));
-        }
-      })();
-    }
+    if (!isAdmin || records !== null) return;
+    void (async () => {
+      try {
+        setFetchError(null);
+        await refresh();
+      } catch (err: unknown) {
+        setFetchError(err instanceof Error ? err.message : String(err));
+      }
+    })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
+  // SSE realtime — fall back to polling if SSE unavailable
   useServerEvents((message) => {
     try {
-      const table = message?.table;
-      if (table === 'council_zone_checks') {
-        invalidate(zonesUrl);
-        setRtTick(n => n + 1);
-        void (async () => {
-          try { setFetchError(null); await refresh(); } catch (err: any) {
-            setFetchError(String(err?.message ?? err));
-          }
-        })();
-      }
-    } catch (e) {
-      console.warn('[useServerEvents] admin zones handler error', e);
+      if ((message as { table?: string })?.table !== 'council_zone_checks') return;
+      invalidate(zonesUrl);
+      setRtTick(n => n + 1);
+      void (async () => {
+        try {
+          setFetchError(null);
+          await refresh();
+        } catch (err: unknown) {
+          setFetchError(err instanceof Error ? err.message : String(err));
+        }
+      })();
+    } catch (err: unknown) {
+      // SSE handler must never throw to the caller — log at debug so it's
+      // still visible in Vercel logs without crashing the SSE connection
+      void remoteLog('debug', '[zones] SSE handler: malformed message dropped', { error: String(err) });
     }
   }, { enabled: isAdmin, pollFallback: true });
 
   const allRecords = records ?? [];
-  const filtered = allRecords.filter(r =>
-    (!filterZone || r.zone === filterZone) &&
+  const filtered   = allRecords.filter(r =>
+    (!filterZone   || r.zone   === filterZone) &&
     (!filterStatus || r.status === filterStatus)
   );
 
   const cleanCount = filtered.filter(r => r.status === 'clean').length;
   const dirtyCount = filtered.filter(r => r.status === 'dirty').length;
-  const cleanPct = filtered.length ? Math.round(cleanCount / filtered.length * 100) : 0;
+  const cleanPct   = filtered.length ? Math.round((cleanCount / filtered.length) * 100) : 0;
 
   const zoneSummary = ZONES.map(z => {
     const zr = filtered.filter(r => r.zone === z);
-    return { zone: z, total: zr.length, clean: zr.filter(r => r.status === 'clean').length, dirty: zr.filter(r => r.status === 'dirty').length };
+    return {
+      zone:  z,
+      clean: zr.filter(r => r.status === 'clean').length,
+      dirty: zr.filter(r => r.status === 'dirty').length,
+    };
   });
 
   return (
-    <AppShell pageTitle="รายงานผลการตรวจเขตสะอาด">
+    <AppShell pageTitle="รายงานเขตสะอาด">
+      {/* Header */}
       <div className="page-header">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
           <div>
-            <div className="page-title">รายงานผลการตรวจเขตสะอาด</div>
+            <div className="page-title">📊 รายงานผลตรวจเขตสะอาด</div>
             <div className="page-subtitle">ดูประวัติและสถิติการตรวจเขตสะอาดรายวัน</div>
           </div>
-          <span style={{ fontSize: 11, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span className="rt-dot" />Realtime
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 10.5, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span className="rt-dot" />Realtime
+            </span>
+            <button onClick={() => void refresh()} className="btn btn-ghost btn-sm">🔄</button>
+          </div>
         </div>
       </div>
 
       {fetchError && (
         <div className="alert alert-error" style={{ marginBottom: 12 }}>
-          <div>ไม่สามารถโหลดข้อมูล: {fetchError}</div>
-          <div style={{ marginTop: 8 }}>
-            <button className="btn btn-ghost btn-sm" onClick={() => void refresh()}>ลองใหม่</button>
-          </div>
+          ไม่สามารถโหลดข้อมูล: {fetchError}
+          <button className="btn btn-ghost btn-sm" style={{ marginLeft: 8 }} onClick={() => void refresh()}>ลองใหม่</button>
         </div>
       )}
 
-      <div className="card" style={{ marginBottom: 18, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-        <div className="form-group">
+      {/* Filters */}
+      <div className="card fade-up" style={{ marginBottom: 16, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">จากวันที่</label>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ width: 'auto' }} />
         </div>
-        <div className="form-group">
+        <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">ถึงวันที่</label>
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ width: 'auto' }} />
         </div>
-        <div className="form-group">
+        <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">เขต</label>
           <select value={filterZone} onChange={e => setFilterZone(e.target.value)} style={{ width: 'auto' }}>
             <option value="">ทุกเขต</option>
             {ZONES.map(z => <option key={z} value={z}>{z}</option>)}
           </select>
         </div>
-        <div className="form-group">
+        <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">สถานะ</label>
           <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{ width: 'auto' }}>
             <option value="">ทั้งหมด</option>
@@ -147,75 +178,126 @@ export default function AdminZonesPage() {
             <option value="dirty">ไม่สะอาด</option>
           </select>
         </div>
-        <button onClick={() => void refresh()} className="btn btn-ghost btn-sm">🔄 รีเฟรช</button>
       </div>
 
-      <div className="grid-3" style={{ marginBottom: 20 }}>
-        <div className="stat-card" style={{ borderTop: '3px solid var(--brand)' }}>
-          <div className="stat-label">รายการทั้งหมด</div>
-          <div className="stat-value">{filtered.length}</div>
-        </div>
-        <div className="stat-card" style={{ borderTop: '3px solid var(--green)' }}>
-          <div className="stat-label">สะอาด</div>
-          <div className="stat-value" style={{ color: 'var(--green)' }}>{cleanCount}</div>
-          <div className="stat-sub">{cleanPct}%</div>
-        </div>
-        <div className="stat-card" style={{ borderTop: '3px solid var(--red)' }}>
-          <div className="stat-label">ไม่สะอาด</div>
-          <div className="stat-value" style={{ color: 'var(--red)' }}>{dirtyCount}</div>
-          <div className="stat-sub">{filtered.length ? 100 - cleanPct : 0}%</div>
-        </div>
+      {/* Stats */}
+      <div className="grid-3" style={{ marginBottom: 16 }}>
+        {[
+          { label: 'รายการทั้งหมด', value: filtered.length, color: 'var(--brand)', sub: 'รายการ' },
+          { label: 'สะอาด',         value: cleanCount,       color: 'var(--green)', sub: `${cleanPct}%` },
+          { label: 'ไม่สะอาด',      value: dirtyCount,       color: 'var(--red)',   sub: `${filtered.length ? 100 - cleanPct : 0}%` },
+        ].map((s, i) => (
+          <div key={i} className="stat-card fade-up" style={{ borderTop: `3px solid ${s.color}`, animationDelay: `${i * 40}ms` }}>
+            <div className="stat-label">{s.label}</div>
+            <div className="stat-value" style={{ color: s.color, fontSize: 24 }}>{s.value}</div>
+            <div className="stat-sub">{s.sub}</div>
+          </div>
+        ))}
       </div>
 
-      <div className="sec-label" style={{ marginBottom: 10 }}>สรุปรายเขต</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))', gap: 7, marginBottom: 22 }}>
-        {zoneSummary.map(z => (
-          <div key={z.zone} className="card" style={{ padding: '10px 12px', textAlign: 'center', borderTop: z.dirty > 0 ? '3px solid var(--red)' : z.clean > 0 ? '3px solid var(--green)' : '3px solid var(--b)' }}>
-            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>{z.zone}</div>
-            <div style={{ display: 'flex', gap: 4, justifyContent: 'center', flexWrap: 'wrap' }}>
-              <span className="badge badge-green" style={{ fontSize: 10 }}>✅ {z.clean}</span>
-              <span className="badge badge-red" style={{ fontSize: 10 }}>❌ {z.dirty}</span>
+      {/* Zone summary tiles — click to filter */}
+      <div className="sec-label" style={{ marginBottom: 8 }}>สรุปรายเขต</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(86px, 1fr))', gap: 7, marginBottom: 22 }}>
+        {zoneSummary.map((z, i) => (
+          <div
+            key={z.zone}
+            className="card fade-up"
+            onClick={() => setFilterZone(filterZone === z.zone ? '' : z.zone)}
+            style={{
+              padding: '10px 10px', textAlign: 'center', cursor: 'pointer',
+              borderTop: z.dirty > 0 ? '3px solid var(--red)' : z.clean > 0 ? '3px solid var(--green)' : '3px solid var(--border-2)',
+              animationDelay: `${i * 20}ms`,
+              outline: filterZone === z.zone ? '2px solid var(--brand)' : 'none',
+            }}
+          >
+            <div style={{ fontWeight: 800, fontSize: 12.5, marginBottom: 5, color: filterZone === z.zone ? 'var(--brand)' : 'var(--text)' }}>
+              {z.zone}
+            </div>
+            <div style={{ display: 'flex', gap: 3, justifyContent: 'center', flexWrap: 'wrap' }}>
+              <span className="badge badge-green" style={{ fontSize: 9 }}>✅ {z.clean}</span>
+              <span className="badge badge-red"   style={{ fontSize: 9 }}>❌ {z.dirty}</span>
             </div>
           </div>
         ))}
       </div>
 
-      <div className="sec-label" style={{ marginBottom: 10 }}>บันทึกรายการ</div>
-      <div className="table-wrap">
+      {/* Feed records */}
+      <div className="sec-label" style={{ marginBottom: 8 }}>บันทึกรายการ</div>
+      <div className="feed-list">
+        <div className="section-head">
+          <span className="section-head-title">ประวัติการตรวจ</span>
+          <span className="badge badge-blue">{filtered.length} รายการ</span>
+        </div>
+
         {loading && allRecords.length === 0 ? (
-          <div className="loading-center"><div className="spinner" /></div>
+          <div>
+            {[1, 2, 3, 4].map(i => (
+              <div key={i} style={{ display: 'flex', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+                <div className="skeleton" style={{ width: 34, height: 34, borderRadius: '50%', flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div className="skeleton" style={{ height: 13, width: '50%', marginBottom: 7, borderRadius: 6 }} />
+                  <div className="skeleton" style={{ height: 11, width: '35%', borderRadius: 6 }} />
+                </div>
+              </div>
+            ))}
+          </div>
         ) : filtered.length === 0 ? (
-          <div className="empty-state"><div className="empty-icon">📊</div><div>ไม่พบข้อมูลในช่วงเวลาที่เลือก</div></div>
+          <div className="empty-state">
+            <div className="empty-icon">📊</div>
+            <div>ไม่พบข้อมูลในช่วงเวลาที่เลือก</div>
+          </div>
         ) : (
-          <table>
-            <thead>
-              <tr><th>วันที่</th><th>เขต</th><th>สถานะ</th><th>ผู้ตรวจ</th><th>หมายเหตุ</th><th>รูป</th></tr>
-            </thead>
-            <tbody>
-              {filtered.map(r => (
-                <tr key={r.id}>
-                  <td style={{ fontSize: 12.5, color: 'var(--t3)', whiteSpace: 'nowrap' }}>
-                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: '2-digit' })}{' '}
-                    <span style={{ fontSize: 11 }}>{new Date(r.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น.</span>
-                  </td>
-                  <td style={{ fontWeight: 600 }}>{r.zone}</td>
-                  <td>{r.status === 'clean' ? <span className="badge badge-green">✅ สะอาด</span> : <span className="badge badge-red">❌ ไม่สะอาด</span>}</td>
-                  <td style={{ fontSize: 13 }}>{r.inspector_name}</td>
-                  <td style={{ fontSize: 12.5, color: 'var(--t3)' }}>{r.note ?? '—'}</td>
-                  <td>{r.photo_url ? <button onClick={() => setPhotoModal(r.photo_url!)} className="btn btn-ghost btn-sm">🖼️ ดูรูป</button> : <span style={{ fontSize: 12, color: 'var(--t3)' }}>—</span>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          filtered.map((r, idx) => (
+            <div
+              key={r.id}
+              className="post-card"
+              style={{ animationDelay: `${Math.min(idx, 8) * 35}ms` }}
+            >
+              <div className="post-avatar">{getInitials(r.inspector_name)}</div>
+
+              <div className="post-content">
+                <div className="post-head">
+                  <span className="post-name">{r.inspector_name}</span>
+                  <span className="post-ts">{timeSince(r.created_at)}</span>
+                </div>
+                <div className="post-meta">
+                  <span className="post-zone-name">{r.zone}</span>
+                  <span className="post-sep">·</span>
+                  <span className={`status-pill ${r.status}`}>
+                    <span className="dot" />
+                    {r.status === 'clean' ? 'สะอาด' : 'ไม่สะอาด'}
+                  </span>
+                  <span className="post-sep">·</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-4)' }}>
+                    {new Date(r.created_at).toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })}
+                  </span>
+                </div>
+                {r.note && <div className="post-note">"{r.note}"</div>}
+                {r.photo_url && (
+                  <div className="post-photos">
+                    <img
+                      src={r.photo_url}
+                      alt={`zone-${r.zone}`}
+                      className="post-photo-thumb"
+                      onClick={() => setPhotoModal(r.photo_url)}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          ))
         )}
       </div>
 
+      {/* Photo lightbox */}
       {photoModal && (
-        <div onClick={() => setPhotoModal(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)', zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-          <div onClick={e => e.stopPropagation()} style={{ position: 'relative', maxWidth: '90vw', maxHeight: '90vh' }}>
-            <button onClick={() => setPhotoModal(null)} style={{ position: 'absolute', top: -14, right: -14, zIndex: 1, background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>×</button>
-            <img src={photoModal} alt="zone check photo" style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain', display: 'block' }} />
-            <a href={photoModal} target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm" style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.06)' }}>เปิดใน Google Drive ↗</a>
+        <div onClick={() => setPhotoModal(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+          <div onClick={e => e.stopPropagation()} style={{ position: 'relative' }}>
+            <button onClick={() => setPhotoModal(null)} style={{ position: 'absolute', top: -14, right: -14, zIndex: 1, background: '#fff', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer', fontWeight: 800 }}>×</button>
+            <img src={photoModal} alt="zone check" style={{ maxWidth: '85vw', maxHeight: '85vh', borderRadius: 12, objectFit: 'contain', display: 'block' }} />
+            <a href={photoModal} target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm" style={{ marginTop: 10, display: 'block', textAlign: 'center', background: 'rgba(255,255,255,0.08)', color: '#fff' }}>
+              เปิดใน Google Drive ↗
+            </a>
           </div>
         </div>
       )}

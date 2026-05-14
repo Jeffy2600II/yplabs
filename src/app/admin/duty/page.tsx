@@ -1,12 +1,9 @@
-/* src/app/admin/duty/page.tsx */
-'use client';
+// Path:    src/app/admin/duty/page.tsx
+// Purpose: Admin duty roster management — add/remove members from daily duty,
+//          check-in and undo check-in on behalf of members.
+// Used by: AppShell navigation (/admin/duty)
 
-/**
- * /admin/duty/page.tsx — จัดการเวรยืนหน้าโรงเรียน
- *
- * หลัง mutation ทุกครั้ง invalidate ทั้ง admin URL + public URL
- * เพื่อให้หน้า home + duty ฝั่ง user อัปเดตด้วย
- */
+'use client';
 
 import { useState, useCallback, useEffect } from 'react';
 import AppShell from '@/components/AppShell';
@@ -17,18 +14,7 @@ import { useAuthData, invalidate } from '@/lib/dataCore';
 import { getFreshToken } from '@/lib/sessionUtils';
 import { getTodayTH } from '@/lib/clientDateUtils';
 
-// ── URL Constants ─────────────────────────────────────────────────
-// Use central API for reads (admin still uses admin endpoints for mutations)
-function adminDutyUrl(date: string) {
-  // central API with equality filter on duty_date
-  return `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: date }))}&select=${encodeURIComponent('id,student_name,student_id,auth_uid,checked_in,checked_in_at,note,duty_date')}`;
-}
-
-// ★ Must invalidate this to update public-facing today list as well
-const PUBLIC_DUTY_URL = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: getTodayTH() }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
-
-// ── Types ──────────────────────────────────────────��──────────────
-
+// ── Types ─────────────────────────────────────────────────────────
 type DutyEntry = {
   id: string;
   student_name: string;
@@ -47,22 +33,39 @@ type UserRow = {
   year: number;
 };
 
+// ── Constants ─────────────────────────────────────────────────────
 const TODAY = typeof window !== 'undefined' ? getTodayTH() : new Date().toISOString().split('T')[0];
+const USERS_URL  = '/api/data?resource=council_users&select=auth_uid,full_name,student_id,year';
+// Public URL must be invalidated after any mutation so home page updates too
+const PUBLIC_DUTY_URL = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: getTodayTH() }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
 
-// ─────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────
+function adminDutyUrl(date: string): string {
+  return `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: date }))}&select=${encodeURIComponent('id,student_name,student_id,auth_uid,checked_in,checked_in_at,note,duty_date')}`;
+}
 
+function getInitials(name: string): string {
+  return name.trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+}
+
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.';
+}
+
+// ── Component ─────────────────────────────────────────────────────
 export default function AdminDutyPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
-  const [rtTick, setRtTick] = useState(0);
+
+  const [rtTick, setRtTick]           = useState(0);
   const [selectedDate, setSelectedDate] = useState(TODAY);
   const [showAddModal, setShowAddModal] = useState(false);
-  const [users, setUsers] = useState<UserRow[]>([]);
+  const [users, setUsers]             = useState<UserRow[]>([]);
   const [usersLoading, setUsersLoading] = useState(false);
-  const [userSearch, setUserSearch] = useState('');
-  const [actionId, setActionId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  const [userSearch, setUserSearch]   = useState('');
+  const [actionId, setActionId]       = useState<string | null>(null);
+  const [error, setError]             = useState<string | null>(null);
+  const [success, setSuccess]         = useState<string | null>(null);
 
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
@@ -70,190 +73,187 @@ export default function AdminDutyPage() {
 
   const dutyUrl = adminDutyUrl(selectedDate);
 
-  // ★ useAuthData — reads now go through central API but still require admin token
   const { data: duties, loading } = useAuthData<DutyEntry[]>(dutyUrl, {
     realtimeTick: rtTick,
     enabled: isAdmin,
   });
-  const dutyList = duties ?? [];
-
-  // Move these computed values up so they exist before JSX uses them
+  const dutyList   = duties ?? [];
   const checkedCount = dutyList.filter(d => d.checked_in).length;
   const pendingCount = dutyList.length - checkedCount;
 
-  // ★ Double-trigger: invalidate + setRtTick ทั้งคู่ — keep same pattern
-  useRealtime({
-    table: 'council_duty',
-    onData: useCallback(() => {
-      invalidate(dutyUrl);
-      invalidate(PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
-    }, [dutyUrl]),
-    debounceMs: 500,
-  });
+  // Invalidate both admin URL and public URL so home page reflects changes
+  const handleRealtimeUpdate = useCallback(() => {
+    invalidate(dutyUrl);
+    invalidate(PUBLIC_DUTY_URL);
+    setRtTick(n => n + 1);
+  }, [dutyUrl]);
 
-  // ── Load users for modal ───────────────────────────────────────
+  useRealtime({ table: 'council_duty', onData: handleRealtimeUpdate, debounceMs: 500 });
 
-  async function loadUsers() {
+  async function loadUsers(): Promise<void> {
     setUsersLoading(true);
     try {
       const token = await getFreshToken();
-      // Use central API to fetch users for selection, but call with auth header
-      const url = `/api/data?resource=council_users&select=auth_uid,full_name,student_id,year`;
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token ?? ''}` } });
-      if (!res.ok) throw new Error('Failed to load users');
-      const json = await res.json();
-      // API returns array directly
+      const res   = await fetch(USERS_URL, { headers: { Authorization: `Bearer ${token ?? ''}` } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json: UserRow[] = await res.json();
       setUsers(json ?? []);
-    } catch (e) {
-      // best-effort — ignore
+    } catch (err: unknown) {
+      // Surface to user so they know the list is unavailable
+      setError(`โหลดรายชื่อสมาชิกล้มเหลว: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setUsersLoading(false);
     }
   }
 
-  function openAddModal() {
+  function openAddModal(): void {
     setShowAddModal(true);
     setUserSearch('');
     if (users.length === 0) void loadUsers();
   }
 
-  // ── Mutations ──────────────────────────────────────────────────
+  function refreshDuty(): void {
+    invalidate(dutyUrl);
+    invalidate(PUBLIC_DUTY_URL);
+    setRtTick(n => n + 1);
+  }
 
-  async function addDuty(user: UserRow) {
+  async function addDuty(user: UserRow): Promise<void> {
     setActionId(`add-${user.auth_uid}`);
     setError(null);
     try {
       const token = await getFreshToken();
-      const res = await fetch('/api/admin/duty', {
+      const res   = await fetch('/api/admin/duty', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
         body: JSON.stringify({
-          auth_uid: user.auth_uid,
+          auth_uid:     user.auth_uid,
           student_name: user.full_name,
-          student_id: user.student_id ?? '',
-          duty_date: selectedDate,
+          student_id:   user.student_id ?? '',
+          duty_date:    selectedDate,
         }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'ล้มเหลว');
-
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
       setSuccess(`เพิ่ม ${user.full_name} เข้าเวรแล้ว ✅`);
-      invalidate(dutyUrl);
-      invalidate(PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
+      refreshDuty();
       setShowAddModal(false);
-    } catch (e: any) {
-      setError(e?.message ?? 'ล้มเหลว');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'เพิ่มรายชื่อล้มเหลว');
     } finally {
       setActionId(null);
     }
   }
 
-  async function removeDuty(id: string, name: string) {
+  // ⚠️ DESTRUCTIVE ZONE: removes duty entry — cannot be recovered without re-adding
+  async function removeDuty(id: string, name: string): Promise<void> {
     if (!confirm(`ลบ ${name} ออกจากเวรหรือไม่?`)) return;
     setActionId(id);
     try {
       const token = await getFreshToken();
-      const res = await fetch(`/api/admin/duty/${id}`, {
+      const res   = await fetch(`/api/admin/duty/${id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token ?? ''}` },
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      invalidate(dutyUrl);
-      invalidate(PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
-    } catch (e: any) {
-      alert(e?.message ?? 'ล้มเหลว');
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      refreshDuty();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'ลบรายชื่อล้มเหลว');
     } finally {
       setActionId(null);
     }
   }
 
-  async function adminCheckin(id: string, name: string) {
+  async function adminCheckin(id: string, name: string): Promise<void> {
     if (!confirm(`ยืนยันเช็กชื่อ ${name}?`)) return;
     setActionId(id);
     try {
       const token = await getFreshToken();
-      const res = await fetch(`/api/admin/duty/checkin`, {
+      const res   = await fetch('/api/admin/duty/checkin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
         body: JSON.stringify({ id }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      invalidate(dutyUrl);
-      invalidate(PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
-    } catch (e: any) {
-      alert(e?.message ?? 'ล้มเหลว');
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      refreshDuty();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'เช็กอินล้มเหลว');
     } finally {
       setActionId(null);
     }
   }
 
-  async function adminUncheckin(id: string, name: string) {
+  async function adminUncheckin(id: string, name: string): Promise<void> {
     if (!confirm(`ยกเลิกเช็กชื่อของ ${name}?`)) return;
     setActionId(id);
     try {
       const token = await getFreshToken();
-      const res = await fetch(`/api/admin/duty/uncheckin`, {
+      const res   = await fetch('/api/admin/duty/uncheckin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
         body: JSON.stringify({ id }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      invalidate(dutyUrl);
-      invalidate(PUBLIC_DUTY_URL);
-      setRtTick(n => n + 1);
-    } catch (e: any) {
-      alert(e?.message ?? 'ล้มเหลว');
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      refreshDuty();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'ยกเลิกเช็กอินล้มเหลว');
     } finally {
       setActionId(null);
     }
   }
 
-  // ── JSX (UI preserved) ─────────────────────────────────────────
+  const filteredUsers = users.filter(u =>
+    !userSearch ||
+    u.full_name.toLowerCase().includes(userSearch.toLowerCase()) ||
+    (u.student_id ?? '').includes(userSearch)
+  );
 
   return (
     <AppShell pageTitle="จัดการเวร — แอดมิน">
+      {/* Header */}
       <div className="page-header">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
           <div>
             <div className="page-title">📋 จัดการเวรยืนหน้าโรงเรียน</div>
             <div className="page-subtitle">เพิ่ม/ลบรายชื่อเวร · เช็คอินแทนสมาชิก</div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10.5, color: 'var(--green)', flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--green)', flexShrink: 0 }}>
             <span className="rt-dot" />realtime
           </div>
         </div>
       </div>
 
-      {/* Date picker + stats */}
-      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
+      {/* Date + actions */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
         <div className="form-group" style={{ marginBottom: 0 }}>
           <label className="form-label">วันที่</label>
           <input
             type="date"
             value={selectedDate}
-            onChange={e => {
-              setSelectedDate(e.target.value);
-              invalidate(adminDutyUrl(e.target.value));
-            }}
+            onChange={e => { setSelectedDate(e.target.value); invalidate(adminDutyUrl(e.target.value)); }}
             style={{ width: 'auto' }}
           />
-        </div>
-        <div className="stat-card" style={{ borderTop: '3px solid var(--green)', padding: '10px 16px' }}>
-          <div className="stat-label">เช็คอินแล้ว</div>
-          <div className="stat-value" style={{ color: 'var(--green)', fontSize: 22 }}>
-            {checkedCount}/{dutyList.length}
-          </div>
         </div>
         <button onClick={openAddModal} className="btn btn-primary" style={{ alignSelf: 'flex-end' }}>
           ＋ เพิ่มรายชื่อเวร
         </button>
+      </div>
+
+      {/* Stats */}
+      <div className="grid-3" style={{ marginBottom: 16 }}>
+        {[
+          { label: 'รายชื่อทั้งหมด', value: dutyList.length, color: 'var(--brand)' },
+          { label: 'เช็คอินแล้ว',    value: checkedCount,     color: 'var(--green)' },
+          { label: 'รอเช็คอิน',      value: pendingCount,     color: 'var(--amber)' },
+        ].map((s, i) => (
+          <div key={i} className="stat-card fade-up" style={{ borderTop: `3px solid ${s.color}`, animationDelay: `${i * 40}ms` }}>
+            <div className="stat-label">{s.label}</div>
+            <div className="stat-value" style={{ color: s.color, fontSize: 24 }}>{s.value}</div>
+          </div>
+        ))}
       </div>
 
       {/* Alerts */}
@@ -270,98 +270,132 @@ export default function AdminDutyPage() {
         </div>
       )}
 
-      {/* Duty list */}
-      <div className="table-wrap">
-        <div style={{ padding: '11px 14px', background: 'var(--s2)', borderBottom: '1px solid var(--b)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontWeight: 700, fontSize: 13 }}>
-            รายชื่อเวร — {new Date(selectedDate + 'T00:00:00').toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+      {/* Duty card list */}
+      <div className="data-list">
+        <div className="data-list-header">
+          <span className="data-list-title">
+            เวร — {new Date(selectedDate + 'T00:00:00').toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' })}
           </span>
           <span className="badge badge-blue">{dutyList.length} คน</span>
         </div>
 
         {loading && dutyList.length === 0 ? (
-          <div className="loading-center"><div className="spinner" /></div>
+          <div>
+            {[1, 2, 3].map(i => (
+              <div key={i} style={{ display: 'flex', gap: 12, padding: '13px 16px', alignItems: 'center', borderBottom: '1px solid var(--border)' }}>
+                <div className="skeleton" style={{ width: 38, height: 38, borderRadius: '50%' }} />
+                <div style={{ flex: 1 }}>
+                  <div className="skeleton" style={{ height: 13, width: '50%', marginBottom: 6, borderRadius: 6 }} />
+                  <div className="skeleton" style={{ height: 11, width: '30%', borderRadius: 6 }} />
+                </div>
+              </div>
+            ))}
+          </div>
         ) : dutyList.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">📋</div>
             <div>ยังไม่มีรายชื่อเวรสำหรับวันที่นี้</div>
+            <button onClick={openAddModal} className="btn btn-primary btn-sm" style={{ marginTop: 10 }}>＋ เพิ่มรายชื่อ</button>
           </div>
         ) : (
-          <table>
-            <thead>
-              <tr><th>#</th><th>ชื่อ</th><th>รหัส</th><th>สถานะ</th><th>เวลา</th><th>การกระทำ</th></tr>
-            </thead>
-            <tbody>
-              {dutyList.map((d, i) => (
-                <tr key={d.id} style={{ background: d.auth_uid === null ? undefined : undefined }}>
-                  <td style={{ color: 'var(--t3)', width: 36 }}>{i + 1}</td>
-                  <td style={{ fontWeight: 600 }}>{d.student_name}</td>
-                  <td className="mono" style={{ fontSize: 12.5 }}>{d.student_id}</td>
-                  <td>
-                    {d.checked_in
-                      ? <span className="badge badge-green">✓ มาแล้ว</span>
-                      : <span className="badge badge-gray">รอ</span>}
-                  </td>
-                  <td style={{ fontSize: 12, color: 'var(--t3)', whiteSpace: 'nowrap' }}>
-                    {d.checked_in_at
-                      ? new Date(d.checked_in_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.'
-                      : '—'}
-                  </td>
-                  <td>
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                      {!d.checked_in ? (
-                        <button disabled={actionId !== null} onClick={() => adminCheckin(d.id, d.student_name)} className="btn btn-success btn-sm">
-                          เช็กอิน
-                        </button>
-                      ) : (
-                        <button disabled={actionId !== null} onClick={() => adminUncheckin(d.id, d.student_name)} className="btn btn-ghost btn-sm">
-                          ยกเลิกเช็กอิน
-                        </button>
-                      )}
-                      <button disabled={actionId !== null} onClick={() => removeDuty(d.id, d.student_name)} className="btn btn-danger btn-sm">ลบ</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          dutyList.map((d, idx) => (
+            <div
+              key={d.id}
+              className="data-item"
+              style={{
+                '--stagger': idx,
+                background: d.checked_in ? 'rgba(14,161,88,0.03)' : undefined,
+              } as React.CSSProperties}
+            >
+              {/* Avatar with check indicator */}
+              <div style={{ position: 'relative', flexShrink: 0 }}>
+                <div
+                  className="data-item-avatar"
+                  style={{
+                    background: d.checked_in
+                      ? 'linear-gradient(135deg,#6EE7B7,#059669)'
+                      : 'linear-gradient(135deg,#C7CAF8,#8A8EF8)',
+                  }}
+                >
+                  {getInitials(d.student_name)}
+                </div>
+                <div style={{
+                  position: 'absolute', bottom: 0, right: 0,
+                  width: 11, height: 11, borderRadius: '50%',
+                  background: d.checked_in ? 'var(--green)' : 'var(--surface-3)',
+                  border: '2px solid white',
+                }} />
+              </div>
+
+              <div className="data-item-body">
+                <div className="data-item-title">{d.student_name}</div>
+                <div className="data-item-sub">
+                  <span className="mono">{d.student_id}</span>
+                  {d.checked_in_at && (
+                    <>
+                      <span style={{ margin: '0 5px', color: 'var(--border-3)' }}>·</span>
+                      <span style={{ color: 'var(--green)', fontWeight: 700 }}>{formatTime(d.checked_in_at)}</span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="data-item-meta">
+                {d.checked_in
+                  ? <span className="badge badge-green" style={{ fontSize: 9.5 }}>✓ มาแล้ว</span>
+                  : <span className="badge badge-gray"  style={{ fontSize: 9.5 }}>รอ</span>}
+              </div>
+
+              <div className="data-item-actions">
+                {!d.checked_in
+                  ? <button disabled={actionId !== null} onClick={() => void adminCheckin(d.id, d.student_name)} className="btn btn-success btn-sm">เช็กอิน</button>
+                  : <button disabled={actionId !== null} onClick={() => void adminUncheckin(d.id, d.student_name)} className="btn btn-ghost btn-sm">ยกเลิก</button>
+                }
+                {/* ⚠️ DESTRUCTIVE ZONE: removes duty row permanently */}
+                <button disabled={actionId !== null} onClick={() => void removeDuty(d.id, d.student_name)} className="btn btn-danger btn-sm">ลบ</button>
+              </div>
+            </div>
+          ))
         )}
       </div>
 
-      {/* Add modal (simple inline modal to pick users) */}
+      {/* Add modal */}
       {showAddModal && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)' }}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(10,12,28,0.55)', backdropFilter: 'blur(8px)', padding: 16 }}>
           <div onClick={() => setShowAddModal(false)} style={{ position: 'absolute', inset: 0 }} />
-          <div onClick={e => e.stopPropagation()} style={{ width: 720, maxWidth: '95%', background: 'var(--surface)', borderRadius: 12, padding: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontWeight: 700 }}>เพิ่มรายชื่อเวร — วันที่ {selectedDate}</div>
-              <button onClick={() => setShowAddModal(false)} className="btn btn-ghost">ปิด</button>
+          <div onClick={e => e.stopPropagation()} className="card scale-in" style={{ width: 600, maxWidth: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', padding: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 15 }}>เพิ่มรายชื่อเวร</div>
+                <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>{selectedDate}</div>
+              </div>
+              <button onClick={() => setShowAddModal(false)} className="btn btn-ghost btn-sm">✕ ปิด</button>
             </div>
 
-            <div style={{ marginBottom: 12 }}>
-              <input placeholder="ค้นหาชื่อ หรือ รหัส" value={userSearch} onChange={e => setUserSearch(e.target.value)} />
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+              <input placeholder="ค้นหาชื่อ หรือ รหัส..." value={userSearch} onChange={e => setUserSearch(e.target.value)} autoFocus />
             </div>
 
-            <div style={{ maxHeight: 340, overflow: 'auto' }}>
+            <div style={{ flex: 1, overflowY: 'auto' }}>
               {usersLoading ? (
-                <div style={{ display: 'flex', gap: 8, flexDirection: 'column' }}>
-                  {[1,2,3].map(i => <div key={i} className="skeleton" style={{ height: 56 }} />)}
-                </div>
-              ) : (
-                users
-                  .filter(u => !userSearch || u.full_name.toLowerCase().includes(userSearch.toLowerCase()) || (u.student_id ?? '').includes(userSearch))
-                  .map(u => (
-                    <div key={u.auth_uid} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--b)' }}>
-                      <div>
-                        <div style={{ fontWeight: 700 }}>{u.full_name}</div>
-                        <div style={{ fontSize: 12.5, color: 'var(--t3)' }}>{u.student_id ?? '—'}</div>
-                      </div>
-                      <div>
-                        <button disabled={actionId !== null} onClick={() => addDuty(u)} className="btn btn-primary btn-sm">＋ เพิ่ม</button>
-                      </div>
+                <div className="loading-center" style={{ padding: 32 }}><div className="spinner" /></div>
+              ) : filteredUsers.map(u => (
+                <div
+                  key={u.auth_uid}
+                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div className="data-item-avatar" style={{ width: 32, height: 32, fontSize: 10, background: 'linear-gradient(135deg,#C7CAF8,#8A8EF8)' }}>
+                      {getInitials(u.full_name)}
                     </div>
-                  ))
-              )}
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{u.full_name}</div>
+                      <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{u.student_id ?? '—'}</div>
+                    </div>
+                  </div>
+                  <button disabled={actionId !== null} onClick={() => void addDuty(u)} className="btn btn-primary btn-sm">＋ เพิ่ม</button>
+                </div>
+              ))}
             </div>
           </div>
         </div>

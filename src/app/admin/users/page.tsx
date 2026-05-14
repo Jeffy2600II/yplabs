@@ -1,12 +1,18 @@
+// Path:    src/app/admin/users/page.tsx
+// Purpose: Admin page for listing, searching, editing, and deleting member accounts.
+//          Replaces the old table layout with mobile-first card rows.
+// Used by: AppShell navigation (/admin/users)
+
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { getBrowserSupabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 
+// ── Types ─────────────────────────────────────────────────────────
 type UserRow = {
   id: string;
   auth_uid: string;
@@ -21,157 +27,205 @@ type UserRow = {
   created_at: string;
 };
 
+// ── Constants ─────────────────────────────────────────────────────
+const YEARS_URL  = '/api/data?resource=council_years&select=year,closed';
+const USERS_PATH = '/api/data?resource=council_users';
+const USERS_SELECT = 'id,auth_uid,full_name,student_id,email,year,role,approved,disabled,account_type,created_at';
+
+// Gradient palette for avatars — deterministic by name hash
+const AVATAR_GRADIENTS = [
+  'linear-gradient(135deg,#8A8EF8,#5B5BD6)',
+  'linear-gradient(135deg,#6EE7B7,#059669)',
+  'linear-gradient(135deg,#FCD34D,#D97706)',
+  'linear-gradient(135deg,#F9A8D4,#BE185D)',
+  'linear-gradient(135deg,#93C5FD,#1D4ED8)',
+] as const;
+
+// ── Helpers ───────────────────────────────────────────────────────
+function getInitials(name: string): string {
+  return name.trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+}
+
+function avatarGradient(name: string): string {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
+  return AVATAR_GRADIENTS[h % AVATAR_GRADIENTS.length];
+}
+
+async function getSessionToken(): Promise<string | null> {
+  const { data } = await getBrowserSupabase().auth.getSession();
+  return data?.session?.access_token ?? null;
+}
+
+function buildUsersUrl(year: number): string {
+  return `${USERS_PATH}&filters=${encodeURIComponent(JSON.stringify({ year }))}&select=${encodeURIComponent(USERS_SELECT)}`;
+}
+
+// ── Component ─────────────────────────────────────────────────────
 export default function AdminUsersPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
-  const [years, setYears] = useState < number[] > ([]);
-  const [selectedYear, setSelectedYear] = useState < number | null > (null);
-  const [users, setUsers] = useState < UserRow[] > ([]);
-  const [loading, setLoading] = useState(true);
-  const [actionId, setActionId] = useState < string | null > (null);
-  const [search, setSearch] = useState('');
-  const [addingYear, setAddingYear] = useState(false);
+
+  const [years, setYears]               = useState<number[]>([]);
+  const [selectedYear, setSelectedYear] = useState<number | null>(null);
+  const [users, setUsers]               = useState<UserRow[]>([]);
+  const [loading, setLoading]           = useState(true);
+  const [actionId, setActionId]         = useState<string | null>(null);
+  const [search, setSearch]             = useState('');
+  const [addingYear, setAddingYear]     = useState(false);
   const [newYearInput, setNewYearInput] = useState('');
-  
+  const [pageError, setPageError]       = useState<string | null>(null);
+
   useEffect(() => {
     if (!authLoading && !isAdmin) router.replace('/');
   }, [authLoading, isAdmin, router]);
-  
-  useEffect(() => {
-    if (isAdmin) void loadYears();
-  }, [isAdmin]);
-  
-  useEffect(() => {
-    if (selectedYear !== null) void loadUsers(selectedYear);
-  }, [selectedYear]);
-  
-  async function getToken() {
-    const { data } = await getBrowserSupabase().auth.getSession();
-    return data?.session?.access_token ?? null;
-  }
-  
-  async function loadYears() {
+
+  useEffect(() => { if (isAdmin) void loadYears(); }, [isAdmin]);
+  useEffect(() => { if (selectedYear !== null) void loadUsers(selectedYear); }, [selectedYear]);
+
+  async function loadYears(): Promise<void> {
     try {
-      const token = await getToken();
-      const res = await fetch('/api/data?resource=council_years&select=year,closed', { headers: { Authorization: `Bearer ${token ?? ''}` } });
-      const json = await res.json();
-      const ys: number[] = (json ?? []).map((r: any) => r.year);
+      const token = await getSessionToken();
+      const res   = await fetch(YEARS_URL, { headers: { Authorization: `Bearer ${token ?? ''}` } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json: { year: number }[] = await res.json();
+      const ys = json.map(r => r.year);
       setYears(ys);
       if (ys.length > 0) setSelectedYear(ys[0]);
-    } catch {}
+    } catch (err: unknown) {
+      setPageError(`โหลดรายการปีล้มเหลว: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
-  
-  async function loadUsers(year: number) {
+
+  async function loadUsers(year: number): Promise<void> {
     setLoading(true);
+    setPageError(null);
     try {
-      const token = await getToken();
-      const res = await fetch(`/api/data?resource=council_users&filters=${encodeURIComponent(JSON.stringify({ year }))}&select=${encodeURIComponent('id,auth_uid,full_name,student_id,email,year,role,approved,disabled,account_type,created_at')}`, {
-        headers: { Authorization: `Bearer ${token ?? ''}` },
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      setUsers(json || []);
-    } catch (e: any) { alert(e?.message ?? 'โหลดล้มเหลว'); }
-    finally { setLoading(false); }
+      const token = await getSessionToken();
+      const res   = await fetch(buildUsersUrl(year), { headers: { Authorization: `Bearer ${token ?? ''}` } });
+      const json  = await res.json();
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      setUsers(json ?? []);
+    } catch (err: unknown) {
+      setPageError(`โหลดสมาชิกล้มเหลว: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoading(false);
+    }
   }
-  
-  async function patch(authUid: string, body: object) {
+
+  async function patchUser(authUid: string, body: Record<string, unknown>): Promise<void> {
     setActionId(authUid);
     try {
-      const token = await getToken();
-      const res = await fetch(`/api/admin/users/${authUid}`, {
+      const token = await getSessionToken();
+      const res   = await fetch(`/api/admin/users/${authUid}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
         body: JSON.stringify(body),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      if (selectedYear) await loadUsers(selectedYear);
-    } catch (e: any) { alert(e?.message ?? 'ล้มเหลว'); }
-    finally { setActionId(null); }
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      if (selectedYear !== null) await loadUsers(selectedYear);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'แก้ไขล้มเหลว');
+    } finally {
+      setActionId(null);
+    }
   }
-  
-  async function deleteUser(authUid: string, name: string) {
-    if (!confirm(`ลบบัญชี "${name}" ออกจากระบบ?\nการกระทำนี้ไม่สามารถยกเลิกได้`)) return;
+
+  // ⚠️ DESTRUCTIVE ZONE: permanent account deletion — removes both council_users row and Supabase auth user
+  async function deleteUser(authUid: string, name: string): Promise<void> {
+    if (!confirm(`ลบบัญชี "${name}" ออกจากระบบถาวร?\nการกระทำนี้ไม่สามารถยกเลิกได้`)) return;
     setActionId(authUid);
     try {
-      const token = await getToken();
-      const res = await fetch(`/api/admin/users/${authUid}`, {
+      const token = await getSessionToken();
+      const res   = await fetch(`/api/admin/users/${authUid}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token ?? ''}` },
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
-      if (selectedYear) await loadUsers(selectedYear);
-    } catch (e: any) { alert(e?.message ?? 'ล้มเหลว'); }
-    finally { setActionId(null); }
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      if (selectedYear !== null) await loadUsers(selectedYear);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'ลบบัญชีล้มเหลว');
+    } finally {
+      setActionId(null);
+    }
   }
-  
-  async function resetPW(authUid: string, name: string) {
+
+  async function resetPassword(authUid: string, name: string): Promise<void> {
     if (!confirm(`รีเซ็ตรหัสผ่านของ "${name}" เป็นรหัสนักเรียน?`)) return;
     setActionId(authUid);
     try {
-      const token = await getToken();
-      const res = await fetch(`/api/admin/users/${authUid}/reset-password`, {
+      const token = await getSessionToken();
+      const res   = await fetch(`/api/admin/users/${authUid}/reset-password`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token ?? ''}` },
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
       alert('รีเซ็ตสำเร็จ ✅');
-    } catch (e: any) { alert(e?.message ?? 'ล้มเหลว'); }
-    finally { setActionId(null); }
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'รีเซ็ตรหัสผ่านล้มเหลว');
+    } finally {
+      setActionId(null);
+    }
   }
-  
-  // ★ Fixed: async token properly awaited (เดิม bug — token อยู่ใน template string)
-  async function handleAddYear() {
+
+  async function addYear(): Promise<void> {
     const y = Number(newYearInput.trim());
     if (!y || !Number.isInteger(y)) { alert('กรอกเลขปีที่ถูกต้อง'); return; }
     setAddingYear(true);
     try {
-      const token = await getToken();
-      const res = await fetch('/api/admin/years', {
+      const token = await getSessionToken();
+      const res   = await fetch('/api/admin/years', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token ?? ''}` },
         body: JSON.stringify({ year: y }),
       });
       const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? 'Failed');
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
       setNewYearInput('');
       await loadYears();
-    } catch (e: any) { alert(e?.message ?? 'เพิ่มปีล้มเหลว'); }
-    finally { setAddingYear(false); }
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'เพิ่มปีล้มเหลว');
+    } finally {
+      setAddingYear(false);
+    }
   }
-  
+
   const filtered = users.filter(u =>
     !search ||
     u.full_name.toLowerCase().includes(search.toLowerCase()) ||
     (u.student_id ?? '').includes(search) ||
     (u.email ?? '').toLowerCase().includes(search.toLowerCase())
   );
-  
-  if (authLoading) return <AppShell pageTitle="จัดการบัญชี"><div className="loading-center"><div className="spinner" /></div></AppShell>;
+
+  if (authLoading) return (
+    <AppShell pageTitle="จัดการบัญชี">
+      <div className="loading-center"><div className="spinner" /></div>
+    </AppShell>
+  );
   if (!isAdmin) return null;
-  
+
   return (
     <AppShell pageTitle="จัดการบัญชีสมาชิก">
+      {/* Header */}
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div className="page-title">จัดการบัญชีสมาชิก</div>
+          <div className="page-title">👥 จัดการบัญชีสมาชิก</div>
           <div className="page-subtitle">ดู แก้ไข เปลี่ยน Role และจัดการบัญชีทั้งหมด</div>
         </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {/* Add Year — properly async */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <div style={{ display: 'flex', gap: 6 }}>
             <input
               value={newYearInput}
               onChange={e => setNewYearInput(e.target.value)}
-              placeholder="ปีใหม่ เช่น 68"
+              placeholder="เพิ่มปี เช่น 68"
               inputMode="numeric"
-              style={{ width: 100 }}
-              onKeyDown={e => e.key === 'Enter' && handleAddYear()}
+              style={{ width: 110 }}
+              onKeyDown={e => { if (e.key === 'Enter') void addYear(); }}
             />
-            <button onClick={handleAddYear} disabled={addingYear || !newYearInput} className="btn btn-ghost">
+            <button onClick={() => void addYear()} disabled={addingYear || !newYearInput} className="btn btn-ghost">
               {addingYear ? '...' : '+ ปี'}
             </button>
           </div>
@@ -179,87 +233,131 @@ export default function AdminUsersPage() {
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="card" style={{ marginBottom: 16, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+      {/* Filter bar */}
+      <div className="card" style={{ marginBottom: 16, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div>
-          <label className="form-label">ปีการศึกษา</label>
+          <label className="form-label" style={{ marginBottom: 4 }}>ปีการศึกษา</label>
           <select value={selectedYear ?? ''} onChange={e => setSelectedYear(Number(e.target.value))} style={{ width: 'auto' }}>
             {years.map(y => <option key={y} value={y}>ปี {y}</option>)}
           </select>
         </div>
         <div style={{ flex: 1, minWidth: 200 }}>
-          <label className="form-label">ค้นหา</label>
+          <label className="form-label" style={{ marginBottom: 4 }}>ค้นหา</label>
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="ชื่อ / รหัสนักเรียน / email..." />
-        </div>
-        <div style={{ color: 'var(--text-3)', fontSize: 13, paddingBottom: 2 }}>
-          {filtered.length} รายการ
         </div>
       </div>
 
-      <div className="table-wrap">
-        {loading ? (
-          <div className="loading-center"><div className="spinner" /></div>
-        ) : filtered.length === 0 ? (
-          <div className="empty-state"><div className="empty-icon">👥</div><div>ไม่พบบัญชีสมาชิก</div></div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>ชื่อ-นามสกุล</th>
-                <th>รหัส</th>
-                <th>Email</th>
-                <th>ประเภท</th>
-                <th>Role</th>
-                <th>สถานะ</th>
-                <th>การดำเนินการ</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(u => (
-                <tr key={u.auth_uid}>
-                  <td style={{ fontWeight: 600, minWidth: 130 }}>{u.full_name}</td>
-                  <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{u.student_id ?? '—'}</td>
-                  <td style={{ fontSize: 12.5, color: 'var(--text-3)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {u.email ?? '—'}
-                  </td>
-                  <td><span className="badge badge-gray">{u.account_type}</span></td>
-                  <td>
-                    <select
-                      value={u.role}
-                      disabled={actionId === u.auth_uid}
-                      onChange={e => patch(u.auth_uid, { role: e.target.value })}
-                      style={{ width: 'auto', padding: '4px 28px 4px 8px', fontSize: 12.5 }}
-                    >
-                      <option value="member">member</option>
-                      <option value="admin">⭐ admin</option>
-                    </select>
-                  </td>
-                  <td>
-                    {!u.approved
-                      ? <span className="badge badge-amber">รออนุมัติ</span>
-                      : u.disabled
-                        ? <span className="badge badge-red">ปิดแล้ว</span>
-                        : <span className="badge badge-green">ใช้งานได้</span>}
-                  </td>
-                  <td>
-                    <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                      {u.disabled ? (
-                        <button disabled={actionId !== null} onClick={() => patch(u.auth_uid, { disabled: false })} className="btn btn-success btn-sm">เปิด</button>
-                      ) : (
-                        <button disabled={actionId !== null} onClick={() => patch(u.auth_uid, { disabled: true })} className="btn btn-sm" style={{ background: 'var(--amber-bg)', color: 'var(--amber)', border: 'none', cursor: 'pointer', fontWeight: 700 }}>ปิด</button>
-                      )}
-                      {u.account_type === 'student' && (
-                        <button disabled={actionId !== null} onClick={() => resetPW(u.auth_uid, u.full_name)} className="btn btn-ghost btn-sm">รีเซ็ต PW</button>
-                      )}
-                      <button disabled={actionId !== null} onClick={() => deleteUser(u.auth_uid, u.full_name)} className="btn btn-danger btn-sm">ลบ</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+      {/* Stats */}
+      <div className="grid-4" style={{ marginBottom: 16 }}>
+        {[
+          { label: 'ทั้งหมด',    value: filtered.length,                                        color: 'var(--brand)' },
+          { label: 'แอดมิน',     value: filtered.filter(u => u.role === 'admin').length,         color: 'var(--gold)'  },
+          { label: 'ใช้งานได้', value: filtered.filter(u => !u.disabled && u.approved).length,  color: 'var(--green)' },
+          { label: 'ถูกปิด/รอ', value: filtered.filter(u => u.disabled || !u.approved).length,  color: 'var(--red)'   },
+        ].map((s, i) => (
+          <div key={i} className="stat-card fade-up" style={{ borderTop: `3px solid ${s.color}`, animationDelay: `${i * 40}ms` }}>
+            <div className="stat-label">{s.label}</div>
+            <div className="stat-value" style={{ color: s.color, fontSize: 22 }}>{s.value}</div>
+          </div>
+        ))}
       </div>
+
+      {/* Page-level error */}
+      {pageError && (
+        <div className="alert alert-error" style={{ marginBottom: 14 }}>
+          {pageError}
+          <button onClick={() => setPageError(null)} style={{ marginLeft: 8, background: 'none', border: 'none', cursor: 'pointer', fontWeight: 700, color: 'inherit' }}>×</button>
+        </div>
+      )}
+
+      {/* Member card list */}
+      {loading ? (
+        <div className="data-list">
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} style={{ display: 'flex', gap: 12, padding: '13px 16px', alignItems: 'center', borderBottom: '1px solid var(--border)' }}>
+              <div className="skeleton" style={{ width: 38, height: 38, borderRadius: '50%', flexShrink: 0 }} />
+              <div style={{ flex: 1 }}>
+                <div className="skeleton" style={{ height: 14, width: '55%', marginBottom: 6, borderRadius: 6 }} />
+                <div className="skeleton" style={{ height: 12, width: '40%', borderRadius: 6 }} />
+              </div>
+              <div className="skeleton" style={{ width: 60, height: 22, borderRadius: 99 }} />
+            </div>
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="data-list">
+          <div className="empty-state">
+            <div className="empty-icon">👥</div>
+            <div>ไม่พบบัญชีสมาชิก</div>
+          </div>
+        </div>
+      ) : (
+        <div className="data-list">
+          <div className="data-list-header">
+            <span className="data-list-title">สมาชิก — ปี {selectedYear}</span>
+            <span className="badge badge-blue">{filtered.length} คน</span>
+          </div>
+
+          {filtered.map((u, idx) => (
+            <div
+              key={u.auth_uid}
+              className="data-item"
+              style={{ '--stagger': idx } as React.CSSProperties}
+            >
+              <div
+                className="data-item-avatar"
+                style={{ background: avatarGradient(u.full_name) }}
+              >
+                {getInitials(u.full_name)}
+              </div>
+
+              <div className="data-item-body">
+                <div className="data-item-title">
+                  {u.full_name}
+                  {u.role === 'admin' && <span style={{ marginLeft: 5, fontSize: 11 }}>⭐</span>}
+                </div>
+                <div className="data-item-sub">
+                  <span className="mono">{u.student_id ?? u.email ?? '—'}</span>
+                  <span style={{ margin: '0 5px', color: 'var(--border-3)' }}>·</span>
+                  <span>{u.account_type}</span>
+                </div>
+              </div>
+
+              <div className="data-item-meta">
+                {!u.approved
+                  ? <span className="badge badge-amber" style={{ fontSize: 9.5 }}>รออนุมัติ</span>
+                  : u.disabled
+                    ? <span className="badge badge-red"   style={{ fontSize: 9.5 }}>ปิดแล้ว</span>
+                    : <span className="badge badge-green" style={{ fontSize: 9.5 }}>ใช้งานได้</span>}
+              </div>
+
+              <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexWrap: 'wrap', flexShrink: 0 }}>
+                <select
+                  value={u.role}
+                  disabled={actionId === u.auth_uid}
+                  onChange={e => void patchUser(u.auth_uid, { role: e.target.value })}
+                  style={{ width: 'auto', padding: '4px 26px 4px 8px', fontSize: 11.5, borderRadius: 8 }}
+                >
+                  <option value="member">member</option>
+                  <option value="admin">⭐ admin</option>
+                </select>
+
+                {u.disabled
+                  ? <button disabled={actionId !== null} onClick={() => void patchUser(u.auth_uid, { disabled: false })} className="btn btn-success btn-sm">เปิด</button>
+                  : <button disabled={actionId !== null} onClick={() => void patchUser(u.auth_uid, { disabled: true  })} className="btn btn-ghost btn-sm">ปิด</button>
+                }
+
+                {u.account_type === 'student' && (
+                  <button disabled={actionId !== null} onClick={() => void resetPassword(u.auth_uid, u.full_name)} className="btn btn-ghost btn-sm" title="รีเซ็ตรหัสผ่านเป็นรหัสนักเรียน">🔑</button>
+                )}
+
+                {/* ⚠️ DESTRUCTIVE ZONE: delete account — btn-danger intentionally NOT primary */}
+                <button disabled={actionId !== null} onClick={() => void deleteUser(u.auth_uid, u.full_name)} className="btn btn-danger btn-sm">ลบ</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </AppShell>
   );
 }
