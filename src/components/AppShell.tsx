@@ -1,35 +1,32 @@
-/* src/components/AppShell.tsx */
-'use client';
 
-/**
- * AppShell.tsx v5 — Performance Native App Edition
- * ─────────────────────────────────────────────────────────────────
- * • React.memo on nav sub-components → zero re-render on auth change
- * • CSS class names match globals.css v5 (no inline style overrides)
- * • Sidebar stays mounted, only hides via CSS media query
- * • Bottom nav: opaque bg, no backdrop-filter (GPU saving on mobile)
- * ─────────────────────────────────────────────────────────────────
- */
+// Path:    src/components/AppShell.tsx
+// Purpose: Root layout shell — renders the sidebar (desktop), top bar, bottom nav
+//          (mobile), and wraps every page's content area. Owns navigation state.
+// Used by: Every page component as the outermost wrapper.
+
+'use client';
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { useState, useEffect, memo } from 'react';
 
-// ── Types ──────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────
 type NavItem = { href: string; icon: string; label: string; badge?: number };
 
-// ── Nav configs ────────────────────────────────────────────────────
+// ── Nav configs ───────────────────────────────────────────────────
+// Submit (/submit) intentionally removed — feature retired after API validation phase
 const NAV_MEMBER: NavItem[] = [
   { href: '/',           icon: '🏠', label: 'หน้าหลัก' },
   { href: '/zone-check', icon: '🧹', label: 'ตรวจเขตสะอาด' },
   { href: '/duty',       icon: '🏫', label: 'เวรหน้าโรงเรียน' },
-  { href: '/submit',     icon: '📁', label: 'ส่งข้อมูล' },
 ];
+
 const NAV_PUBLIC: NavItem[] = [
   { href: '/',      icon: '🏠', label: 'หน้าหลัก' },
   { href: '/login', icon: '🔑', label: 'เข้าสู่ระบบ' },
 ];
+
 const ADMIN_ITEMS: NavItem[] = [
   { href: '/admin',          icon: '⚙️', label: 'แผงแอดมิน' },
   { href: '/admin/users',    icon: '👥', label: 'จัดการบัญชี' },
@@ -39,7 +36,7 @@ const ADMIN_ITEMS: NavItem[] = [
   { href: '/admin/years',    icon: '📅', label: 'ปีการศึกษา' },
 ];
 
-// ── Helpers ────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────
 function getInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
 }
@@ -48,10 +45,8 @@ function isActive(pathname: string, href: string): boolean {
   return href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(href + '/');
 }
 
-// ── Memoized Nav Item ──────────────────────────────────────────────
-const SideNavItem = memo(function SideNavItem({
-  item, active,
-}: { item: NavItem; active: boolean }) {
+// ── Memoised sub-components — prevent re-render on auth state change ──────────
+const SideNavItem = memo(function SideNavItem({ item, active }: { item: NavItem; active: boolean }) {
   return (
     <Link
       href={item.href}
@@ -67,53 +62,51 @@ const SideNavItem = memo(function SideNavItem({
   );
 });
 
-// ── Memoized Sidebar Skeleton ──────────────────────────────────────
 const SidebarSkeleton = memo(function SidebarSkeleton() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '4px 2px' }}>
-      {[82, 70, 90, 76].map((w, i) => (
+      {[82, 70, 90].map((w, i) => (
         <div key={i} className="skeleton" style={{ height: 33, borderRadius: 10, width: `${w}%` }} />
       ))}
     </div>
   );
 });
 
-// ── Props ──────────────────────────────────────────────────────────
+// ── Props ─────────────────────────────────────────────────────────
 type Props = {
-  children: React.ReactNode;
-  pageTitle?: string;
+  children:      React.ReactNode;
+  pageTitle?:    string;
   pendingCount?: number;
 };
 
-// ═══════════════════════════════════════════════════════════════════
+// ── Component ─────────────────────────────────────────────────────
 export default function AppShell({ children, pageTitle, pendingCount = 0 }: Props) {
   const pathname = usePathname();
   const router   = useRouter();
   const { user, isAdmin, isMember, loading, signOut } = useAuth();
   const [today, setToday] = useState('');
 
-  // Set date once on mount — no SSR hydration mismatch
+  // Set date only on client to avoid SSR hydration mismatch
   useEffect(() => {
     setToday(new Date().toLocaleDateString('th-TH', {
       weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
     }));
   }, []);
 
-  async function handleSignOut() {
+  async function handleSignOut(): Promise<void> {
     await signOut();
     router.push('/login');
   }
 
-  const initials = user?.full_name ? getInitials(user.full_name) : '?';
+  const initials  = user?.full_name ? getInitials(user.full_name) : '?';
   const sideItems = isMember ? NAV_MEMBER : NAV_PUBLIC;
 
-  // Bottom nav items (max 5)
+  // Bottom nav — max 5 items, admin badge on rightmost slot when applicable
   const bottomItems: NavItem[] = loading ? [] : isMember
     ? [
         { href: '/',           icon: '🏠', label: 'หน้าหลัก' },
-        { href: '/zone-check', icon: '🧹', label: 'ตรวจเขต' },
-        { href: '/duty',       icon: '🏫', label: 'เวรยืน' },
-        { href: '/submit',     icon: '📁', label: 'ส่งข้อมูล' },
+        { href: '/zone-check', icon: '🧹', label: 'ตรวจเขต'  },
+        { href: '/duty',       icon: '🏫', label: 'เวรยืน'   },
         ...(isAdmin ? [{ href: '/admin', icon: '⚙️', label: 'แอดมิน', badge: pendingCount || undefined }] : []),
       ].slice(0, 5)
     : NAV_PUBLIC;
@@ -121,10 +114,9 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   return (
     <div className="app-layout">
 
-      {/* ── Desktop Sidebar ─────────────────────────────────────── */}
+      {/* ── Desktop Sidebar ──────────────────────────────────────── */}
       <aside className="app-sidebar" role="navigation" aria-label="เมนูหลัก">
 
-        {/* Logo */}
         <div className="sb-logo">
           <Link href="/">
             <span className="sb-badge">YPLABS</span>
@@ -133,11 +125,8 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           </Link>
         </div>
 
-        {/* Main nav */}
         <div className="sb-sec">
-          {loading ? (
-            <SidebarSkeleton />
-          ) : (
+          {loading ? <SidebarSkeleton /> : (
             <>
               <div className="sb-sec-label">{isMember ? 'เมนูหลัก' : 'เมนู'}</div>
               {sideItems.map(item => (
@@ -147,22 +136,19 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           )}
         </div>
 
-        {/* Admin nav */}
         {!loading && isAdmin && (
           <div className="sb-sec">
             <div className="sb-sec-label">ผู้ดูแลระบบ</div>
             {ADMIN_ITEMS.map(item => {
-              const withBadge = item.href === '/admin' || item.href === '/admin/requests'
-                ? { ...item, badge: pendingCount || undefined }
-                : item;
-              return (
-                <SideNavItem key={item.href} item={withBadge} active={isActive(pathname, item.href)} />
-              );
+              const withBadge: NavItem =
+                (item.href === '/admin' || item.href === '/admin/requests')
+                  ? { ...item, badge: pendingCount || undefined }
+                  : item;
+              return <SideNavItem key={item.href} item={withBadge} active={isActive(pathname, item.href)} />;
             })}
           </div>
         )}
 
-        {/* Footer */}
         <div className="sb-footer">
           {loading ? (
             <div className="skeleton" style={{ height: 48, borderRadius: 10 }} />
@@ -177,7 +163,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
                   </div>
                 </div>
               </div>
-              <button className="sb-signout" onClick={handleSignOut}>
+              <button className="sb-signout" onClick={() => void handleSignOut()}>
                 <span>↩</span> ออกจากระบบ
               </button>
             </>
@@ -187,7 +173,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
         </div>
       </aside>
 
-      {/* ── Main ────────────────────────────────────────────────── */}
+      {/* ── Main ─────────────────────────────────────────────────── */}
       <main className="app-main">
 
         {/* Mobile topbar */}
@@ -200,7 +186,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             {loading ? (
               <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
             ) : user ? (
-              <button className="mobile-avatar" onClick={handleSignOut} aria-label="ออกจากระบบ">
+              <button className="mobile-avatar" onClick={() => void handleSignOut()} aria-label="ออกจากระบบ">
                 {initials}
               </button>
             ) : (
@@ -222,12 +208,12 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
               <>
                 <div style={{ textAlign: 'right' }}>
                   <div className="topbar-uname">{user.full_name}</div>
-                  <div className="text-xs" style={{ color: 'var(--t4)' }}>
+                  <div className="text-xs" style={{ color: 'var(--text-4)' }}>
                     {user.role === 'admin' ? '⭐ แอดมิน' : 'สมาชิก'} · ปี {user.year}
                   </div>
                 </div>
                 <div className="sb-avatar" style={{ width: 30, height: 30, fontSize: 11 }}>{initials}</div>
-                <button onClick={handleSignOut} className="btn btn-ghost btn-sm">ออก</button>
+                <button onClick={() => void handleSignOut()} className="btn btn-ghost btn-sm">ออก</button>
               </>
             ) : (
               <Link href="/login" className="btn btn-primary btn-sm">🔑 เข้าสู่ระบบ</Link>
@@ -235,7 +221,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           </div>
         </div>
 
-        {/* Content */}
+        {/* Page content */}
         <div className="app-content">{children}</div>
       </main>
 
@@ -267,6 +253,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           })}
         </div>
       </nav>
+
     </div>
   );
 }
