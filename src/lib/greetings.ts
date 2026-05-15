@@ -46,7 +46,7 @@ export const GREETING_SLOTS: GreetingSlot[] = [
       'today is the day 💫',
     ],
   },
-
+  
   // ── 09:00–11:59 สาย ────────────────────────────────────────────────────────
   {
     hour: [9, 12],
@@ -63,11 +63,11 @@ export const GREETING_SLOTS: GreetingSlot[] = [
       'ทำไปเลย เดี๋ยวก็เสร็จเอง',
       'ไปลุยเลย!',
       'วันนี้เป็นยังไงบ้าง?',
-      'let's get it 💪',
+      "let's get it 💪",
       'ไม่มีอะไรยากเกินไปหรอก',
     ],
   },
-
+  
   // ── 12:00–13:59 เที่ยง ────────────────────────────────────────────────────
   {
     hour: [12, 14],
@@ -87,7 +87,7 @@ export const GREETING_SLOTS: GreetingSlot[] = [
       'พักก็เป็นส่วนนึงของงานนะ',
     ],
   },
-
+  
   // ── 14:00–17:59 บ่าย ────────────────────────────────────────────────────────
   {
     hour: [14, 18],
@@ -107,7 +107,7 @@ export const GREETING_SLOTS: GreetingSlot[] = [
       'อีกนิดเดียวก็เลิกแล้ว',
     ],
   },
-
+  
   // ── 18:00–20:59 เย็น ────────────────────────────────────────────────────────
   {
     hour: [18, 21],
@@ -127,7 +127,7 @@ export const GREETING_SLOTS: GreetingSlot[] = [
       'เก่งมากนะวันนี้',
     ],
   },
-
+  
   // ── 21:00–23:59 ดึก ────────────────────────────────────────────────────────
   {
     hour: [21, 24],
@@ -147,7 +147,7 @@ export const GREETING_SLOTS: GreetingSlot[] = [
       'นอนก่อนก็ได้นะ จริงๆ',
     ],
   },
-
+  
   // ── 00:00–04:59 ตี ────────────────────────────────────────────────────────
   {
     hour: [0, 5],
@@ -171,32 +171,32 @@ export const GREETING_SLOTS: GreetingSlot[] = [
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /** Pick a random item from an array */
-export function pickRandom<T>(arr: T[]): T {
+export function pickRandom < T > (arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
 /** Get the matching slot for the current hour */
 export function getSlotForHour(hour: number): GreetingSlot {
   return (
-    GREETING_SLOTS.find(s => hour >= s.hour[0] && hour < s.hour[1])
-    ?? GREETING_SLOTS[1] // default: สาย
+    GREETING_SLOTS.find(s => hour >= s.hour[0] && hour < s.hour[1]) ??
+    GREETING_SLOTS[1] // default: สาย
   );
 }
 
 /** Build a full greeting object for a given first name */
 export function buildGreeting(firstName: string): {
-  emoji:    string;
+  emoji: string;
   greeting: string;
-  vibe:     string;
-  name:     string;
+  vibe: string;
+  name: string;
 } {
   const hour = new Date().getHours();
   const slot = getSlotForHour(hour);
   return {
-    emoji:    slot.emoji,
+    emoji: slot.emoji,
     greeting: pickRandom(slot.greetings),
-    vibe:     pickRandom(slot.vibes),
-    name:     firstName,
+    vibe: pickRandom(slot.vibes),
+    name: firstName,
   };
 }
 
