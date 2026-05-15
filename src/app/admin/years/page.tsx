@@ -1,7 +1,6 @@
 // Path:    src/app/admin/years/page.tsx
 // Purpose: Admin page for managing academic years and the 3-year retention policy.
-//          Displays which years are retained, which will be archived, and allows
-//          adding new years or toggling open/closed status.
+//          Clearer copy: explains what "retained" vs "will be archived" means in plain Thai.
 // Used by: AppShell navigation (/admin/years)
 
 'use client';
@@ -12,20 +11,16 @@ import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { getBrowserSupabase } from '@/lib/supabaseClient';
 
-// ── Types ─────────────────────────────────────────────────────────
 type YearRow = { year: number;closed: boolean };
 
-// ── Constants ─────────────────────────────────────────────────────
 const YEARS_URL = '/api/data?resource=council_years&select=year,closed';
-const MAX_RETAINED = 3; // system retains only the 3 most recent years
+const MAX_RETAINED = 3;
 
-// ── Helpers ───────────────────────────────────────────────────────
 async function getSessionToken(): Promise < string | null > {
   const { data } = await getBrowserSupabase().auth.getSession();
   return data?.session?.access_token ?? null;
 }
 
-// ── Component ─────────────────────────────────────────────────────
 export default function AdminYearsPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
@@ -103,7 +98,6 @@ export default function AdminYearsPage() {
     }
   }
   
-  // Sort descending so most-recent year is always first (index 0 = retained slot 1)
   const sorted = [...years].sort((a, b) => b.year - a.year);
   const retained = sorted.slice(0, MAX_RETAINED).map(y => y.year);
   
@@ -118,18 +112,33 @@ export default function AdminYearsPage() {
     <AppShell pageTitle="ปีการศึกษา">
       {/* Header */}
       <div className="page-header">
-        <div className="page-title">📅 จัดการปีการศึกษา</div>
+        <div className="page-title">📅 ปีการศึกษา</div>
         <div className="page-subtitle">
-          ระบบเก็บข้อมูลสมาชิก <strong>{MAX_RETAINED} ปีล่าสุด</strong> — ปีที่เก่ากว่าจะถูก archive อัตโนมัติ
+          จัดการปีการศึกษาในระบบ — ระบบเก็บข้อมูลสมาชิกไว้ <strong>{MAX_RETAINED} ปีล่าสุด</strong> เท่านั้น
         </div>
       </div>
 
-      {/* Retention policy visual */}
-      <div className="card fade-up" style={{ marginBottom: 20, background: 'var(--blue-bg)', border: '1.5px solid var(--blue-border)' }}>
-        <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--blue)', marginBottom: 12 }}>
-          📊 นโยบาย {MAX_RETAINED}-Year Retention
+      {/* What is retention? — Plain-language explanation */}
+      <div className="card fade-up" style={{
+        marginBottom: 20,
+        background: 'var(--blue-bg)',
+        border: '1.5px solid var(--blue-border)',
+      }}>
+        <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--blue)', marginBottom: 10 }}>
+          ℹ️ ระบบเก็บข้อมูลยังไง?
         </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 13, color: 'var(--text-2)', lineHeight: 1.7 }}>
+          ระบบจะเก็บข้อมูลสมาชิก (รายชื่อ, เวร, เขตสะอาด) ของ <strong>{MAX_RETAINED} ปีล่าสุด</strong> ไว้เสมอ
+          <br />
+          ปีที่เก่ากว่านั้นจะถูก <strong>archive</strong> — ข้อมูลยังอยู่ในฐานข้อมูล แต่จะไม่แสดงในระบบปกติ
+          <br />
+          <span style={{ color: 'var(--text-3)', fontSize: 12 }}>
+            * การ archive ทำโดยรัน SQL function ใน Supabase Dashboard ด้วยตัวเอง — ไม่ได้เกิดขึ้นอัตโนมัติ
+          </span>
+        </div>
+
+        {/* Visual retention slots */}
+        <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {sorted.length === 0 ? (
             <span style={{ fontSize: 13, color: 'var(--text-3)' }}>ยังไม่มีปีการศึกษา</span>
           ) : sorted.map((y, i) => (
@@ -148,14 +157,17 @@ export default function AdminYearsPage() {
             >
               {i === 0 && '⭐'} ปี {y.year}
               <span style={{ fontSize: 10.5, fontWeight: 500, opacity: .75 }}>
-                {i < MAX_RETAINED ? `✓ เก็บ (${i + 1}/${MAX_RETAINED})` : 'archive'}
+                {i < MAX_RETAINED
+                  ? (i === 0 ? 'ปีปัจจุบัน' : `ย้อนหลัง ${i} ปี`)
+                  : 'จะถูก archive'}
               </span>
             </div>
           ))}
         </div>
+
         {sorted.length > MAX_RETAINED && (
           <div style={{ marginTop: 10, fontSize: 12, color: 'var(--blue)' }}>
-            ⚠️ รัน <code>SELECT council_enforce_three_latest_years();</code> เพื่อ archive ปีเก่า
+            ⚠️ มีปีที่เกินโควต้า — รัน <code>SELECT council_enforce_three_latest_years();</code> เพื่อ archive ปีเก่า
           </div>
         )}
       </div>
@@ -165,7 +177,7 @@ export default function AdminYearsPage() {
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 12 }}>➕ เพิ่มปีการศึกษาใหม่</div>
         <div style={{ display: 'flex', gap: 10 }}>
           <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-            <label className="form-label">ปีการศึกษา (พ.ศ.)</label>
+            <label className="form-label">ปีการศึกษา (พ.ศ. ย่อ เช่น 68)</label>
             <input
               value={newYear}
               onChange={e => setNewYear(e.target.value)}
@@ -183,7 +195,7 @@ export default function AdminYearsPage() {
       </div>
 
       {/* Year list */}
-      <div className="sec-label" style={{ marginBottom: 10 }}>รายชื่อปีการศึกษา</div>
+      <div className="sec-label" style={{ marginBottom: 10 }}>ปีทั้งหมดในระบบ</div>
 
       {loading ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -192,48 +204,71 @@ export default function AdminYearsPage() {
       ) : sorted.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '40px 20px' }}>
           <div className="empty-icon" style={{ fontSize: 40 }}>📅</div>
-          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>ยังไม่มีปีการศึกษา</div>
+          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>ยังไม่มีปีการศึกษา — เพิ่มปีแรกด้านบนได้เลย</div>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }} className="stagger-children">
           {sorted.map((y, i) => {
-            const isRetained = retained.includes(y.year);
-            const isFirst    = i === 0;
-            const accentColor = isFirst ? 'var(--gold)' : isRetained ? 'var(--green)' : 'var(--border-2)';
+            const isRetained  = retained.includes(y.year);
+            const isCurrent   = i === 0;
+            const accentColor = isCurrent ? 'var(--gold)' : isRetained ? 'var(--green)' : 'var(--border-2)';
+
+            // Human-readable slot label
+            const slotLabel = isCurrent
+              ? 'ปีปัจจุบัน'
+              : isRetained
+                ? `ย้อนหลัง ${i} ปี (ยังเก็บอยู่)`
+                : 'เกิน 3 ปี — จะถูก archive';
+
+            const slotColor = isCurrent
+              ? 'var(--gold)'
+              : isRetained
+                ? 'var(--green)'
+                : 'var(--red)';
 
             return (
               <div
                 key={y.year}
                 className="card"
-                style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 18px', borderLeft: `4px solid ${accentColor}` }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 14,
+                  padding: '14px 18px', borderLeft: `4px solid ${accentColor}`,
+                }}
               >
                 {/* Year number */}
                 <div style={{
                   fontSize: 26, fontWeight: 900, letterSpacing: '-.03em',
-                  color: isFirst ? 'var(--gold)' : isRetained ? 'var(--text)' : 'var(--text-3)',
+                  color: isCurrent ? 'var(--gold)' : isRetained ? 'var(--text)' : 'var(--text-3)',
                   lineHeight: 1, flexShrink: 0, minWidth: 56,
                 }}>
-                  {isFirst && <span style={{ fontSize: 14, marginRight: 4 }}>⭐</span>}
+                  {isCurrent && <span style={{ fontSize: 14, marginRight: 4 }}>⭐</span>}
                   {y.year}
                 </div>
 
-                {/* Status badges */}
-                <div style={{ flex: 1, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {y.closed
-                    ? <span className="badge badge-red"   style={{ fontSize: 9.5 }}>ปิดแล้ว</span>
-                    : <span className="badge badge-green" style={{ fontSize: 9.5 }}>เปิดใช้งาน</span>}
-                  {isRetained
-                    ? <span className="badge badge-blue"  style={{ fontSize: 9.5 }}>✓ เก็บ ({i + 1}/{MAX_RETAINED})</span>
-                    : <span className="badge badge-amber" style={{ fontSize: 9.5 }}>จะถูก archive</span>}
+                {/* Info */}
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 4 }}>
+                    {y.closed
+                      ? <span className="badge badge-amber" style={{ fontSize: 9.5 }}>ปิดแล้ว — ไม่รับสมาชิกใหม่</span>
+                      : <span className="badge badge-green" style={{ fontSize: 9.5 }}>เปิดใช้งาน — รับสมาชิกได้</span>}
+                    <span style={{ fontSize: 11, fontWeight: 700, color: slotColor }}>
+                      {slotLabel}
+                    </span>
+                  </div>
+                  {!isRetained && (
+                    <div style={{ fontSize: 11.5, color: 'var(--text-4)' }}>
+                      ข้อมูลปีนี้จะหายจากระบบหลังรัน archive — แต่ยังอยู่ใน DB
+                    </div>
+                  )}
                 </div>
 
-                {/* Toggle close/open */}
+                {/* Toggle open/close */}
                 <button
                   onClick={() => void toggleClose(y.year, y.closed)}
                   className={`btn btn-sm ${y.closed ? 'btn-success' : 'btn-ghost'}`}
                   style={{ flexShrink: 0 }}
                 >
-                  {y.closed ? '🔓 เปิดอีกครั้ง' : 'ปิดปีนี้'}
+                  {y.closed ? '🔓 เปิดรับสมัคร' : 'ปิดรับสมัคร'}
                 </button>
               </div>
             );

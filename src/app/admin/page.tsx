@@ -1,6 +1,6 @@
 // Path:    src/app/admin/page.tsx
-// Purpose: Admin dashboard — shows key stats (pending requests, member count,
-//          year count) and navigation cards to all admin sub-pages.
+// Purpose: Admin dashboard — stats and navigation cards.
+//          Improved copy: plain Thai, easy to understand at a glance.
 // Used by: AppShell navigation (/admin)
 
 'use client';
@@ -13,11 +13,9 @@ import { useAuth } from '@/context/AuthContext';
 import { useAuthData, invalidate } from '@/lib/dataCore';
 import { useRealtime } from '@/lib/realtimeHooks';
 
-// ── Types ─────────────────────────────────────────────────────────
 type YearRow = { year: number;closed: boolean };
 type RequestRow = { id: string };
 
-// ── Constants ─────────────────────────────────────────────────────
 const YEARS_URL = '/api/data?resource=council_years&select=year,closed';
 const REQUESTS_URL = '/api/data?resource=council_join_requests&select=id,full_name,student_id,year,email,message,account_type,created_at';
 
@@ -31,7 +29,6 @@ type MenuEntry = {
   urgent ? : boolean;
 };
 
-// ── Component ─────────────────────────────────────────────────────
 export default function AdminPage() {
   const { isAdmin, loading: authLoading } = useAuth();
   const router = useRouter();
@@ -54,7 +51,6 @@ export default function AdminPage() {
   const activeYear = years?.[0]?.year ?? null;
   const pending = requests?.length ?? 0;
   
-  // Load members only after we know the active year
   const usersUrl = activeYear ?
     `/api/data?resource=council_users&filters=${encodeURIComponent(JSON.stringify({ year: activeYear }))}&select=id,auth_uid,full_name` :
     null;
@@ -65,11 +61,11 @@ export default function AdminPage() {
   const statsLoading = !years || !requests;
   
   const MENU: MenuEntry[] = [
-    { title: 'คำขอสมัครสมาชิก', desc: 'ดูและอนุมัติคำขอที่รอพิจารณา', icon: '📬', href: '/admin/requests', accent: 'var(--brand)', badge: pending, urgent: pending > 0 },
-    { title: 'จัดการบัญชี', desc: 'เพิ่ม แก้ไข ลบ และเปลี่ยน Role', icon: '👥', href: '/admin/users', accent: '#059669', badge: users?.length },
-    { title: 'จัดการเวร', desc: 'กำหนด roster ยืนหน้าโรงเรียน', icon: '📋', href: '/admin/duty', accent: '#D97706' },
-    { title: 'รายงานเขตสะอาด', desc: 'ดูผลตรวจเขตย้อนหลัง', icon: '📊', href: '/admin/zones', accent: 'var(--blue)' },
-    { title: 'ปีการศึกษา', desc: 'จัดการปี + 3-year retention', icon: '📅', href: '/admin/years', accent: '#7C3AED', badge: years?.length },
+    { title: 'คำขอสมัครสมาชิก', desc: 'อนุมัติหรือปฏิเสธคำขอที่รอ', icon: '📬', href: '/admin/requests', accent: 'var(--brand)', badge: pending, urgent: pending > 0 },
+    { title: 'จัดการบัญชีสมาชิก', desc: 'เพิ่ม แก้ไข ลบ เปลี่ยน Role', icon: '👥', href: '/admin/users', accent: '#059669', badge: users?.length },
+    { title: 'รายชื่อเวร', desc: 'ดูเช็คอิน · เช็คอินแทน · แก้รายชื่อ', icon: '📋', href: '/admin/duty', accent: '#D97706' },
+    { title: 'ผลตรวจเขตสะอาด', desc: 'ดูรายงานย้อนหลัง กรองตามวัน/เขต', icon: '📊', href: '/admin/zones', accent: 'var(--blue)' },
+    { title: 'ปีการศึกษา', desc: 'เพิ่ม/ปิดปี · ดูสถานะ retention', icon: '📅', href: '/admin/years', accent: '#7C3AED', badge: years?.length },
   ];
   
   if (authLoading) return (
@@ -84,20 +80,41 @@ export default function AdminPage() {
       {/* Header */}
       <div className="page-header">
         <div className="page-title">⚙️ แผงผู้ดูแลระบบ</div>
-        <div className="page-subtitle">จัดการระบบสภานักเรียน YPLABS</div>
+        <div className="page-subtitle">ระบบสภานักเรียน YPLABS — จัดการทุกอย่างได้ที่นี่</div>
       </div>
 
       {/* Stats */}
       <div className="grid-4" style={{ marginBottom: 20 }}>
         {[
-          { label: 'รอพิจารณา', value: pending,        sub: 'คำขอสมัคร',          color: 'var(--red)',   highlight: pending > 0 },
-          { label: 'สมาชิก',    value: users?.length,  sub: `ปี ${activeYear ?? '—'}`, color: 'var(--brand)' },
-          { label: 'ปีในระบบ',  value: years?.length,  sub: 'เก็บสูงสุด 3 ปี',   color: 'var(--gold)'  },
-          { label: 'ปีล่าสุด',  value: activeYear,     sub: 'ปีการศึกษาปัจจุบัน', color: 'var(--green)' },
+          {
+            label: 'รอพิจารณา',
+            value: pending,
+            sub: 'คำขอสมัครใหม่',
+            color: 'var(--red)',
+            highlight: pending > 0,
+          },
+          {
+            label: 'สมาชิกปีนี้',
+            value: users?.length,
+            sub: `ปีการศึกษา ${activeYear ?? '—'}`,
+            color: 'var(--brand)',
+          },
+          {
+            label: 'ปีในระบบ',
+            value: years?.length,
+            sub: 'เก็บสูงสุด 3 ปีล่าสุด',
+            color: 'var(--gold)',
+          },
+          {
+            label: 'ปีปัจจุบัน',
+            value: activeYear,
+            sub: 'ปีที่ใช้งานล่าสุด',
+            color: 'var(--green)',
+          },
         ].map((s, i) => (
           <div key={i} className="stat-card fade-up" style={{ borderTop: `3px solid ${s.color}`, animationDelay: `${i * 40}ms` }}>
             <div className="stat-label">{s.label}</div>
-            <div className="stat-value" style={{ color: (s as typeof s & { highlight?: boolean }).highlight ? s.color : undefined }}>
+            <div className="stat-value" style={{ color: (s as any).highlight ? s.color : undefined }}>
               {statsLoading && (s.value === null || s.value === undefined) ? (
                 <div className="skeleton" style={{ height: 30, width: 48, borderRadius: 6 }} />
               ) : (
@@ -112,15 +129,17 @@ export default function AdminPage() {
       {/* Pending requests alert */}
       {pending > 0 && (
         <Link href="/admin/requests" style={{ display: 'block', textDecoration: 'none', marginBottom: 18 }}>
-          <div
-            className="card fade-up"
-            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderLeft: '4px solid var(--amber)', background: 'var(--amber-bg)' }}
-          >
+          <div className="card fade-up" style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            borderLeft: '4px solid var(--amber)', background: 'var(--amber-bg)',
+          }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontSize: 22 }}>⚠️</span>
+              <span style={{ fontSize: 22 }}>⏳</span>
               <div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--amber)' }}>มีคำขอสมัครรอพิจารณา</div>
-                <div style={{ fontSize: 12.5, color: 'var(--amber)', opacity: .8 }}>{pending} รายการรอการอนุมัติ</div>
+                <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--amber)' }}>มีคำขอสมัครรอดูอยู่</div>
+                <div style={{ fontSize: 12.5, color: 'var(--amber)', opacity: .8 }}>
+                  {pending} คนรอให้อนุมัติ — กดเพื่อดูและตัดสินใจ
+                </div>
               </div>
             </div>
             <span style={{ fontWeight: 700, fontSize: 12.5, color: 'var(--amber)', whiteSpace: 'nowrap' }}>ดูทั้งหมด →</span>

@@ -1,7 +1,7 @@
 // Path:    src/app/admin/duty/page.tsx
-// Purpose: Admin duty roster management — add/remove members from daily duty,
-//          check-in and undo check-in on behalf of members.
-//          All destructive actions use ConfirmDialog (not window.confirm).
+// Purpose: Admin duty roster management — เวรถูกจัดครั้งเดียวและใช้ซ้ำ
+//          แอดมินสามารถเช็คอินแทน / ยกเลิกเช็คอิน / เพิ่ม-ลบรายชื่อได้
+//          Destructive actions use ConfirmDialog.
 // Used by: AppShell navigation (/admin/duty)
 
 'use client';
@@ -35,7 +35,6 @@ type UserRow = {
   year: number;
 };
 
-// ── Confirm dialog state shape ─────────────────────────────────────
 type ConfirmState = {
   open:    boolean;
   action:  'remove' | 'checkin' | 'uncheckin' | null;
@@ -45,12 +44,10 @@ type ConfirmState = {
 
 const CLOSED_CONFIRM: ConfirmState = { open: false, action: null, id: '', name: '' };
 
-// ── Constants ─────────────────────────────────────────────────────
 const TODAY          = typeof window !== 'undefined' ? getTodayTH() : new Date().toISOString().split('T')[0];
 const USERS_URL      = '/api/data?resource=council_users&select=auth_uid,full_name,student_id,year';
 const PUBLIC_DUTY_URL = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: getTodayTH() }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
 
-// ── Helpers ───────────────────────────────────────────────────────
 function adminDutyUrl(date: string): string {
   return `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: date }))}&select=${encodeURIComponent('id,student_name,student_id,auth_uid,checked_in,checked_in_at,note,duty_date')}`;
 }
@@ -77,7 +74,6 @@ export default function AdminDutyPage() {
   const [actionId, setActionId]           = useState<string | null>(null);
   const [error, setError]                 = useState<string | null>(null);
   const [success, setSuccess]             = useState<string | null>(null);
-  // Centralized confirm dialog state — replaces all window.confirm() calls
   const [confirm, setConfirm]             = useState<ConfirmState>(CLOSED_CONFIRM);
 
   useEffect(() => {
@@ -156,7 +152,6 @@ export default function AdminDutyPage() {
     }
   }
 
-  // ── Confirmed action dispatcher ────────────────────────────────
   async function handleConfirmedAction(): Promise<void> {
     const { action, id, name } = confirm;
     setConfirm(CLOSED_CONFIRM);
@@ -166,7 +161,7 @@ export default function AdminDutyPage() {
       const token = await getFreshToken();
 
       if (action === 'remove') {
-        // ⚠️ DESTRUCTIVE ZONE: permanently removes duty entry
+        // ⚠️ DESTRUCTIVE ZONE: ลบรายชื่อออกจากเวรถาวร
         const res  = await fetch(`/api/admin/duty/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token ?? ''}` } });
         const json = await res.json();
         if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
@@ -198,24 +193,23 @@ export default function AdminDutyPage() {
     }
   }
 
-  // ── Confirm dialog copy by action type ────────────────────────
   const CONFIRM_COPY: Record<NonNullable<ConfirmState['action']>, { title: (name: string) => string; description: string; label: string; variant: 'danger' | 'warning' | 'primary' }> = {
     remove: {
-      title:       name => `ลบ ${name} ออกจากเวร?`,
-      description: 'รายชื่อจะถูกลบออก (สามารถเพิ่มกลับได้ภายหลัง)',
+      title:       name => `ลบ ${name} ออกจากรายชื่อเวร?`,
+      description: 'รายชื่อจะหายไปจากเวรชุดนี้ (สามารถเพิ่มกลับได้ภายหลัง)',
       label:       'ลบออก',
       variant:     'danger',
     },
     checkin: {
-      title:       name => `เช็กอินแทน ${name}?`,
-      description: 'ระบบจะบันทึกเวลาเช็กอินปัจจุบัน',
-      label:       'เช็กอิน',
+      title:       name => `เช็คอินแทน ${name}?`,
+      description: 'ระบบจะบันทึกเวลาเช็คอินปัจจุบันแทนสมาชิก',
+      label:       'เช็คอินแทน',
       variant:     'primary',
     },
     uncheckin: {
-      title:       name => `ยกเลิกเช็กอินของ ${name}?`,
-      description: 'เวลาเช็กอินจะถูกล้าง สมาชิกจะกลับเป็นสถานะรอ',
-      label:       'ยกเลิกเช็กอิน',
+      title:       name => `ยกเลิกเช็คอินของ ${name}?`,
+      description: 'เวลาเช็คอินจะถูกล้าง สมาชิกจะกลับเป็นสถานะยังไม่มา',
+      label:       'ยกเลิกเช็คอิน',
       variant:     'warning',
     },
   };
@@ -231,7 +225,6 @@ export default function AdminDutyPage() {
   return (
     <AppShell pageTitle="จัดการเวร — แอดมิน">
 
-      {/* Confirm dialog */}
       {currentCopy && (
         <ConfirmDialog
           open={confirm.open}
@@ -249,8 +242,10 @@ export default function AdminDutyPage() {
       <div className="page-header">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
           <div>
-            <div className="page-title">📋 จัดการเวรยืนหน้าโรงเรียน</div>
-            <div className="page-subtitle">เพิ่ม/ลบรายชื่อเวร · เช็คอินแทนสมาชิก</div>
+            <div className="page-title">📋 เวรยืนหน้าโรงเรียน</div>
+            <div className="page-subtitle">
+              ดูและจัดการรายชื่อเวร · เช็คอินแทนสมาชิก · เพิ่ม/ลบรายชื่อ
+            </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--green)', flexShrink: 0 }}>
             <span className="rt-dot" />realtime
@@ -258,10 +253,27 @@ export default function AdminDutyPage() {
         </div>
       </div>
 
-      {/* Date + actions */}
+      {/* How duty works — brief explanation */}
+      <div className="card fade-up" style={{
+        marginBottom: 16,
+        background: 'var(--amber-bg)',
+        border: '1.5px solid var(--amber-border)',
+        padding: '12px 16px',
+      }}>
+        <div style={{ fontSize: 13, color: 'var(--amber)', fontWeight: 700, marginBottom: 4 }}>
+          💡 รายชื่อเวรทำงานยังไง?
+        </div>
+        <div style={{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.6 }}>
+          รายชื่อเวรถูกตั้งไว้ครั้งเดียวและใช้ซ้ำทุกวัน — สมาชิกแค่มาเช็คอินเอง
+          ถ้าใครมาแทนหรือไม่ได้อยู่ในรายชื่อ ก็สามารถ <strong>walk-in</strong> และเช็คอินได้เลย
+          โดยไม่ต้องแก้รายชื่อเวร
+        </div>
+      </div>
+
+      {/* Date filter + Add button */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
         <div className="form-group" style={{ marginBottom: 0 }}>
-          <label className="form-label">วันที่</label>
+          <label className="form-label">ดูเช็คอินของวันที่</label>
           <input
             type="date"
             value={selectedDate}
@@ -279,7 +291,7 @@ export default function AdminDutyPage() {
         {[
           { label: 'รายชื่อทั้งหมด', value: dutyList.length, color: 'var(--brand)' },
           { label: 'เช็คอินแล้ว',    value: checkedCount,     color: 'var(--green)' },
-          { label: 'รอเช็คอิน',      value: pendingCount,     color: 'var(--amber)' },
+          { label: 'ยังไม่มา',       value: pendingCount,     color: 'var(--amber)' },
         ].map((s, i) => (
           <div key={i} className="stat-card fade-up" style={{ borderTop: `3px solid ${s.color}`, animationDelay: `${i * 40}ms` }}>
             <div className="stat-label">{s.label}</div>
@@ -326,7 +338,10 @@ export default function AdminDutyPage() {
         ) : dutyList.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">📋</div>
-            <div>ยังไม่มีรายชื่อเวรสำหรับวันที่นี้</div>
+            <div>ยังไม่มีรายชื่อเวรในระบบ</div>
+            <div style={{ fontSize: 12, color: 'var(--text-4)', marginTop: 4 }}>
+              เพิ่มรายชื่อครั้งเดียว แล้วสมาชิกจะเห็นและเช็คอินได้ทุกวัน
+            </div>
             <button onClick={openAddModal} className="btn btn-primary btn-sm" style={{ marginTop: 10 }}>＋ เพิ่มรายชื่อ</button>
           </div>
         ) : (
@@ -374,7 +389,7 @@ export default function AdminDutyPage() {
               <div className="data-item-meta">
                 {d.checked_in
                   ? <span className="badge badge-green" style={{ fontSize: 9.5 }}>✓ มาแล้ว</span>
-                  : <span className="badge badge-gray"  style={{ fontSize: 9.5 }}>รอ</span>}
+                  : <span className="badge badge-gray"  style={{ fontSize: 9.5 }}>ยังไม่มา</span>}
               </div>
 
               <div className="data-item-actions">
@@ -385,7 +400,7 @@ export default function AdminDutyPage() {
                       onClick={() => setConfirm({ open: true, action: 'checkin', id: d.id, name: d.student_name })}
                       className="btn btn-success btn-sm"
                     >
-                      เช็กอิน
+                      เช็คอินแทน
                     </button>
                   ) : (
                     <button
@@ -393,11 +408,11 @@ export default function AdminDutyPage() {
                       onClick={() => setConfirm({ open: true, action: 'uncheckin', id: d.id, name: d.student_name })}
                       className="btn btn-ghost btn-sm"
                     >
-                      ยกเลิก
+                      ยกเลิกเช็คอิน
                     </button>
                   )
                 }
-                {/* ⚠️ DESTRUCTIVE ZONE: removes duty row — btn-danger, not primary */}
+                {/* ⚠️ DESTRUCTIVE ZONE: ลบออกจากรายชื่อเวร */}
                 <button
                   disabled={actionId !== null}
                   onClick={() => setConfirm({ open: true, action: 'remove', id: d.id, name: d.student_name })}
@@ -419,7 +434,9 @@ export default function AdminDutyPage() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
               <div>
                 <div style={{ fontWeight: 800, fontSize: 15 }}>เพิ่มรายชื่อเวร</div>
-                <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>{selectedDate}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
+                  รายชื่อที่เพิ่มจะใช้ได้ทุกวัน — ไม่ต้องเพิ่มซ้ำทุกวัน
+                </div>
               </div>
               <button onClick={() => setShowAddModal(false)} className="btn btn-ghost btn-sm">✕ ปิด</button>
             </div>
@@ -437,7 +454,7 @@ export default function AdminDutyPage() {
                     </div>
                     <div>
                       <div style={{ fontWeight: 700, fontSize: 13.5 }}>{u.full_name}</div>
-                      <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{u.student_id ?? '—'}</div>
+                      <div style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{u.student_id ?? '—'} · ปี {u.year}</div>
                     </div>
                   </div>
                   <button disabled={actionId !== null} onClick={() => void addDuty(u)} className="btn btn-primary btn-sm">＋ เพิ่ม</button>
