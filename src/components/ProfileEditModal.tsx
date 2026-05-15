@@ -71,7 +71,7 @@ export default function ProfileEditModal({ onClose }: Props) {
       return;
     }
     if (f.size > 5 * 1024 * 1024) {
-      setError('ไฟล์ใหญ่เกิน 5MB');
+      setError('ไฟล์ใหญ่เกิน 20MB');
       return;
     }
 
@@ -273,7 +273,7 @@ export default function ProfileEditModal({ onClose }: Props) {
             </div>
 
             <div style={{ fontSize: 11.5, color: 'var(--text-4)', textAlign: 'center', lineHeight: 1.5 }}>
-              JPG, PNG, WEBP · สูงสุด 5MB
+              JPG, PNG, WEBP · สูงสุด 20MB
               <br />
               <span style={{ fontSize: 11 }}>รูปจะถูกเก็บใน Google Drive</span>
             </div>
