@@ -3,20 +3,7 @@
 /**
  * AuthContext.tsx  v4 — ZERO-WAIT instant restore
  * ─────────────────────────────────────────────────────────────────
- * หลักการ "instant restore":
- *
- *   useState(() => getCachedProfileSync())
- *   └─ อ่าน cookie/sessionStorage แบบ synchronous ตอน render ครั้งแรก
- *   └─ ถ้ามี cache → loading=false + user=profile ทันทีเลย (0ms)
- *   └─ ผู้ใช้เห็น UI ได้ทันที ไม่มี spinner
- *
- * Background validation (ไม่ block UI):
- *   INITIAL_SESSION มี token → validate token จริง + re-fetch DB
- *   ถ้า token หมดอายุ / DB บอก disable → signOut + clear cache
- *
- * Token refresh:
- *   TOKEN_REFRESHED → refreshCookieTTL() เท่านั้น ไม่ query DB
- * ─────────────────────────────────────────────────────────────────
+ * v4.1 — added avatar_url to profile select + cache
  */
 
 import React, {
@@ -77,12 +64,14 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+// ── fetchProfileDB ─────────────────────────────────────────────────
+// NOTE: avatar_url is included so profile pictures are always in sync.
 async function fetchProfileDB(uid: string): Promise<UserProfile | null> {
   try {
     const sb = getBrowserSupabase();
     const { data, error } = await withTimeout(
       sb.from('council_users')
-        .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
+        .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled,avatar_url')
         .eq('auth_uid', uid)
         .limit(1)
         .maybeSingle(),
@@ -119,20 +108,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   // ── Background validator ───────────────────────────────────────
-  // เรียกหลัง instant restore เพื่อยืนยันว่า token + DB ยังถูกต้อง
-  // ไม่ block UI เด็ดขาด
   async function backgroundValidate(uid: string) {
     if (validating.current) return;
     validating.current = true;
     try {
       const profile = await fetchProfileDB(uid);
       if (profile) {
-        // ข้อมูลยังถูกต้อง → update cache + user (เผื่อข้อมูลเปลี่ยน)
         setCachedProfile(profile);
         setUser(profile);
         pushLog('info', `✅ BG validate OK: ${profile.full_name}`);
       } else {
-        // ถูก disable หรือลบออก → force logout
         pushLog('warn', 'BG validate: ไม่พบหรือถูก disable → signOut');
         clearCachedProfile();
         setUser(null);
@@ -141,7 +126,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         try { await getBrowserSupabase().auth.signOut(); } catch {}
       }
     } catch {
-      // network error ระหว่าง background validate → ไม่ logout (เผื่อ offline)
       pushLog('warn', 'BG validate: network error — keeping cached state');
     } finally {
       validating.current = false;
@@ -152,8 +136,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let mounted = true;
 
-    // Safety timer สำหรับกรณีที่ไม่มี cache (loading=true ค้างอยู่)
-    // ถ้ามี cache loading=false แล้ว timer นี้แทบไม่มีผล
     const safetyTimer = loading ? setTimeout(() => {
       if (!mounted) return;
       pushLog('error', 'Safety timeout 8s');
@@ -178,7 +160,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // ── INITIAL_SESSION ────────────────────────────────────────
         if (event === 'INITIAL_SESSION') {
           if (!session?.user) {
-            // ไม่มี session จริงๆ → ล้าง cache ถ้ามี
             if (user) {
               pushLog('warn', 'INITIAL_SESSION: ไม่มี session → clear cache');
               clearCachedProfile();
@@ -192,18 +173,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const cached = getCachedProfile(uid);
 
           if (cached) {
-            // Cache ตรง uid → ยืนยันแล้วว่าเป็นคนเดิม
-            // (user ถูก set แล้วจาก useState initializer)
-            // เพียงแต่ต้องตรวจว่า uid ตรง — ป้องกันกรณี user เปลี่ยน device
-            if (user?.auth_uid !== uid) {
-              setUser(cached);
-            }
+            if (user?.auth_uid !== uid) setUser(cached);
             setLoading(false);
             pushLog('info', `⚡ Instant restore: ${cached.full_name} (from cache)`);
-            // Background validate ไม่ block UI
             void backgroundValidate(uid);
           } else {
-            // ไม่มี cache → query DB (กรณี login ครั้งแรก หรือ cache หมดอายุ)
             pushLog('info', 'Cache miss → DB query...');
             try {
               const profile = await withTimeout(fetchProfileDB(uid), 6_000);
@@ -239,8 +213,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // ── SIGNED_IN ──────────────────────────────────────────────
         if (event === 'SIGNED_IN') {
           if (!session?.user) return;
-          // login เพิ่งเสร็จ — AuthContext.login page บันทึก cache ให้แล้ว
-          // แต่ถ้า cache ยังไม่มี (เช่น login ผ่าน OAuth) ให้ query DB
           const uid = session.user.id;
           const cached = getCachedProfile(uid);
           if (cached) {
@@ -260,7 +232,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         // ── TOKEN_REFRESHED ────────────────────────────────────────
-        // ไม่ query DB ซ้ำ เพียงต่ออายุ cache
         if (event === 'TOKEN_REFRESHED') {
           if (session?.user?.id) {
             refreshCookieTTL(session.user.id);
@@ -329,6 +300,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // ── refresh ────────────────────────────────────────────────────
+  // Used after avatar upload / profile change to sync latest data.
   const refresh = useCallback(async () => {
     setLoading(true);
     try {

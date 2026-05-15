@@ -1,7 +1,6 @@
-
 // Path:    src/components/AppShell.tsx
-// Purpose: Root layout shell — renders the sidebar (desktop), top bar, bottom nav
-//          (mobile), and wraps every page's content area. Owns navigation state.
+// Purpose: Root layout shell — sidebar, topbar, bottom nav, profile dropdown.
+//          Clicking any avatar now opens a dropdown: Edit Profile / Sign Out.
 // Used by: Every page component as the outermost wrapper.
 
 'use client';
@@ -9,13 +8,13 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { useState, useEffect, memo } from 'react';
+import { useState, useEffect, useRef, memo, useCallback } from 'react';
+import ProfileEditModal from './ProfileEditModal';
 
 // ── Types ─────────────────────────────────────────────────────────
 type NavItem = { href: string; icon: string; label: string; badge?: number };
 
 // ── Nav configs ───────────────────────────────────────────────────
-// Submit (/submit) intentionally removed — feature retired after API validation phase
 const NAV_MEMBER: NavItem[] = [
   { href: '/',           icon: '🏠', label: 'หน้าหลัก' },
   { href: '/zone-check', icon: '🧹', label: 'ตรวจเขตสะอาด' },
@@ -45,7 +44,148 @@ function isActive(pathname: string, href: string): boolean {
   return href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(href + '/');
 }
 
-// ── Memoised sub-components — prevent re-render on auth state change ──────────
+// ── Avatar component ──────────────────────────────────────────────
+// Shows profile picture if available, otherwise initials.
+function AvatarContent({
+  avatarUrl, initials, size, fontSize,
+}: {
+  avatarUrl?: string | null;
+  initials: string;
+  size: number;
+  fontSize: number;
+}) {
+  if (avatarUrl) {
+    return (
+      <img
+        src={avatarUrl}
+        alt="โปรไฟล์"
+        style={{
+          width: '100%', height: '100%',
+          objectFit: 'cover', borderRadius: '50%',
+          display: 'block',
+        }}
+        onError={e => {
+          // Graceful fallback: hide broken image, show initials instead
+          (e.currentTarget as HTMLImageElement).style.display = 'none';
+        }}
+      />
+    );
+  }
+  return <span style={{ fontSize }}>{initials}</span>;
+}
+
+// ── Profile dropdown menu ─────────────────────────────────────────
+const MENU_ITEM_STYLE: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 10,
+  width: '100%', padding: '10px 14px',
+  background: 'none', border: 'none', borderRadius: 'var(--r-lg)',
+  cursor: 'pointer', fontFamily: 'var(--font)',
+  fontSize: 13.5, fontWeight: 600,
+  color: 'var(--text-2)', textAlign: 'left',
+  transition: 'background var(--dur-fast)',
+};
+
+function ProfileDropdownMenu({
+  style, onEditProfile, onSignOut,
+}: {
+  style: React.CSSProperties;
+  onEditProfile: () => void;
+  onSignOut: () => void;
+}) {
+  const { user } = useAuth();
+  const initials = user?.full_name ? getInitials(user.full_name) : '?';
+  const [hoverEdit, setHoverEdit] = useState(false);
+  const [hoverOut, setHoverOut]   = useState(false);
+
+  return (
+    <div
+      onClick={e => e.stopPropagation()}
+      style={{
+        ...style,
+        background: 'var(--surface)',
+        border: '1px solid var(--border-2)',
+        borderRadius: 'var(--r-xl)',
+        boxShadow: 'var(--shadow-lg)',
+        minWidth: 230,
+        overflow: 'hidden',
+        zIndex: 99999,
+        animation: 'scaleIn .18s var(--ease-spring) both',
+      }}
+    >
+      {/* User info header */}
+      <div style={{
+        padding: '14px 16px 12px',
+        borderBottom: '1px solid var(--border)',
+        display: 'flex', gap: 12, alignItems: 'center',
+      }}>
+        {/* Mini avatar */}
+        <div style={{
+          width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
+          background: user?.avatar_url
+            ? 'transparent'
+            : 'linear-gradient(135deg,#8A8EF8,var(--brand))',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          overflow: 'hidden',
+          border: '2px solid var(--border-2)',
+        }}>
+          <AvatarContent
+            avatarUrl={user?.avatar_url}
+            initials={initials}
+            size={40}
+            fontSize={12}
+          />
+        </div>
+
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            fontWeight: 800, fontSize: 13.5,
+            color: 'var(--text)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {user?.full_name}
+          </div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 2 }}>
+            {user?.role === 'admin' ? '⭐ ผู้ดูแลระบบ' : 'สมาชิก'} · ปี {user?.year}
+          </div>
+        </div>
+      </div>
+
+      {/* Menu items */}
+      <div style={{ padding: '6px' }}>
+        <button
+          onClick={onEditProfile}
+          style={{
+            ...MENU_ITEM_STYLE,
+            background: hoverEdit ? 'var(--surface-2)' : 'none',
+          }}
+          onMouseEnter={() => setHoverEdit(true)}
+          onMouseLeave={() => setHoverEdit(false)}
+        >
+          <span style={{ fontSize: 16 }}>👤</span>
+          แก้ไขโปรไฟล์
+        </button>
+
+        <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+
+        <button
+          onClick={onSignOut}
+          style={{
+            ...MENU_ITEM_STYLE,
+            color: 'var(--red)',
+            background: hoverOut ? 'var(--red-bg)' : 'none',
+          }}
+          onMouseEnter={() => setHoverOut(true)}
+          onMouseLeave={() => setHoverOut(false)}
+        >
+          <span style={{ fontSize: 16 }}>↩</span>
+          ออกจากระบบ
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Memoised nav items ────────────────────────────────────────────
 const SideNavItem = memo(function SideNavItem({ item, active }: { item: NavItem; active: boolean }) {
   return (
     <Link
@@ -84,24 +224,100 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   const pathname = usePathname();
   const router   = useRouter();
   const { user, isAdmin, isMember, loading, signOut } = useAuth();
-  const [today, setToday] = useState('');
 
-  // Set date only on client to avoid SSR hydration mismatch
+  const [today, setToday]             = useState('');
+  const [menuAnchor, setMenuAnchor]   = useState<DOMRect | null>(null);
+  const [showProfileEdit, setShowProfileEdit] = useState(false);
+
+  // Set date only on client to avoid SSR mismatch
   useEffect(() => {
     setToday(new Date().toLocaleDateString('th-TH', {
       weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
     }));
   }, []);
 
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!menuAnchor) return;
+    const close = () => setMenuAnchor(null);
+    // Delay to avoid the opening click itself triggering close
+    const id = setTimeout(() => document.addEventListener('click', close), 0);
+    return () => {
+      clearTimeout(id);
+      document.removeEventListener('click', close);
+    };
+  }, [!!menuAnchor]);
+
+  // Close dropdown on Escape
+  useEffect(() => {
+    if (!menuAnchor) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuAnchor(null);
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [!!menuAnchor]);
+
+  // ── Dropdown trigger ───────────────────────────────────────────
+  function openProfileMenu(e: React.MouseEvent<HTMLElement>) {
+    e.stopPropagation();
+    // Toggle
+    if (menuAnchor) { setMenuAnchor(null); return; }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setMenuAnchor(rect);
+  }
+
+  // ── Position calculation ───────────────────────────────────────
+  // Returns CSS style for the fixed-position dropdown.
+  // Ensures the menu stays fully on-screen.
+  function calcMenuStyle(anchor: DOMRect): React.CSSProperties {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const MENU_W = 240;
+    const MENU_H = 180;
+    const GAP    = 6;
+
+    const style: React.CSSProperties = { position: 'fixed' };
+
+    // Horizontal: left-heavy triggers (sidebar) → open to the right
+    // Right-heavy triggers (topbar) → open to the left
+    if (anchor.left + anchor.width / 2 < vw / 2) {
+      // Left side — open to the right of the trigger (sidebar case)
+      const left = anchor.right + GAP;
+      style.left = Math.min(left, vw - MENU_W - 8);
+    } else {
+      // Right side — align to right edge of trigger
+      const right = vw - anchor.right;
+      style.right = Math.max(right, 8);
+    }
+
+    // Vertical: prefer showing below; if insufficient space, show above
+    const spaceBelow = vh - anchor.bottom;
+    if (spaceBelow >= MENU_H + GAP) {
+      style.top = anchor.bottom + GAP;
+    } else {
+      style.bottom = vh - anchor.top + GAP;
+    }
+
+    return style;
+  }
+
+  // ── Sign out ───────────────────────────────────────────────────
   async function handleSignOut(): Promise<void> {
+    setMenuAnchor(null);
     await signOut();
     router.push('/login');
+  }
+
+  function handleEditProfile() {
+    setMenuAnchor(null);
+    setShowProfileEdit(true);
   }
 
   const initials  = user?.full_name ? getInitials(user.full_name) : '?';
   const sideItems = isMember ? NAV_MEMBER : NAV_PUBLIC;
 
-  // Bottom nav — max 5 items, admin badge on rightmost slot when applicable
+  // Bottom nav items
   const bottomItems: NavItem[] = loading ? [] : isMember
     ? [
         { href: '/',           icon: '🏠', label: 'หน้าหลัก' },
@@ -111,6 +327,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
       ].slice(0, 5)
     : NAV_PUBLIC;
 
+  // ── Render ─────────────────────────────────────────────────────
   return (
     <div className="app-layout">
 
@@ -149,24 +366,54 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           </div>
         )}
 
+        {/* Sidebar footer — clickable user row opens dropdown */}
         <div className="sb-footer">
           {loading ? (
             <div className="skeleton" style={{ height: 48, borderRadius: 10 }} />
           ) : user ? (
-            <>
-              <div className="sb-user">
-                <div className="sb-avatar">{initials}</div>
-                <div style={{ overflow: 'hidden', flex: 1 }}>
-                  <div className="sb-uname">{user.full_name}</div>
-                  <div className="sb-urole">
-                    {user.role === 'admin' ? '⭐ แอดมิน' : 'สมาชิก'} · ปี {user.year}
-                  </div>
+            <div
+              role="button"
+              aria-label="เมนูโปรไฟล์"
+              onClick={openProfileMenu}
+              className="sb-user"
+              style={{
+                cursor: 'pointer',
+                borderRadius: 'var(--r-lg)',
+                transition: 'background var(--dur-fast)',
+                userSelect: 'none',
+              }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--sb-hover)'; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+            >
+              {/* Avatar */}
+              <div className="sb-avatar" style={{
+                background: user.avatar_url
+                  ? 'transparent'
+                  : 'linear-gradient(135deg, #7B7FF0, var(--brand))',
+                overflow: 'hidden', flexShrink: 0,
+              }}>
+                <AvatarContent
+                  avatarUrl={user.avatar_url}
+                  initials={initials}
+                  size={30}
+                  fontSize={10.5}
+                />
+              </div>
+
+              <div style={{ overflow: 'hidden', flex: 1, minWidth: 0 }}>
+                <div className="sb-uname">{user.full_name}</div>
+                <div className="sb-urole">
+                  {user.role === 'admin' ? '⭐ แอดมิน' : 'สมาชิก'} · ปี {user.year}
                 </div>
               </div>
-              <button className="sb-signout" onClick={() => void handleSignOut()}>
-                <span>↩</span> ออกจากระบบ
-              </button>
-            </>
+
+              {/* Chevron indicator */}
+              <span style={{
+                fontSize: 10, color: 'rgba(255,255,255,.25)', flexShrink: 0, marginLeft: 4,
+              }}>
+                ⋮
+              </span>
+            </div>
           ) : (
             <Link href="/login" className="btn btn-gold btn-full">🔑 เข้าสู่ระบบ</Link>
           )}
@@ -186,8 +433,25 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             {loading ? (
               <div className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
             ) : user ? (
-              <button className="mobile-avatar" onClick={() => void handleSignOut()} aria-label="ออกจากระบบ">
-                {initials}
+              /* Mobile avatar — opens dropdown */
+              <button
+                className="mobile-avatar"
+                onClick={openProfileMenu}
+                aria-label="เมนูโปรไฟล์"
+                style={{
+                  background: user.avatar_url
+                    ? 'transparent'
+                    : 'linear-gradient(135deg, #7B7FF0, var(--brand))',
+                  overflow: 'hidden', padding: 0,
+                  border: user.avatar_url ? '2px solid rgba(255,255,255,0.3)' : 'none',
+                }}
+              >
+                <AvatarContent
+                  avatarUrl={user.avatar_url}
+                  initials={initials}
+                  size={30}
+                  fontSize={10.5}
+                />
               </button>
             ) : (
               <Link href="/login" className="btn btn-gold btn-sm">เข้าสู่ระบบ</Link>
@@ -212,8 +476,32 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
                     {user.role === 'admin' ? '⭐ แอดมิน' : 'สมาชิก'} · ปี {user.year}
                   </div>
                 </div>
-                <div className="sb-avatar" style={{ width: 30, height: 30, fontSize: 11 }}>{initials}</div>
-                <button onClick={() => void handleSignOut()} className="btn btn-ghost btn-sm">ออก</button>
+
+                {/* Desktop topbar avatar — opens dropdown */}
+                <button
+                  onClick={openProfileMenu}
+                  aria-label="เมนูโปรไฟล์"
+                  style={{
+                    width: 30, height: 30,
+                    borderRadius: '50%',
+                    background: user.avatar_url
+                      ? 'transparent'
+                      : 'linear-gradient(135deg, #7B7FF0, var(--brand))',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 10.5, color: '#fff', fontWeight: 800,
+                    border: 'none', cursor: 'pointer', flexShrink: 0,
+                    overflow: 'hidden', padding: 0,
+                    boxShadow: menuAnchor ? '0 0 0 3px var(--brand-dim)' : 'none',
+                    transition: 'box-shadow var(--dur-fast)',
+                  }}
+                >
+                  <AvatarContent
+                    avatarUrl={user.avatar_url}
+                    initials={initials}
+                    size={30}
+                    fontSize={10.5}
+                  />
+                </button>
               </>
             ) : (
               <Link href="/login" className="btn btn-primary btn-sm">🔑 เข้าสู่ระบบ</Link>
@@ -253,6 +541,20 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           })}
         </div>
       </nav>
+
+      {/* ── Profile Dropdown (fixed overlay, portal-like) ─────────── */}
+      {menuAnchor && user && (
+        <ProfileDropdownMenu
+          style={calcMenuStyle(menuAnchor)}
+          onEditProfile={handleEditProfile}
+          onSignOut={() => void handleSignOut()}
+        />
+      )}
+
+      {/* ── Profile Edit Modal ───────────────────────────────────── */}
+      {showProfileEdit && (
+        <ProfileEditModal onClose={() => setShowProfileEdit(false)} />
+      )}
 
     </div>
   );

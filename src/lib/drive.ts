@@ -45,6 +45,45 @@ function driveError(prefix: string, err: any): Error {
   return e;
 }
 
+// ─── Subfolder helper ─────────────────────────────────────────────
+
+/**
+ * Gets an existing subfolder by name within a parent folder, or creates it.
+ * Used to organise uploads into logical buckets (e.g. profile-avatars).
+ */
+async function getOrCreateSubfolder(
+  drive: any,
+  parentId: string,
+  folderName: string
+): Promise<string> {
+  // Search for existing folder with this name
+  try {
+    const res = await drive.files.list({
+      q: `name='${folderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    if (res.data.files && res.data.files.length > 0) {
+      return res.data.files[0].id as string;
+    }
+  } catch {
+    // Fall through to create
+  }
+
+  // Create the subfolder
+  const created = await drive.files.create({
+    requestBody: {
+      name: folderName,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [parentId],
+    },
+    fields: 'id',
+    supportsAllDrives: true,
+  });
+  return created.data.id as string;
+}
+
 // ─── Core upload function ─────────────────────────────────────────
 
 /**
@@ -139,4 +178,41 @@ export async function uploadFile(
 
     throw driveError(msg || 'Drive upload failed', err);
   }
+}
+
+// ─── Avatar upload ────────────────────────────────────────────────
+
+/**
+ * อัปโหลดรูปโปรไฟล์ไปยัง subfolder "profile-avatars" ใน Drive หลัก
+ * - ถ้าตั้ง DRIVE_AVATAR_FOLDER_ID → ใช้โฟลเดอร์นั้นตรง ๆ
+ * - ถ้าไม่ตั้ง → สร้าง/หา subfolder "profile-avatars" ภายใน DRIVE_FOLDER_ID
+ */
+export async function uploadAvatar(
+  file: File,
+  authUid: string
+): Promise<DriveUploadResult> {
+  const mainFolderId = process.env.DRIVE_FOLDER_ID;
+  if (!mainFolderId) {
+    throw Object.assign(new Error('DRIVE_FOLDER_ID ไม่ได้ตั้งค่า'), { code: 'NO_DRIVE_FOLDER_ID' });
+  }
+
+  const auth = getAuthClient();
+  const drive = google.drive({ version: 'v3', auth });
+
+  // ใช้ DRIVE_AVATAR_FOLDER_ID ถ้ามี มิฉะนั้นสร้าง subfolder อัตโนมัติ
+  let avatarFolderId = process.env.DRIVE_AVATAR_FOLDER_ID;
+  if (!avatarFolderId) {
+    avatarFolderId = await getOrCreateSubfolder(drive, mainFolderId, 'profile-avatars');
+  }
+
+  const ext = file.name.split('.').pop() ?? 'jpg';
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const uid8 = authUid.slice(-8);
+  const renamed = new File(
+    [await file.arrayBuffer()],
+    `avatar_${uid8}_${ts}.${ext}`,
+    { type: file.type }
+  );
+
+  return uploadFile(renamed, true, { folderId: avatarFolderId });
 }

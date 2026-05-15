@@ -1,12 +1,13 @@
 'use client';
 
 // Path:    src/app/page.tsx
-// Purpose: Home page — greeting system + duty roster + zone check feed
+// Purpose: Home page — greeting card + duty roster + zone check feed
 // Used by: AppShell navigation (/)
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
+import GreetingCard from '@/components/GreetingCard';
 import { useAuth } from '@/context/AuthContext';
 import { useData, invalidate } from '@/lib/dataCore';
 import { useRealtime } from '@/lib/realtimeHooks';
@@ -18,83 +19,7 @@ const TODAY = getTodayTH();
 const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector:inspector_name,note,photo_url,recorded_at:created_at')}`;
 const DUTY_URL  = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,auth_uid')}`;
 
-// ── Greeting helpers ───────────────────────────────────────────────────────────
-
-type GreetingSlot = {
-  hour: [number, number]; // [from, to) inclusive start exclusive end
-  greetings: string[];
-  emoji: string;
-  vibes: string[]; // short taglines
-};
-
-const GREETING_SLOTS: GreetingSlot[] = [
-  {
-    hour: [5, 9],
-    emoji: '🌅',
-    greetings: ['อรุณสวัสดิ์', 'ตื่นมาแล้วนะ', 'เช้านี้ก็ยังเท่เหมือนเดิม', 'good morning~'],
-    vibes: ['วันนี้จะเป็นวันดี 🌟', 'เริ่มต้นดีๆ กันเลย', 'พร้อมลุยแล้วใช่มั้ย?'],
-  },
-  {
-    hour: [9, 12],
-    emoji: '☀️',
-    greetings: ['สวัสดีตอนเช้า', 'หวัดดี~', 'มาแล้วนะ', 'เฮ้ยมาถึงแล้ว'],
-    vibes: ['วันนี้ต้องปัง 🔥', 'มาดูว่ามีอะไรบ้าง', 'ไปต่อกัน!'],
-  },
-  {
-    hour: [12, 14],
-    emoji: '🌤️',
-    greetings: ['สวัสดีตอนเที่ยง', 'เที่ยงแล้วนะ', 'ช่วงพักเที่ยง~'],
-    vibes: ['กินข้าวรึยัง? 🍱', 'อย่าลืมพักนะ', 'ชาร์จแบตก่อนบ่าย'],
-  },
-  {
-    hour: [14, 18],
-    emoji: '🌇',
-    greetings: ['สวัสดีตอนบ่าย', 'บ่ายแล้วนะ~', 'ตอนบ่ายหวัดดี', 'บ่ายนี้เป็นยังไงบ้าง'],
-    vibes: ['บ่ายนี้ก็ยังเก่งอยู่ 💪', 'ใกล้เย็นแล้วนะ', 'ยังไหวมั้ย?'],
-  },
-  {
-    hour: [18, 21],
-    emoji: '🌆',
-    greetings: ['สวัสดีตอนเย็น', 'เย็นแล้วนะ~', 'หวัดดีตอนเย็น'],
-    vibes: ['วันนี้ทำดีมากเลย ✨', 'เหนื่อยมั้ย?', 'ใกล้เสร็จงานแล้ว'],
-  },
-  {
-    hour: [21, 24],
-    emoji: '🌙',
-    greetings: ['สวัสดีตอนดึก', 'ดึกแล้วนะ~', 'ยังไม่นอนเลย?', 'night owl 🦉'],
-    vibes: ['อย่าดึกมากนะ 💤', 'ขยันมากเลย!', 'พักบ้างนะ~'],
-  },
-  {
-    hour: [0, 5],
-    emoji: '🌃',
-    greetings: ['ตีแล้วยังดู~', 'นอนแล้วยัง?', 'ดึกมากเลยนะ'],
-    vibes: ['พักได้แล้ว 💤', 'พรุ่งนี้ค่อยทำต่อ', 'สุขภาพสำคัญนะ 🫶'],
-  },
-];
-
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function getGreetingData(firstName: string) {
-  const hour = new Date().getHours();
-  const slot = GREETING_SLOTS.find(s => hour >= s.hour[0] && hour < s.hour[1])
-    ?? GREETING_SLOTS[1];
-  return {
-    emoji: slot.emoji,
-    greeting: pick(slot.greetings),
-    vibe: pick(slot.vibes),
-    name: firstName,
-  };
-}
-
-function getFirstName(fullName: string): string {
-  // Thai names: "ชื่อ นามสกุล" → return "ชื่อ"
-  const parts = fullName.trim().split(/\s+/);
-  return parts[0] ?? fullName;
-}
-
-// ── Misc helpers ───────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
 function getInitials(name: string) {
   return name.trim().split(/\s+/).map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
@@ -121,18 +46,6 @@ export default function HomePage() {
   const [zonesTick, setZonesTick] = useState(0);
   const [dutyTick,  setDutyTick]  = useState(0);
   const [photoSrc,  setPhotoSrc]  = useState<string | null>(null);
-
-  // Greeting: stable per session (re-pick only on mount)
-  const [greetData] = useState(() =>
-    user ? getGreetingData(getFirstName(user.full_name)) : null
-  );
-  // Re-compute if user changes (e.g. slow auth restore)
-  const [greeting, setGreeting] = useState(greetData);
-  useEffect(() => {
-    if (user && !greeting) {
-      setGreeting(getGreetingData(getFirstName(user.full_name)));
-    }
-  }, [user, greeting]);
 
   const {
     data: zonesRaw, loading: loadingZones,
@@ -173,55 +86,12 @@ export default function HomePage() {
   return (
     <AppShell pageTitle="หน้าหลัก">
 
-      {/* ── Greeting Card ────────────────────────────────────────── */}
-      {!authLoading && isMember && greeting && (
-        <div
-          className="card fade-up"
-          style={{
-            marginBottom: 16,
-            background: 'linear-gradient(135deg, var(--brand) 0%, #7B5CF0 100%)',
-            border: 'none',
-            padding: '18px 20px',
-            position: 'relative',
-            overflow: 'hidden',
-          }}
-        >
-          {/* Background decoration */}
-          <div style={{
-            position: 'absolute', right: -20, top: -20,
-            fontSize: 96, opacity: 0.08, lineHeight: 1,
-            userSelect: 'none', pointerEvents: 'none',
-          }}>
-            {greeting.emoji}
-          </div>
-
-          <div style={{ position: 'relative', zIndex: 1 }}>
-            <div style={{
-              fontSize: 11, fontWeight: 700,
-              color: 'rgba(255,255,255,0.60)',
-              textTransform: 'uppercase', letterSpacing: '0.12em',
-              marginBottom: 4,
-            }}>
-              {greeting.greeting} {greeting.emoji}
-            </div>
-            <div style={{
-              fontSize: 20, fontWeight: 800,
-              color: '#fff', letterSpacing: '-0.02em',
-              lineHeight: 1.25, marginBottom: 6,
-            }}>
-              {greeting.name}~
-            </div>
-            <div style={{
-              fontSize: 13, color: 'rgba(255,255,255,0.72)',
-              fontWeight: 500,
-            }}>
-              {greeting.vibe}
-            </div>
-          </div>
-        </div>
+      {/* ── Greeting ─────────────────────────────────────────────── */}
+      {!authLoading && isMember && user && (
+        <GreetingCard fullName={user.full_name} />
       )}
 
-      {/* Guest greeting */}
+      {/* Guest prompt */}
       {!authLoading && !isMember && (
         <div className="card fade-up" style={{ marginBottom: 16, borderLeft: '4px solid var(--brand)' }}>
           <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
@@ -378,17 +248,13 @@ export default function HomePage() {
           {errorDuties && (
             <div className="alert alert-error" style={{ fontSize: 12 }}>
               โหลดข้อมูลเวรไม่สำเร็จ
-              <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>
-                ลองใหม่
-              </button>
+              <button onClick={refreshDuties} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
             </div>
           )}
           {errorZones && (
             <div className="alert alert-error" style={{ fontSize: 12 }}>
               โหลดข้อมูลเขตไม่สำเร็จ
-              <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>
-                ลองใหม่
-              </button>
+              <button onClick={refreshZones} className="btn btn-ghost btn-sm" style={{ marginLeft: 10 }}>ลองใหม่</button>
             </div>
           )}
         </div>

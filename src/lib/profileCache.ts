@@ -25,6 +25,7 @@ export type CachedProfile = {
   account_type ? : string;
   approved ? : boolean;
   disabled ? : boolean;
+  avatar_url ? : string | null;
 };
 
 type Stored = CachedProfile & { exp: number };
