@@ -4,6 +4,17 @@
 //          DELETE — clear avatar_url in council_users
 // Used by: ProfileEditModal
 
+// ── Next.js body size limit override ─────────────────────────────
+// Default limit is 4MB — must be increased to support large photos.
+export const config = {
+  api: { bodyParser: false },
+};
+
+// App Router equivalent: disable Next.js body parsing so we handle
+// the raw multipart stream ourselves via req.formData().
+// The actual enforced cap is set by MAX_SIZE_MB below.
+export const maxDuration = 30; // seconds — allow time for Drive upload
+
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase, verifyMember } from '@/lib/apiHelper';
 import { uploadAvatar } from '@/lib/drive';

@@ -15,6 +15,12 @@ const nextConfig = {
   typescript: {
     ignoreBuildErrors: true,
   },
+  // Increase body size limit for file uploads (profile avatars can be large)
+  experimental: {
+    serverActions: {
+      bodySizeLimit: '25mb',
+    },
+  },
 };
 
 module.exports = nextConfig;

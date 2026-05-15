@@ -99,7 +99,7 @@ function ProfileDropdownMenu({
 
   return (
     <div
-      onClick={e => e.stopPropagation()}
+      onPointerDown={e => e.stopPropagation()}
       style={{
         ...style,
         background: 'var(--surface)',
@@ -236,19 +236,7 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
     }));
   }, []);
 
-  // Close dropdown on outside click
-  useEffect(() => {
-    if (!menuAnchor) return;
-    const close = () => setMenuAnchor(null);
-    // Delay to avoid the opening click itself triggering close
-    const id = setTimeout(() => document.addEventListener('click', close), 0);
-    return () => {
-      clearTimeout(id);
-      document.removeEventListener('click', close);
-    };
-  }, [!!menuAnchor]);
-
-  // Close dropdown on Escape
+  // Close dropdown on Escape key
   useEffect(() => {
     if (!menuAnchor) return;
     const handler = (e: KeyboardEvent) => {
@@ -542,13 +530,33 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
         </div>
       </nav>
 
-      {/* ── Profile Dropdown (fixed overlay, portal-like) ─────────── */}
+      {/* ── Profile Dropdown ─────────────────────────────────────────
+           Transparent full-screen backdrop sits at the highest z-index.
+           Touching/clicking anywhere outside the menu card (on the backdrop)
+           fires onPointerDown and immediately closes the dropdown —
+           no click delay, works on both touch and mouse.                  */}
       {menuAnchor && user && (
-        <ProfileDropdownMenu
-          style={calcMenuStyle(menuAnchor)}
-          onEditProfile={handleEditProfile}
-          onSignOut={() => void handleSignOut()}
-        />
+        <>
+          {/* Invisible backdrop — covers whole screen, closes on first touch */}
+          <div
+            aria-hidden="true"
+            onPointerDown={() => setMenuAnchor(null)}
+            style={{
+              position: 'fixed',
+              inset: 0,
+              zIndex: 9998,
+              background: 'transparent',
+              WebkitTapHighlightColor: 'transparent',
+            }}
+          />
+
+          {/* The actual dropdown card — sits above the backdrop */}
+          <ProfileDropdownMenu
+            style={{ ...calcMenuStyle(menuAnchor), zIndex: 9999 }}
+            onEditProfile={handleEditProfile}
+            onSignOut={() => void handleSignOut()}
+          />
+        </>
       )}
 
       {/* ── Profile Edit Modal ───────────────────────────────────── */}

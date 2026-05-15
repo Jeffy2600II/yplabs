@@ -70,7 +70,7 @@ export default function ProfileEditModal({ onClose }: Props) {
       setError('รองรับเฉพาะ JPG, PNG, WEBP เท่านั้น');
       return;
     }
-    if (f.size > 5 * 1024 * 1024) {
+    if (f.size > 20 * 1024 * 1024) {
       setError('ไฟล์ใหญ่เกิน 20MB');
       return;
     }
