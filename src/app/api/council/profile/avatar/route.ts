@@ -12,7 +12,7 @@ import { createLogger } from '@/lib/serverLogger';
 const logger = createLogger('api/council/profile/avatar');
 
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const MAX_SIZE_MB   = 5;
+const MAX_SIZE_MB   = 20;
 
 // ── POST: upload new avatar ────────────────────────────────────────
 
