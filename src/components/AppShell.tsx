@@ -229,6 +229,10 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   const [menuAnchor, setMenuAnchor]   = useState<DOMRect | null>(null);
   const [showProfileEdit, setShowProfileEdit] = useState(false);
 
+  // Prevents the avatar button from re-opening the dropdown immediately
+  // after the backdrop's onPointerDown closes it (same touch gesture).
+  const justClosedRef = useRef(false);
+
   // Set date only on client to avoid SSR mismatch
   useEffect(() => {
     setToday(new Date().toLocaleDateString('th-TH', {
@@ -249,6 +253,11 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   // ── Dropdown trigger ───────────────────────────────────────────
   function openProfileMenu(e: React.MouseEvent<HTMLElement>) {
     e.stopPropagation();
+    // Backdrop just fired onPointerDown on this same gesture — skip reopening
+    if (justClosedRef.current) {
+      justClosedRef.current = false;
+      return;
+    }
     // Toggle
     if (menuAnchor) { setMenuAnchor(null); return; }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -540,7 +549,10 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
           {/* Invisible backdrop — covers whole screen, closes on first touch */}
           <div
             aria-hidden="true"
-            onPointerDown={() => setMenuAnchor(null)}
+            onPointerDown={() => {
+              justClosedRef.current = true;
+              setMenuAnchor(null);
+            }}
             style={{
               position: 'fixed',
               inset: 0,
