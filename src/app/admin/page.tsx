@@ -1,6 +1,6 @@
 // Path:    src/app/admin/page.tsx
 // Purpose: Admin dashboard — stats and navigation cards.
-//          Improved copy: plain Thai, easy to understand at a glance.
+//          Includes archive menu entry for Supabase → Sheets data management.
 // Used by: AppShell navigation (/admin)
 
 'use client';
@@ -66,6 +66,7 @@ export default function AdminPage() {
     { title: 'รายชื่อเวร', desc: 'ดูเช็คอิน · เช็คอินแทน · แก้รายชื่อ', icon: '📋', href: '/admin/duty', accent: '#D97706' },
     { title: 'ผลตรวจเขตสะอาด', desc: 'ดูรายงานย้อนหลัง กรองตามวัน/เขต', icon: '📊', href: '/admin/zones', accent: 'var(--blue)' },
     { title: 'ปีการศึกษา', desc: 'เพิ่ม/ปิดปี · ดูสถานะ retention', icon: '📅', href: '/admin/years', accent: '#7C3AED', badge: years?.length },
+    { title: 'Archive ข้อมูล', desc: 'ย้ายข้อมูลเก่า Supabase → Google Sheets อัตโนมัติ', icon: '📦', href: '/admin/archive', accent: '#0891B2' },
   ];
   
   if (authLoading) return (
@@ -77,6 +78,7 @@ export default function AdminPage() {
   
   return (
     <AppShell pageTitle="แผงแอดมิน" pendingCount={pending}>
+
       {/* Header */}
       <div className="page-header">
         <div className="page-title">⚙️ แผงผู้ดูแลระบบ</div>
@@ -86,31 +88,10 @@ export default function AdminPage() {
       {/* Stats */}
       <div className="grid-4" style={{ marginBottom: 20 }}>
         {[
-          {
-            label: 'รอพิจารณา',
-            value: pending,
-            sub: 'คำขอสมัครใหม่',
-            color: 'var(--red)',
-            highlight: pending > 0,
-          },
-          {
-            label: 'สมาชิกปีนี้',
-            value: users?.length,
-            sub: `ปีการศึกษา ${activeYear ?? '—'}`,
-            color: 'var(--brand)',
-          },
-          {
-            label: 'ปีในระบบ',
-            value: years?.length,
-            sub: 'เก็บสูงสุด 3 ปีล่าสุด',
-            color: 'var(--gold)',
-          },
-          {
-            label: 'ปีปัจจุบัน',
-            value: activeYear,
-            sub: 'ปีที่ใช้งานล่าสุด',
-            color: 'var(--green)',
-          },
+          { label: 'รอพิจารณา', value: pending,        sub: 'คำขอสมัครใหม่',          color: 'var(--red)',   highlight: pending > 0 },
+          { label: 'สมาชิกปีนี้', value: users?.length, sub: `ปีการศึกษา ${activeYear ?? '—'}`, color: 'var(--brand)' },
+          { label: 'ปีในระบบ',  value: years?.length,  sub: 'เก็บสูงสุด 3 ปีล่าสุด',  color: 'var(--gold)'  },
+          { label: 'ปีปัจจุบัน', value: activeYear,    sub: 'ปีที่ใช้งานล่าสุด',       color: 'var(--green)' },
         ].map((s, i) => (
           <div key={i} className="stat-card fade-up" style={{ borderTop: `3px solid ${s.color}`, animationDelay: `${i * 40}ms` }}>
             <div className="stat-label">{s.label}</div>
@@ -126,7 +107,7 @@ export default function AdminPage() {
         ))}
       </div>
 
-      {/* Pending requests alert */}
+      {/* Pending alert */}
       {pending > 0 && (
         <Link href="/admin/requests" style={{ display: 'block', textDecoration: 'none', marginBottom: 18 }}>
           <div className="card fade-up" style={{
