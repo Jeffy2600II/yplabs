@@ -8,7 +8,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { useState, useEffect, useRef, memo, useCallback } from 'react';
+import { useState, useEffect, memo, useCallback } from 'react';
 import ProfileEditModal from './ProfileEditModal';
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -247,10 +247,10 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   }, [!!menuAnchor]);
 
   // ── Dropdown trigger ───────────────────────────────────────────
+  // Only opens the menu. Closing is handled exclusively by the backdrop.
+  // This avoids any double-fire / re-open race conditions.
   function openProfileMenu(e: React.MouseEvent<HTMLElement>) {
-    e.stopPropagation();
-    // Toggle
-    if (menuAnchor) { setMenuAnchor(null); return; }
+    if (menuAnchor) return; // already open — backdrop will close it
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setMenuAnchor(rect);
   }
@@ -537,16 +537,26 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
            no click delay, works on both touch and mouse.                  */}
       {menuAnchor && user && (
         <>
-          {/* Invisible backdrop — covers whole screen, closes on first touch */}
+          {/* Invisible backdrop — full-screen, highest z-index layer.
+               Intercepts ALL pointer events so nothing behind it fires.
+               onPointerDown closes the menu; the event never reaches
+               elements underneath (no stopPropagation needed on avatar). */}
           <div
             aria-hidden="true"
-            onPointerDown={() => setMenuAnchor(null)}
+            onPointerDown={e => {
+              e.preventDefault();   // prevent any downstream focus/click
+              e.stopPropagation();  // stop bubbling dead here
+              setMenuAnchor(null);
+            }}
             style={{
               position: 'fixed',
               inset: 0,
               zIndex: 9998,
               background: 'transparent',
+              // Capture all pointer events — nothing underneath fires
+              touchAction: 'none',
               WebkitTapHighlightColor: 'transparent',
+              cursor: 'default',
             }}
           />
 
