@@ -253,15 +253,11 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
   // ── Dropdown trigger ───────────────────────────────────────────
   function openProfileMenu(e: React.MouseEvent<HTMLElement>) {
     e.stopPropagation();
-    // Backdrop just fired onPointerDown on this same gesture — skip reopening
-    if (justClosedRef.current) {
-      justClosedRef.current = false;
-      return;
-    }
-    // Toggle
-    if (menuAnchor) { setMenuAnchor(null); return; }
+    // Backdrop just fired onPointerDown on this same gesture — skip reopening.
+    // justClosedRef resets itself after 50ms so subsequent opens work normally.
+    if (justClosedRef.current) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setMenuAnchor(rect);
+    setMenuAnchor(prev => prev ? null : rect);
   }
 
   // ── Position calculation ───────────────────────────────────────
@@ -552,6 +548,8 @@ export default function AppShell({ children, pageTitle, pendingCount = 0 }: Prop
             onPointerDown={() => {
               justClosedRef.current = true;
               setMenuAnchor(null);
+              // Reset after this pointer gesture's event chain completes
+              setTimeout(() => { justClosedRef.current = false; }, 50);
             }}
             style={{
               position: 'fixed',
