@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
 import GreetingCard from '@/components/GreetingCard';
+import HomeLanding from '@/components/HomeLanding';
 import { useAuth } from '@/context/AuthContext';
 import { useData, invalidate } from '@/lib/dataCore';
 import { useRealtime } from '@/lib/realtimeHooks';
@@ -38,43 +39,6 @@ function timeSince(iso: string) {
   if (hr < 12)  return `${hr} ชม. ที่แล้ว`;
   return formatTime(iso);
 }
-
-// ── Feature card data ──────────────────────────────────────────────────────────
-
-const FEATURES = [
-  {
-    icon: '📋',
-    title: 'รายชื่อเวรยืนหน้าโรงเรียน',
-    desc: 'สมาชิกสภาเช็คอินด้วยตัวเองได้ทันที ไม่ต้องรายงานผ่านกลุ่มแชทอีกต่อไป ข้อมูลอัปเดตแบบ real-time',
-    color: 'var(--amber)',
-    bg: 'var(--amber-bg)',
-    border: 'var(--amber-border)',
-  },
-  {
-    icon: '🧹',
-    title: 'ตรวจเขตสะอาด',
-    desc: 'บันทึกผลตรวจเขตพร้อมรูปภาพ เห็นสถิติรายวัน-รายสัปดาห์ แอดมินดูรายงานย้อนหลังได้ทุกเมื่อ',
-    color: 'var(--blue)',
-    bg: 'var(--blue-bg)',
-    border: 'var(--blue-border)',
-  },
-  {
-    icon: '⚙️',
-    title: 'ระบบแอดมินครบวงจร',
-    desc: 'จัดการบัญชีสมาชิก อนุมัติคำขอ เช็คอินแทน และ archive ข้อมูลเก่าไป Google Sheets อัตโนมัติ',
-    color: 'var(--brand)',
-    bg: 'var(--brand-dim)',
-    border: 'rgba(91,91,214,0.18)',
-  },
-  {
-    icon: '📊',
-    title: 'ข้อมูลเป็นศูนย์กลาง',
-    desc: 'ทุกอย่างอยู่ในที่เดียว ไม่กระจายตามกลุ่มแชท ค้นหา กรอง และดูสถิติย้อนหลังได้ง่าย',
-    color: 'var(--green)',
-    bg: 'var(--green-bg)',
-    border: 'var(--green-border)',
-  },
-];
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
@@ -128,16 +92,18 @@ export default function HomePage() {
         <GreetingCard fullName={user.full_name} />
       )}
 
-      {/* Guest prompt */}
+      {/* Guest banner — ระบุชัดว่าเป็นระบบภายในสภานักเรียน */}
       {!authLoading && !isMember && (
         <div className="card fade-up" style={{ marginBottom: 16, borderLeft: '4px solid var(--brand)' }}>
           <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
-            👋 ยินดีต้อนรับ!
+            👋 ยินดีต้อนรับ
           </div>
-          <div style={{ fontSize: 13, color: 'var(--text-3)', marginBottom: 12 }}>
-            ระบบสภานักเรียน ร.ร. คำยางพิทยา — เข้าสู่ระบบเพื่อใช้งานครบทุกฟีเจอร์
+          <div style={{ fontSize: 13, color: 'var(--text-3)', marginBottom: 12, lineHeight: 1.6 }}>
+            นี่คือระบบภายในของ{' '}
+            <strong style={{ color: 'var(--text-2)' }}>สภานักเรียน ร.ร. คำยางพิทยา</strong>
+            {' '}— สมาชิกสภาเข้าสู่ระบบเพื่อเช็คอินเวรและบันทึกผลตรวจเขตได้
           </div>
-          <Link href="/login" className="btn btn-primary btn-sm">🔑 เข้าสู่ระบบ</Link>
+          <Link href="/login" className="btn btn-primary btn-sm">🔑 เข้าสู่ระบบ (สมาชิกสภา)</Link>
         </div>
       )}
 
@@ -278,6 +244,7 @@ export default function HomePage() {
         </div>
       </div>
 
+      {/* Error alerts */}
       {(errorDuties || errorZones) && (
         <div style={{ marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 6 }}>
           {errorDuties && (
@@ -295,273 +262,8 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* ══════════════════════════════════════════════════════════
-          LANDING SECTION — ต่อจาก feed
-          แสดงทุกคน (ทั้ง login และไม่ login)
-          ══════════════════════════════════════════════════════════ */}
-
-      {/* Divider */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 12, marginBottom: 28,
-      }}>
-        <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-        <span style={{
-          fontSize: 10, fontWeight: 700, textTransform: 'uppercase',
-          letterSpacing: '.14em', color: 'var(--text-4)',
-        }}>
-          เกี่ยวกับระบบ
-        </span>
-        <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-      </div>
-
-      {/* Hero block */}
-      <div className="card fade-up" style={{
-        marginBottom: 20,
-        background: 'linear-gradient(135deg, var(--brand) 0%, #7B5CF0 100%)',
-        border: 'none',
-        padding: '28px 24px',
-        position: 'relative',
-        overflow: 'hidden',
-      }}>
-        {/* Background watermark */}
-        <div style={{
-          position: 'absolute', right: -24, bottom: -16,
-          fontSize: 120, opacity: 0.06, lineHeight: 1,
-          userSelect: 'none', pointerEvents: 'none', transform: 'rotate(-12deg)',
-        }}>
-          🏫
-        </div>
-
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          {/* Eyebrow */}
-          <div style={{
-            display: 'inline-flex', alignItems: 'center', gap: 6,
-            background: 'rgba(255,255,255,0.15)', borderRadius: 'var(--r-pill)',
-            padding: '4px 12px', marginBottom: 14,
-          }}>
-            <span style={{ fontSize: 10, fontWeight: 800, color: 'rgba(255,255,255,0.9)', letterSpacing: '.10em', textTransform: 'uppercase' }}>
-              YPLABS
-            </span>
-          </div>
-
-          <div style={{
-            fontSize: 22, fontWeight: 800, color: '#fff',
-            lineHeight: 1.25, letterSpacing: '-.02em', marginBottom: 10,
-          }}>
-            ระบบบริหารจัดการ<br />สภานักเรียน
-          </div>
-          <div style={{
-            fontSize: 13.5, color: 'rgba(255,255,255,0.72)',
-            lineHeight: 1.65, marginBottom: 20,
-          }}>
-            โรงเรียนคำยางพิทยา — แพลตฟอร์มรวมศูนย์ที่ช่วยให้สภานักเรียน
-            จัดการงานประจำวันได้ง่ายขึ้น รวดเร็วขึ้น และโปร่งใสขึ้น
-            แทนที่การแจ้งงานผ่านกลุ่มแชทที่ข้อมูลกระจัดกระจายและหาย
-          </div>
-
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {!isMember ? (
-              <>
-                <Link href="/login" className="btn" style={{
-                  background: '#fff', color: 'var(--brand)',
-                  fontWeight: 800, fontSize: 13,
-                }}>
-                  🔑 เข้าสู่ระบบ
-                </Link>
-                <Link href="/register" className="btn btn-ghost" style={{
-                  borderColor: 'rgba(255,255,255,0.35)', color: '#fff',
-                  background: 'rgba(255,255,255,0.10)',
-                }}>
-                  ส่งคำขอสมัคร
-                </Link>
-              </>
-            ) : (
-              <Link href="/duty" className="btn" style={{
-                background: '#fff', color: 'var(--brand)',
-                fontWeight: 800, fontSize: 13,
-              }}>
-                ดูเวรวันนี้ →
-              </Link>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Who can use this */}
-      <div className="card fade-up" style={{ marginBottom: 20, padding: '18px 20px' }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '.10em', marginBottom: 14 }}>
-          ใครใช้งานได้บ้าง?
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {[
-            {
-              icon: '👁️',
-              label: 'ทุกคน (ไม่ต้อง login)',
-              desc: 'ดูรายชื่อเวรและผลตรวจเขตสะอาดวันนี้ได้เลย',
-              color: 'var(--text-3)',
-            },
-            {
-              icon: '👩‍🎓',
-              label: 'สมาชิกสภานักเรียน',
-              desc: 'เช็คอินเวร บันทึกผลตรวจเขตพร้อมรูปภาพ และดูประวัติย้อนหลัง — ต้องมีบัญชีที่อนุมัติแล้ว',
-              color: 'var(--brand)',
-              note: 'ต้องรับการอนุมัติจากแอดมินก่อน',
-            },
-            {
-              icon: '⭐',
-              label: 'แอดมินสภานักเรียน',
-              desc: 'จัดการรายชื่อสมาชิก อนุมัติคำขอ เช็คอินแทน ดูรายงานเต็มรูปแบบ และตั้งค่าระบบ',
-              color: 'var(--gold)',
-            },
-          ].map((item, i) => (
-            <div key={i} style={{
-              display: 'flex', gap: 12, alignItems: 'flex-start',
-              padding: '12px 14px',
-              background: 'var(--surface-2)',
-              borderRadius: 'var(--r-lg)',
-              borderLeft: `3px solid ${item.color}`,
-            }}>
-              <span style={{ fontSize: 20, flexShrink: 0, marginTop: 1 }}>{item.icon}</span>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 13.5, color: 'var(--text)', marginBottom: 3 }}>
-                  {item.label}
-                </div>
-                <div style={{ fontSize: 12.5, color: 'var(--text-3)', lineHeight: 1.55 }}>
-                  {item.desc}
-                </div>
-                {item.note && (
-                  <div style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 4,
-                    marginTop: 6, fontSize: 11, fontWeight: 700,
-                    color: 'var(--amber)', background: 'var(--amber-bg)',
-                    padding: '2px 9px', borderRadius: 'var(--r-pill)',
-                  }}>
-                    ℹ️ {item.note}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Feature cards */}
-      <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '.10em', marginBottom: 12 }}>
-        ฟีเจอร์ปัจจุบัน
-      </div>
-      <div className="grid-2" style={{ marginBottom: 20, gap: 10 }}>
-        {FEATURES.map((f, i) => (
-          <div
-            key={i}
-            className="card fade-up"
-            style={{
-              padding: '14px 16px',
-              borderTop: `3px solid ${f.color}`,
-              animationDelay: `${i * 50}ms`,
-            }}
-          >
-            <div style={{
-              width: 36, height: 36, borderRadius: 'var(--r-lg)',
-              background: f.bg, border: `1px solid ${f.border}`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 18, marginBottom: 10,
-            }}>
-              {f.icon}
-            </div>
-            <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--text)', marginBottom: 5, lineHeight: 1.3 }}>
-              {f.title}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.6 }}>
-              {f.desc}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Why not just use group chat */}
-      <div className="card fade-up" style={{
-        marginBottom: 20,
-        background: 'var(--amber-bg)',
-        border: '1.5px solid var(--amber-border)',
-      }}>
-        <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--amber)', marginBottom: 10 }}>
-          💬 ทำไมไม่ใช้กลุ่มแชทอย่างเดิม?
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {[
-            'ข้อความแจ้งเวร-ตรวจเขตจมหายไปเมื่อมีการคุยต่อ',
-            'ไม่รู้ว่าใครอ่านข้อความแล้วบ้าง ไม่มีการยืนยัน',
-            'ไม่มีสถิติย้อนหลัง ไม่รู้ว่าเขตไหนมักมีปัญหา',
-            'ข้อมูลกระจาย ต้องเลื่อนหาเองทุกครั้ง',
-          ].map((point, i) => (
-            <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-              <span style={{ fontSize: 12, color: 'var(--amber)', flexShrink: 0, marginTop: 1 }}>✗</span>
-              <span style={{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.5 }}>{point}</span>
-            </div>
-          ))}
-        </div>
-        <div style={{
-          marginTop: 14, paddingTop: 14,
-          borderTop: '1px solid var(--amber-border)',
-          fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.6,
-          fontWeight: 600,
-        }}>
-          YPLABS แก้ปัญหาเหล่านี้ด้วยข้อมูล real-time ที่ทุกคนเห็นพร้อมกัน
-          พร้อมประวัติและสถิติที่เข้าถึงได้ตลอดเวลา
-        </div>
-      </div>
-
-      {/* How to join */}
-      {!isMember && !authLoading && (
-        <div className="card fade-up" style={{ marginBottom: 20 }}>
-          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 14 }}>
-            🚀 เริ่มต้นใช้งาน
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {[
-              { step: '1', text: 'กดส่งคำขอสมัครสมาชิก พร้อมกรอกชื่อและรหัสนักเรียน', color: 'var(--brand)' },
-              { step: '2', text: 'รอแอดมินสภานักเรียนตรวจสอบและอนุมัติ (ปกติภายใน 1 วัน)', color: 'var(--amber)' },
-              { step: '3', text: 'เข้าสู่ระบบด้วยชื่อ-นามสกุลและรหัสนักเรียน แล้วเริ่มใช้งานได้เลย', color: 'var(--green)' },
-            ].map((s, i) => (
-              <div key={i} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-                <div style={{
-                  width: 24, height: 24, borderRadius: '50%',
-                  background: s.color, color: '#fff',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 11, fontWeight: 800, flexShrink: 0,
-                }}>
-                  {s.step}
-                </div>
-                <span style={{ fontSize: 13, color: 'var(--text-2)', lineHeight: 1.55, paddingTop: 2 }}>
-                  {s.text}
-                </span>
-              </div>
-            ))}
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 18, flexWrap: 'wrap' }}>
-            <Link href="/register" className="btn btn-primary btn-sm">📬 ส่งคำขอสมัคร</Link>
-            <Link href="/login" className="btn btn-ghost btn-sm">มีบัญชีแล้ว → เข้าสู่ระบบ</Link>
-          </div>
-        </div>
-      )}
-
-      {/* Footer note */}
-      <div style={{
-        textAlign: 'center', paddingBottom: 8,
-        fontSize: 11.5, color: 'var(--text-4)', lineHeight: 1.7,
-      }}>
-        <span style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6,
-          background: 'var(--surface)', border: '1px solid var(--border)',
-          borderRadius: 'var(--r-pill)', padding: '5px 14px', marginBottom: 8,
-          fontSize: 11, fontWeight: 700, color: 'var(--text-3)',
-        }}>
-          YPLABS
-        </span>
-        <br />
-        ระบบสภานักเรียน โรงเรียนคำยางพิทยา<br />
-        พัฒนาด้วย Next.js · Supabase · Google Drive
-      </div>
+      {/* ── Landing section (แก้ไข copy/content ได้ที่ HomeLanding.tsx) ── */}
+      <HomeLanding isMember={isMember} />
 
       {photoSrc && <PhotoModal src={photoSrc} onClose={() => setPhotoSrc(null)} />}
     </AppShell>
