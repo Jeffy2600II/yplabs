@@ -1,16 +1,17 @@
 // Path:    src/app/api/opslert/report/route.ts
 // Purpose: Receives report from public form, validates, rate-limits, forwards to bot.
-//          GET  → returns recent reports and per-module active status
+//          GET  → returns recent reports, per-module active status, and resolved status
 //          POST → validates, caches, and forwards to Opslert bot
+//          PATCH → council resolves a report (marks handled + optional LINE notify)
 // Used by: src/app/opslert/report/page.tsx, src/app/opslert/page.tsx
 
 import { NextRequest, NextResponse } from 'next/server';
 import { VALID_MODULE_IDS } from '@/lib/opslertConfig';
+import { verifyMember } from '@/lib/apiHelper';
 import crypto from 'crypto';
 
 // ── In-memory report cache ─────────────────────────────────────────
 // Resets on cold start — acceptable for low-traffic alerting.
-// Provides "already reported" status without requiring a DB table.
 
 type CachedReport = {
   id: string;
@@ -19,7 +20,12 @@ type CachedReport = {
   location: string;
   note?: string;
   submittedAt: string;
-  expiresAt: number; // ms timestamp
+  expiresAt: number;
+  // ── Resolution fields ──────────────────────────────────────────
+  resolved: boolean;
+  resolvedAt: string | null;
+  resolvedNote: string | null;
+  resolvedBy: string | null; // full_name of member who resolved
 };
 
 const REPORT_CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
@@ -65,6 +71,10 @@ function cacheReport(payload: {
     note: payload.note || undefined,
     submittedAt: new Date().toISOString(),
     expiresAt: Date.now() + REPORT_CACHE_TTL_MS,
+    resolved: false,
+    resolvedAt: null,
+    resolvedNote: null,
+    resolvedBy: null,
   });
 }
 
@@ -142,17 +152,17 @@ async function forwardToBot(payload: ValidatedPayload): Promise<void> {
 }
 
 // ── Route: GET ─────────────────────────────────────────────────────
-// Returns active reports and per-module status for the hub page.
 
 export async function GET(_req: NextRequest): Promise<NextResponse> {
   const reports = getActiveReports();
 
-  // Build per-module status
   const statuses = Array.from(VALID_MODULE_IDS).map(reportType => {
     const last = getLatestByType(reportType);
     return {
       reportType,
-      isActive: last !== null,
+      isActive: last !== null && !last.resolved,
+      isPending: last !== null && !last.resolved,
+      isResolved: last !== null && last.resolved,
       lastReport: last,
     };
   });
@@ -163,7 +173,6 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
 // ── Route: POST ────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  // Rate limit first
   const key = getRateLimitKey(req);
   if (!checkRateLimit(key).allowed) {
     return NextResponse.json(
@@ -172,7 +181,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Parse and validate
   let body: unknown;
   try { body = await req.json(); }
   catch { return NextResponse.json({ error: 'ข้อมูลไม่ถูกต้อง' }, { status: 400 }); }
@@ -182,11 +190,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'ข้อมูลไม่ครบหรือไม่ถูกต้อง' }, { status: 400 });
   }
 
-  // Check for recent duplicate (return warning but not block)
   const recent = getLatestByType(payload.reportType);
-  const isDuplicate = recent !== null;
+  const isDuplicate = recent !== null && !recent.resolved;
 
-  // Forward to Opslert bot
   try {
     await forwardToBot(payload);
   } catch (err: unknown) {
@@ -198,8 +204,55 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Cache the successful report
   cacheReport(payload);
-
   return NextResponse.json({ ok: true, isDuplicate });
+}
+
+// ── Route: PATCH — council resolves a report ───────────────────────
+// Auth: any approved, non-disabled member (council only)
+// Body: { id: string, resolvedNote?: string }
+// Side effect: marks resolved in cache; LINE notify handled by /api/opslert/notify
+
+export async function PATCH(req: NextRequest): Promise<NextResponse> {
+  const member = await verifyMember(req.headers.get('authorization'));
+  if (!member) {
+    return NextResponse.json({ error: 'กรุณาเข้าสู่ระบบก่อน' }, { status: 401 });
+  }
+
+  let body: unknown;
+  try { body = await req.json(); }
+  catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }); }
+
+  const b = body as Record<string, unknown>;
+  const id           = String(b.id ?? '').trim();
+  const resolvedNote = String(b.resolvedNote ?? '').trim().slice(0, 200) || null;
+  const resolved     = b.resolved !== false; // default true
+
+  if (!id) {
+    return NextResponse.json({ error: 'ต้องระบุ id ของรายงาน' }, { status: 400 });
+  }
+
+  pruneExpired();
+  const report = reportCache.get(id);
+
+  if (!report) {
+    return NextResponse.json({ error: 'ไม่พบรายงานนี้ (อาจหมดอายุแล้ว)' }, { status: 404 });
+  }
+
+  // Update in place — same module-level Map
+  report.resolved    = resolved;
+  report.resolvedAt  = resolved ? new Date().toISOString() : null;
+  report.resolvedNote = resolvedNote;
+  report.resolvedBy  = resolved ? (member as any).full_name ?? 'สมาชิกสภา' : null;
+
+  return NextResponse.json({
+    ok: true,
+    report: {
+      id:          report.id,
+      resolved:    report.resolved,
+      resolvedAt:  report.resolvedAt,
+      resolvedBy:  report.resolvedBy,
+      resolvedNote: report.resolvedNote,
+    },
+  });
 }
