@@ -1,15 +1,18 @@
 // Path:    src/app/api/opslert/report/route.ts  (YPLABS)
 // Purpose: Manages Opslert report lifecycle.
 //          GET   → current status per module
-//          POST  → new report: cache, forward to bot (Flex Message + returns messageId)
-//          PATCH → resolve: update web status, call bot to PATCH LINE message (no quota)
+//          POST  → new report: cache, forward to bot
+//          PATCH → resolve: update web status, call bot to PATCH LINE message
 //
-//          After every state change (POST / PATCH), calls notifyAll() to push
-//          an SSE event to connected hub page clients — no polling needed.
-//
-//          PATCH accepts two auth modes:
-//            • Member JWT   — council resolves from web hub
-//            • X-Bot-Secret — bot resolves after LINE postback button press
+// ─── CDN / caching note ───────────────────────────────────────────
+// force-dynamic disables Vercel's automatic Edge Cache for this route.
+// Without it, GET responses could be served stale for minutes even after
+// a PATCH resolves a report — the exact symptom reported.
+// All responses also carry Cache-Control: no-store to prevent any
+// intermediate proxy from caching them.
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { VALID_MODULE_IDS, REPORT_MODULES } from '@/lib/opslertConfig';
@@ -116,7 +119,6 @@ async function forwardToBotAndGetMessageId(
   return (json?.messageId as string) ?? null;
 }
 
-// PATCH existing LINE message — free, no quota
 async function callBotUpdate(opts: {
   messageId: string; reportId: string; reportType: string;
   location: string; resolvedBy: string; resolvedNote: string | null;
@@ -149,6 +151,9 @@ function verifyBotSecret(req: NextRequest): boolean {
   } catch { return false; }
 }
 
+// Shared no-store headers
+const NO_CACHE = { 'Cache-Control': 'no-store, no-cache, must-revalidate' };
+
 // ── Route: GET ─────────────────────────────────────────────────────
 
 export async function GET(_req: NextRequest): Promise<NextResponse> {
@@ -157,7 +162,7 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
     const last = getLatestByType(reportType);
     return { reportType, isActive: last !== null && !last.resolved, lastReport: last };
   });
-  return NextResponse.json({ reports, statuses });
+  return NextResponse.json({ reports, statuses }, { headers: NO_CACHE });
 }
 
 // ── Route: POST ────────────────────────────────────────────────────
@@ -165,15 +170,18 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
   if (!checkRate(ip)) {
-    return NextResponse.json({ error: 'ส่งรายงานบ่อยเกินไป กรุณารอสักครู่' }, { status: 429 });
+    return NextResponse.json(
+      { error: 'ส่งรายงานบ่อยเกินไป กรุณารอสักครู่' },
+      { status: 429, headers: NO_CACHE }
+    );
   }
 
   let body: unknown;
   try { body = await req.json(); }
-  catch { return NextResponse.json({ error: 'ข้อมูลไม่ถูกต้อง' }, { status: 400 }); }
+  catch { return NextResponse.json({ error: 'ข้อมูลไม่ถูกต้อง' }, { status: 400, headers: NO_CACHE }); }
 
   const payload = validatePayload(body);
-  if (!payload) return NextResponse.json({ error: 'ข้อมูลไม่ครบ' }, { status: 400 });
+  if (!payload) return NextResponse.json({ error: 'ข้อมูลไม่ครบ' }, { status: 400, headers: NO_CACHE });
 
   const recent      = getLatestByType(payload.reportType);
   const isDuplicate = recent !== null && !recent.resolved;
@@ -184,7 +192,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     lineMessageId = await forwardToBotAndGetMessageId(reportId, payload);
   } catch (err: unknown) {
     console.error('[opslert/report] forward failed:', err instanceof Error ? err.message : err);
-    return NextResponse.json({ error: 'ส่งรายงานไม่สำเร็จ กรุณาลองใหม่' }, { status: 502 });
+    return NextResponse.json(
+      { error: 'ส่งรายงานไม่สำเร็จ กรุณาลองใหม่' },
+      { status: 502, headers: NO_CACHE }
+    );
   }
 
   reportCache.set(reportId, {
@@ -194,10 +205,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     lineMessageId, resolved: false, resolvedAt: null, resolvedNote: null, resolvedBy: null,
   });
 
-  // Push SSE update to hub page clients
   notifyAll();
 
-  return NextResponse.json({ ok: true, isDuplicate });
+  return NextResponse.json({ ok: true, isDuplicate }, { headers: NO_CACHE });
 }
 
 // ── Route: PATCH ───────────────────────────────────────────────────
@@ -206,24 +216,55 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   const isBot  = verifyBotSecret(req);
   const member = isBot ? null : await verifyMember(req.headers.get('authorization'));
   if (!isBot && !member) {
-    return NextResponse.json({ error: 'กรุณาเข้าสู่ระบบก่อน' }, { status: 401 });
+    return NextResponse.json(
+      { error: 'กรุณาเข้าสู่ระบบก่อน' },
+      { status: 401, headers: NO_CACHE }
+    );
   }
 
   let body: unknown;
   try { body = await req.json(); }
-  catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }); }
+  catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers: NO_CACHE }); }
 
   const b              = body as Record<string, unknown>;
   const id             = String(b.id           ?? '').trim();
   const resolvedNote   = String(b.resolvedNote ?? '').trim().slice(0, 200) || null;
   const resolvedByOver = b.resolvedBy ? String(b.resolvedBy).trim() : null;
 
-  if (!id) return NextResponse.json({ error: 'ต้องระบุ id' }, { status: 400 });
+  if (!id) return NextResponse.json({ error: 'ต้องระบุ id' }, { status: 400, headers: NO_CACHE });
 
   pruneExpired();
   const report = reportCache.get(id);
-  if (!report)         return NextResponse.json({ error: 'ไม่พบรายงาน (อาจหมดอายุ)' }, { status: 404 });
-  if (report.resolved) return NextResponse.json({ error: 'รายงานนี้ดำเนินการแล้ว' }, { status: 409 });
+
+  // ─── Cold-start resilience ──────────────────────────────────────
+  // If the bot calls after a cold start (reportCache wiped), the report won't be
+  // in the map. We still push an SSE event so the hub page re-fetches and shows
+  // the current (now-empty) state, which correctly reflects "no active alerts".
+  if (!report) {
+    if (isBot) {
+      notifyAll(); // hub page will refetch and show no active alerts
+      const resolvedBy = resolvedByOver ?? 'สมาชิกสภา';
+      return NextResponse.json({
+        ok: true,
+        report: {
+          id, resolved: true,
+          resolvedAt: new Date().toISOString(),
+          resolvedBy, resolvedNote,
+        },
+      }, { headers: NO_CACHE });
+    }
+    return NextResponse.json(
+      { error: 'ไม่พบรายงาน (อาจหมดอายุ)' },
+      { status: 404, headers: NO_CACHE }
+    );
+  }
+
+  if (report.resolved) {
+    return NextResponse.json(
+      { error: 'รายงานนี้ดำเนินการแล้ว' },
+      { status: 409, headers: NO_CACHE }
+    );
+  }
 
   const resolvedBy = resolvedByOver ?? (member as any)?.full_name ?? 'สมาชิกสภา';
 
@@ -241,11 +282,14 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     });
   }
 
-  // Push SSE update to hub page clients
   notifyAll();
 
   return NextResponse.json({
     ok: true,
-    report: { id: report.id, resolved: true, resolvedAt: report.resolvedAt, resolvedBy, resolvedNote },
-  });
+    report: {
+      id: report.id, resolved: true,
+      resolvedAt: report.resolvedAt,
+      resolvedBy, resolvedNote,
+    },
+  }, { headers: NO_CACHE });
 }

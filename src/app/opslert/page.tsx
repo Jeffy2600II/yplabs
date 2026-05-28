@@ -1,10 +1,15 @@
 // Path:    src/app/opslert/page.tsx  (YPLABS)
-// Purpose: Opslert hub — simple status view per module.
-//          • No stats cards — just module status + action
-//          • Council members see resolve button when a report is pending
-//          • Real-time via SSE (EventSource) — updates only when server pushes,
-//            no polling interval
-// Used by: AppShell navigation
+// Purpose: Opslert hub — status view per module.
+//
+// Changes from previous version:
+//   • POLL FALLBACK (30 s) — Vercel serverless functions are stateless; the
+//     SSE controllers set (opslertEvents.ts) lives in-process, so a PATCH on
+//     instance A won't reach clients connected to instance B.  The 30-second
+//     poll acts as a guaranteed-delivery fallback.  SSE still fires instantly
+//     when it works (same instance), making the experience feel real-time in
+//     the common case.
+//   • Download link updated to .svg (QR route now returns SVG, not PNG)
+//   • Image dimensions relaxed so SVG scales naturally
 
 'use client';
 
@@ -86,24 +91,26 @@ function QRModal({ module, onClose }: { module: ReportModule; onClose: () => voi
       <div
         className="card scale-in"
         onClick={e => e.stopPropagation()}
-        style={{ maxWidth: 380, width: '100%', padding: '24px 20px', textAlign: 'center' }}
+        style={{ maxWidth: 400, width: '100%', padding: '24px 20px', textAlign: 'center' }}
       >
         <div style={{ fontSize: 28, marginBottom: 6 }}>{module.emoji}</div>
         <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 4 }}>{module.label}</div>
         <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 16 }}>
           QR Code สำหรับพิมพ์ติดที่ห้องน้ำ
         </div>
+
+        {/* QR card image — SVG scales naturally, no fixed pixel dimensions needed */}
         <div style={{
-          display: 'inline-block', padding: 12, background: '#fff',
+          display: 'inline-block', padding: 8, background: '#fff',
           border: '2px solid var(--border-2)', borderRadius: 'var(--r-xl)', marginBottom: 16,
         }}>
           <img
             src={`/api/opslert/qr?type=${module.id}`}
             alt={`QR — ${module.label}`}
-            width={180} height={180}
-            style={{ display: 'block', borderRadius: 4 }}
+            style={{ display: 'block', width: 200, height: 'auto', borderRadius: 4 }}
           />
         </div>
+
         <div style={{
           background: 'var(--surface-2)', border: '1px solid var(--border)',
           borderRadius: 'var(--r-md)', padding: '6px 10px', marginBottom: 14,
@@ -112,13 +119,15 @@ function QRModal({ module, onClose }: { module: ReportModule; onClose: () => voi
         }}>
           {reportUrl}
         </div>
+
         <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+          {/* Download as SVG — vector quality, ideal for printing */}
           <a
             href={`/api/opslert/qr?type=${module.id}&download=1`}
-            download={`opslert-${module.id}-qr.png`}
+            download={`opslert-${module.id}-qr.svg`}
             className="btn btn-primary btn-sm"
           >
-            ⬇️ ดาวน์โหลด
+            ⬇️ ดาวน์โหลด (SVG)
           </a>
           <button onClick={() => void handleCopy()} className="btn btn-ghost btn-sm">
             {copied ? '✅ คัดลอกแล้ว' : '📋 คัดลอก URL'}
@@ -149,9 +158,9 @@ function ResolveButton({
   report: CachedReport;
   onResolved: (id: string, resolvedBy: string, resolvedNote: string | null) => void;
 }) {
-  const [step, setStep]     = useState<'idle' | 'confirm' | 'loading'>('idle');
-  const [note, setNote]     = useState('');
-  const [error, setError]   = useState<string | null>(null);
+  const [step, setStep]   = useState<'idle' | 'confirm' | 'loading'>('idle');
+  const [note, setNote]   = useState('');
+  const [error, setError] = useState<string | null>(null);
 
   async function doResolve(): Promise<void> {
     setStep('loading');
@@ -221,10 +230,15 @@ function ResolveButton({
 
 // ── Component ──────────────────────────────────────────────────────
 
+// How often to poll as a fallback when SSE events are missed.
+// 30 s is unobtrusive but keeps the hub from staying stale indefinitely
+// after a Vercel cold-start wipes the in-process SSE controller set.
+const POLL_INTERVAL_MS = 30_000;
+
 export default function OpslertHubPage() {
   const { isMember, loading: authLoading } = useAuth();
-  const [data, setData]       = useState<HubData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [data, setData]         = useState<HubData | null>(null);
+  const [loading, setLoading]   = useState(true);
   const [qrModule, setQrModule] = useState<ReportModule | null>(null);
 
   // ── Fetch data ─────────────────────────────────────────────────
@@ -239,8 +253,8 @@ export default function OpslertHubPage() {
   useEffect(() => { void loadData(); }, [loadData]);
 
   // ── SSE: receive push when report changes ──────────────────────
-  // Connects once. Re-fetches only when server sends an event.
-  // No polling interval — client is idle until pushed.
+  // Reconnects automatically.  Events are best-effort; polling below
+  // guarantees freshness when SSE misses an event (cross-instance case).
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -250,15 +264,11 @@ export default function OpslertHubPage() {
     function connect() {
       es = new EventSource('/api/opslert/events');
 
-      es.onmessage = () => {
-        // Server pushed "update" — re-fetch current data
-        void loadData();
-      };
+      es.onmessage = () => { void loadData(); };
 
       es.onerror = () => {
         es?.close();
         es = null;
-        // Reconnect after 5 s — keeps the push channel alive after drops
         reconnectTimer = setTimeout(connect, 5_000);
       };
     }
@@ -269,6 +279,14 @@ export default function OpslertHubPage() {
       clearTimeout(reconnectTimer);
       es?.close();
     };
+  }, [loadData]);
+
+  // ── Polling fallback ───────────────────────────────────────────
+  // Ensures the hub refreshes even when the SSE event was sent to a
+  // different Vercel function instance (stateless serverless limitation).
+  useEffect(() => {
+    const id = setInterval(() => void loadData(), POLL_INTERVAL_MS);
+    return () => clearInterval(id);
   }, [loadData]);
 
   // ── Optimistic update after web resolve ────────────────────────
@@ -325,7 +343,7 @@ export default function OpslertHubPage() {
         </div>
       </div>
 
-      {/* ── Pending banner — only when there are active alerts ─── */}
+      {/* ── Pending banner ───────────────────────────────────────── */}
       {!loading && pendingCount > 0 && (
         <div className="card fade-up" style={{
           marginBottom: 16,
@@ -366,7 +384,7 @@ export default function OpslertHubPage() {
 
       {/* ── Module cards ───────────────────────────────────────── */}
       {REPORT_MODULES.map((module, idx) => {
-        const status   = getStatus(module.id);
+        const status     = getStatus(module.id);
         const isPending  = status.isActive;
         const report     = status.lastReport;
         const isResolved = report?.resolved ?? false;
@@ -383,7 +401,6 @@ export default function OpslertHubPage() {
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: isPending || isResolved ? 12 : 0 }}>
-              {/* Icon */}
               <div style={{
                 width: 42, height: 42, borderRadius: 'var(--r-lg)',
                 background: module.bg, border: `1.5px solid ${module.border}`,
@@ -393,7 +410,6 @@ export default function OpslertHubPage() {
                 {module.emoji}
               </div>
 
-              {/* Title + status */}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 3 }}>
                   {module.label}
