@@ -68,9 +68,10 @@ function alertLabel(level: string): string {
 
 function QRModal({ module, onClose }: { module: ReportModule; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
+  const reportPath = `/opslert/report?type=${module.id}`;
   const reportUrl = typeof window !== 'undefined'
-    ? `${window.location.origin}${module.reportPath}`
-    : module.reportPath;
+    ? `${window.location.origin}${reportPath}`
+    : reportPath;
 
   async function handleCopy() {
     try { await navigator.clipboard.writeText(reportUrl); } catch {}
