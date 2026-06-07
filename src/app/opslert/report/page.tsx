@@ -163,6 +163,11 @@ function ReportFormContent() {
 
   const dupStatus = getDuplicateStatus();
 
+  // รายงานที่ยัง active สำหรับสถานที่ปัจจุบัน (สำหรับแสดงแบนเนอร์)
+  const locationReports = location
+    ? activeReports.filter(r => r.location === location && !r.resolved)
+    : [];
+
   async function doSubmit(): Promise<void> {
     setSubmitState('submitting');
     setErrorMsg('');
@@ -225,8 +230,46 @@ function ReportFormContent() {
     );
   }
 
+  // รวมสถานะการบล็อก: กำลังโหลด OR บล็อกจาก duplicate
+  const isFormLocked = statusLoading || dupStatus.blocked;
+
   return (
     <>
+      {/* ── แบนเนอร์แจ้งว่ามีการแจ้งแล้ว ───────────────────── */}
+      {!statusLoading && locationReports.length > 0 && (
+        <div style={{
+          padding: '14px 16px', marginBottom: 20,
+          background: 'var(--amber-bg)', border: '1.5px solid var(--amber-border)',
+          borderRadius: 'var(--r-xl)', borderLeft: '4px solid var(--amber)',
+        }}>
+          <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--amber)', marginBottom: 8 }}>
+            ⚠️ มีการแจ้งปัญหานี้แล้ว
+          </div>
+          {locationReports.map(r => (
+            <div key={r.id} style={{ fontSize: 12.5, color: 'var(--text-2)', marginBottom: 4 }}>
+              📍 {r.location}
+              <br />
+              สถานะ: <strong>{alertLabel(r.alertLevel)}</strong>
+              <span style={{ color: 'var(--text-3)', marginLeft: 6 }}>
+                · {timeSince(r.submittedAt)}
+              </span>
+              {r.note && (
+                <div style={{ fontSize: 12, color: 'var(--text-3)', fontStyle: 'italic', marginTop: 2 }}>
+                  💬 {r.note}
+                </div>
+              )}
+            </div>
+          ))}
+          <div style={{
+            marginTop: 10, padding: '8px 12px',
+            background: 'rgba(224,124,18,0.08)', borderRadius: 'var(--r-md)',
+            fontSize: 12, color: 'var(--amber)',
+          }}>
+            สภาฯ รับทราบแล้ว กำลังดำเนินการ — ไม่ต้องส่งซ้ำหากสถานที่และสถานะเดียวกัน
+          </div>
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
         {/* Alert level */}
@@ -236,9 +279,11 @@ function ReportFormContent() {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {module.alertLevels.map((level: AlertLevelConfig) => {
-              // เช็คว่า level นี้สามารถเลือกได้หรือไม่ (เมื่อเลือกสถานที่แล้ว)
-              const levelDup = location ? canSendReport(location, level.value, activeReports) : null;
-              const isDisabled = levelDup && !levelDup.canSend;
+              // เช็คว่า level นี้สามารถเลือกได้หรือไม่
+              // ถ้ากำลังโหลด → บล็อกทั้งหมดชั่วคราว
+              // ถ้าโหลดแล้ว → เช็คตาม duplicate logic
+              const levelDup = !statusLoading && location ? canSendReport(location, level.value, activeReports) : null;
+              const isDisabled = statusLoading || (levelDup && !levelDup.canSend);
 
               return (
                 <button
@@ -251,7 +296,7 @@ function ReportFormContent() {
                     padding: '14px 16px', borderRadius: 'var(--r-lg)',
                     border: `2px solid ${alertLevel === level.value ? level.color : isDisabled ? 'var(--border)' : 'var(--border-2)'}`,
                     background: alertLevel === level.value ? level.bg : isDisabled ? 'var(--surface-2)' : 'var(--surface)',
-                    cursor: isDisabled ? 'not-allowed' : 'pointer',
+                    cursor: statusLoading ? 'wait' : isDisabled ? 'not-allowed' : 'pointer',
                     transition: 'all 150ms',
                     textAlign: 'left', width: '100%', fontFamily: 'var(--font)',
                     opacity: isDisabled ? 0.5 : 1,
@@ -314,10 +359,10 @@ function ReportFormContent() {
             placeholder="เช่น ชั้น 2 ห้องซ้ายมือสุด..."
             maxLength={200}
             rows={3}
-            disabled={dupStatus.blocked}
+            disabled={isFormLocked}
             style={{
               resize: 'none',
-              opacity: dupStatus.blocked ? 0.5 : 1,
+              opacity: isFormLocked ? 0.5 : 1,
             }}
           />
           <div style={{ fontSize: 11, color: 'var(--text-4)', textAlign: 'right', marginTop: 4 }}>
@@ -340,7 +385,7 @@ function ReportFormContent() {
         {/* Submit */}
         <button
           type="submit"
-          disabled={submitState === 'submitting' || dupStatus.blocked}
+          disabled={submitState === 'submitting' || isFormLocked}
           className="btn btn-primary btn-full btn-lg"
           style={{ fontSize: 15, padding: '14px' }}
         >
