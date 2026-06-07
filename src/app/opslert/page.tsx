@@ -1,20 +1,23 @@
 // Path:    src/app/opslert/page.tsx  (YPLABS)
 // Purpose: Opslert hub — status view per module.
 //
-// ─── สิ่งที่เปลี่ยนแปลง UX/UI ─────────────────────────────────────
-// 1. เมื่อปกติ (ไม่มีรายงาน/ดำเนินการแล้ว) → แสดงแบบเรียบง่าย ไม่มีสีเขียวเยอะ
-// 2. เมื่อดำเนินการแล้ว → แสดง "ปกติ" แทน "ดำเนินการแล้ว" แบบเรียบๆ
-// 3. เพิ่ม Supabase Realtime subscription (cross-instance real-time)
-// 4. Poll fallback ลดเป็น 60 วินาที
+// ─── สิ่งที่เปลี่ยนแปลงจากเวอร์ชันเก่า (v4) ─────────────────────────
+// 1. ✅ ใช้ Supabase Realtime subscription เป็นกลไกหลัก
+//    → รับ updates จากทุก Vercel instance ทันที (cross-instance)
+//    → เมื่อ DB มีการเปลี่ยนแปลง → push มาทันที ไม่ต้องรอ poll
+// 2. ❌ ลบ SSE ออก (ไม่ต้องการแล้ว เพราะ Realtime ทำงานได้ดีกว่า)
+// 3. ❌ ลบ polling 60s ออก (Realtime ไม่ต้องการ fallback)
+// 4. ✅ ใช้ useSupabaseRealtime hook แทนการ subscribe ด้วยตัวเอง
+// 5. ข้อมูลทุกอย่างมาจาก Supabase DB ผ่าน API (ไม่พึ่ง in-memory cache)
 
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { REPORT_MODULES, type ReportModule } from '@/lib/opslertConfig';
 import { getFreshToken } from '@/lib/sessionUtils';
-import { getBrowserSupabase } from '@/lib/supabaseClient';
+import { useSupabaseRealtime } from '@/lib/useSupabaseRealtime';
 import Link from 'next/link';
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -189,7 +192,8 @@ function ResolveButton({
     return (
       <div style={{ animation: 'fadeIn .15s var(--ease) both' }}>
         <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 6 }}>
-          ระบบจะอัปเดตสถานะบนเว็บให้ทันที
+          ระบบจะ<strong> อัปเดตสถานะบนเว็บ</strong> และ
+          <strong> แก้ไข LINE message</strong> ให้อัตโนมัติ
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <input
@@ -224,8 +228,8 @@ function ResolveButton({
 }
 
 // ── Component ──────────────────────────────────────────────────────
-
-const POLL_INTERVAL_MS = 60_000;
+// v4: ลบ polling + SSE ออกทั้งหมด — ใช้เฉพาะ Supabase Realtime
+// เมื่อ DB เปลี่ยน → push มาทันที ไม่เปลืองทรัพยากร
 
 export default function OpslertHubPage() {
   const { isMember, loading: authLoading } = useAuth();
@@ -233,6 +237,7 @@ export default function OpslertHubPage() {
   const [loading, setLoading]   = useState(true);
   const [qrModule, setQrModule] = useState<ReportModule | null>(null);
 
+  // ── Fetch data ─────────────────────────────────────────────────
   const loadData = useCallback(async () => {
     try {
       const res = await fetch('/api/opslert/report', { cache: 'no-store' });
@@ -243,48 +248,21 @@ export default function OpslertHubPage() {
 
   useEffect(() => { void loadData(); }, [loadData]);
 
-  // ── Supabase Realtime (cross-instance) ─────────────────────────
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    let channel: any = null;
-    try {
-      const supabase = getBrowserSupabase();
-      channel = supabase
-        .channel('opslert-reports-realtime')
-        .on('postgres_changes', {
-          event: '*',
-          schema: 'public',
-          table: 'opslert_reports',
-        }, () => { void loadData(); })
-        .subscribe();
-    } catch {}
-    return () => { if (channel) try { channel.unsubscribe(); } catch {} };
-  }, [loadData]);
+  // ── Supabase Realtime subscription ─────────────────────────────
+  // กลไกเดียวที่รับข้อมูล real-time — เมื่อมีการเปลี่ยนแปลงบน opslert_reports
+  // Supabase จะ push มาทันที ไม่ว่าจาก Vercel instance ไหน
+  // ไม่ต้อง polling ไม่ต้อง SSE — ประหยัดทรัพยากร 100%
+  useSupabaseRealtime('opslert_reports', loadData);
 
-  // ── SSE (same-instance) ──────────────────────────────────────────
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    let es: EventSource | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout>;
-    function connect() {
-      es = new EventSource('/api/opslert/events');
-      es.onmessage = () => { void loadData(); };
-      es.onerror = () => { es?.close(); es = null; reconnectTimer = setTimeout(connect, 5_000); };
-    }
-    connect();
-    return () => { clearTimeout(reconnectTimer); es?.close(); };
-  }, [loadData]);
-
-  // ── Polling fallback ───────────────────────────────────────────
-  useEffect(() => {
-    const id = setInterval(() => void loadData(), POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [loadData]);
-
-  function handleResolved(id: string, resolvedBy: string, resolvedNote: string | null): void {
+  // ── Optimistic update after web resolve ────────────────────────
+  function handleResolved(
+    id: string,
+    resolvedBy: string,
+    resolvedNote: string | null,
+  ): void {
+    const now = new Date().toISOString();
     setData(prev => {
       if (!prev) return prev;
-      const now = new Date().toISOString();
       const patch = (r: CachedReport): CachedReport =>
         r.id === id ? { ...r, resolved: true, resolvedAt: now, resolvedBy, resolvedNote } : r;
       return {
@@ -346,10 +324,26 @@ export default function OpslertHubPage() {
             </div>
             <div style={{ fontSize: 12.5, color: 'var(--amber)', opacity: .8, marginTop: 2 }}>
               {isMember
-                ? 'กด "✅ ดำเนินการแล้ว" หลังจัดการ — เว็บจะอัปเดตทันที'
+                ? 'กด "✅ ดำเนินการแล้ว" หลังจัดการ — LINE message จะอัปเดตอัตโนมัติ'
                 : 'สภานักเรียนรับทราบแล้ว กำลังดำเนินการ'}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── All clear ──────────────────────────────────────────── */}
+      {!loading && pendingCount === 0 && (data?.reports.length ?? 0) === 0 && (
+        <div className="card fade-up" style={{
+          marginBottom: 16,
+          background: 'var(--green-bg)',
+          border: '1.5px solid var(--green-border)',
+          borderLeft: '4px solid var(--green)',
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <span style={{ fontSize: 20, flexShrink: 0 }}>✅</span>
+          <span style={{ fontWeight: 700, fontSize: 13.5, color: 'var(--green)' }}>
+            ทุกอย่างปกติ
+          </span>
         </div>
       )}
 
@@ -366,15 +360,12 @@ export default function OpslertHubPage() {
             className="card fade-up"
             style={{
               marginBottom: 12,
-              // เฉพาะตอนมีปัญหาเท่านั้นถึงจะมีขอบสี เมื่อปกติ/ดำเนินการแล้ว ไม่มีขอบ
-              borderLeft: isPending
-                ? '4px solid var(--amber)'
-                : '4px solid transparent',
+              borderLeft: `4px solid ${isPending ? 'var(--amber)' : isResolved ? 'var(--green)' : 'var(--border-2)'}`,
               animationDelay: `${idx * 50}ms`,
               transition: 'border-color .25s var(--ease)',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: isPending ? 12 : 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: isPending || isResolved ? 12 : 0 }}>
               <div style={{
                 width: 42, height: 42, borderRadius: 'var(--r-lg)',
                 background: module.bg, border: `1.5px solid ${module.border}`,
@@ -401,10 +392,18 @@ export default function OpslertHubPage() {
                     <span style={{ animation: 'rtpulse 2.4s ease-in-out infinite' }}>🔔</span>
                     {alertLabel(report.alertLevel)} · {timeSince(report.submittedAt)}
                   </div>
+                ) : isResolved && report ? (
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5,
+                    background: 'var(--green-bg)', border: '1px solid var(--green-border)',
+                    borderRadius: 'var(--r-pill)', padding: '3px 10px',
+                    fontSize: 11.5, fontWeight: 700, color: 'var(--green)',
+                  }}>
+                    ✅ ดำเนินการแล้ว{report.resolvedAt ? ` · ${timeSince(report.resolvedAt)}` : ''}
+                  </div>
                 ) : (
-                  /* ✅ ปกติ — แสดงแบบเรียบๆ ไม่มีสีเขียวเยอะ */
-                  <div style={{ fontSize: 11.5, color: 'var(--text-4)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                    ปกติ
+                  <div style={{ fontSize: 11.5, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span className="rt-dot" />ปกติ
                   </div>
                 )}
               </div>
@@ -432,6 +431,18 @@ export default function OpslertHubPage() {
                     <ResolveButton report={report} onResolved={handleResolved} />
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Resolved detail */}
+            {!isPending && isResolved && report?.resolvedBy && (
+              <div style={{
+                padding: '8px 12px', fontSize: 12.5,
+                background: 'var(--green-bg)', border: '1px solid var(--green-border)',
+                borderRadius: 'var(--r-lg)', marginBottom: 10, color: 'var(--green)',
+              }}>
+                โดย <strong>{report.resolvedBy}</strong>
+                {report.resolvedNote && ` — ${report.resolvedNote}`}
               </div>
             )}
 
