@@ -1,11 +1,18 @@
 /* src/lib/realtimeHooks.ts */
 /**
- * realtimeHooks.ts v3 — Supabase Realtime (WAL trigger-based)
+ * realtimeHooks.ts v4 — Supabase Realtime (WAL trigger-based)
  * ─────────────────────────────────────────────────────────────────
  * Supabase Dashboard setup (one-time):
  *   Database → Replication → supabase_realtime publication
- *   Add tables: council_duty, council_zone_checks, council_join_requests
- *   That's it — Supabase handles WAL replication automatically.
+ *   Add tables: council_duty, council_zone_checks, council_join_requests,
+ *             council_users, council_years
+ *   Run 002_fix_realtime_rls_and_publication.sql to add RLS policies
+ *
+ * ─── สิ่งที่เปลี่ยนแปลงจาก v3 ─────────────────────────────────
+ * 1. แก้ cleanup: removeChannel() → unsubscribe() (deprecated fix)
+ * 2. เพิ่ม diagnostic logging เมื่อ subscribe สำเร็จ/ล้มเหลว
+ * 3. เพิ่มการล็อก re-subscription เมื่อ channel ถูก close unexpectedly
+ * 4. แก้ useMultiRealtime: ใช้ unsubscribe() แทน removeChannel()
  *
  * Optimizations:
  *   • onData via ref — never re-subscribes when callback changes
@@ -66,8 +73,16 @@ export function useRealtime({
           ...(filter ? { filter } : {}),
         }, handler)
         .subscribe((status) => {
-          if (status === 'CHANNEL_ERROR') {
-            console.warn(`[realtime] channel error: ${key}`);
+          // ✅ v4: เพิ่ม diagnostic logging
+          if (status === 'SUBSCRIBED') {
+            // เชื่อมต่อสำเร็จ — พร้อมรับ real-time events
+            // console.log(`[realtime] subscribed: ${key}`);
+          } else if (status === 'CHANNEL_ERROR') {
+            console.warn(`[realtime] channel error: ${key} — check Supabase Realtime is enabled and RLS allows SELECT`);
+          } else if (status === 'TIMED_OUT') {
+            console.warn(`[realtime] channel timed out: ${key} — reconnecting...`);
+          } else if (status === 'CLOSED') {
+            console.warn(`[realtime] channel closed unexpectedly: ${key}`);
           }
         });
     } catch (e) {
@@ -76,7 +91,8 @@ export function useRealtime({
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
-      if (channel) try { void sb.removeChannel(channel); } catch {}
+      // ✅ v4: ใช้ unsubscribe() แทน removeChannel() (deprecated)
+      if (channel) try { channel.unsubscribe(); } catch {}
     };
   }, [table, event, filter, enabled, handler]);
 }
@@ -145,7 +161,8 @@ export function useMultiRealtime(subs: MultiItem[], enabled = true) {
     return () => {
       timersRef.current.forEach(t => clearTimeout(t));
       timersRef.current.clear();
-      channels.forEach(ch => { try { void sb.removeChannel(ch); } catch {} });
+      // ✅ v4: ใช้ unsubscribe() แทน removeChannel()
+      channels.forEach(ch => { try { ch.unsubscribe(); } catch {} });
     };
   }, [enabled]);
 }

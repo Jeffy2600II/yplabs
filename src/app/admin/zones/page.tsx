@@ -2,6 +2,12 @@
 // Purpose: Admin report view for zone cleanliness checks — date-range filter,
 //          per-zone summary tiles, and a post-card feed matching the home page.
 // Used by: AppShell navigation (/admin/zones)
+//
+// ─── สิ่งที่เปลี่ยนแปลง ──────────────────────────────────────────────
+// ❌ ลบ useServerEvents (SSE) — พึ่งพา POSTGRES_URL_NON_POOLING ซึ่งอาจไม่ได้ตั้ง
+//    SSE connection ถูกตัดเมื่อ Vercel function timeout → ทำงานไม่ได้
+// ✅ เปลี่ยนเป็น useRealtime (Supabase Realtime) — เหมือนทุกหน้าอื่น
+//    เมื่อ council_zone_checks เปลี่ยน → push ทันที ไม่ต้องรอ poll
 
 'use client';
 
@@ -10,7 +16,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
 import { useAuthData, invalidate } from '@/lib/dataCore';
-import { useServerEvents } from '@/lib/useServerEvents';
+import { useRealtime } from '@/lib/realtimeHooks';
 import { remoteLog } from '@/lib/remoteLogger';
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -88,26 +94,18 @@ export default function AdminZonesPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin]);
 
-  // SSE realtime — fall back to polling if SSE unavailable
-  useServerEvents((message) => {
-    try {
-      if ((message as { table?: string })?.table !== 'council_zone_checks') return;
+  // ✅ Supabase Realtime — เหมือนทุกหน้าอื่นในโปรเจกต์
+  // เมื่อ council_zone_checks เปลี่ยน → invalidate + refetch ทันที
+  useRealtime({
+    table: 'council_zone_checks',
+    onData: () => {
       invalidate(zonesUrl);
       setRtTick(n => n + 1);
-      void (async () => {
-        try {
-          setFetchError(null);
-          await refresh();
-        } catch (err: unknown) {
-          setFetchError(err instanceof Error ? err.message : String(err));
-        }
-      })();
-    } catch (err: unknown) {
-      // SSE handler must never throw to the caller — log at debug so it's
-      // still visible in Vercel logs without crashing the SSE connection
-      void remoteLog('debug', '[zones] SSE handler: malformed message dropped', { error: String(err) });
-    }
-  }, { enabled: isAdmin, pollFallback: true });
+      void refresh();
+    },
+    debounceMs: 500,
+    enabled: isAdmin,
+  });
 
   const allRecords = records ?? [];
   const filtered   = allRecords.filter(r =>
