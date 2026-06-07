@@ -270,6 +270,9 @@ export function useAuthData<T = any>(
     getFreshToken().then(t => {
       setToken(t);
       setTokenReady(true);
+    }).catch(() => {
+      // Token fetch failed — set ready so the hook can show error state
+      setTokenReady(true);
     });
   }, [enabled]);
 

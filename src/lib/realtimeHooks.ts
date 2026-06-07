@@ -1,18 +1,11 @@
 /* src/lib/realtimeHooks.ts */
 /**
- * realtimeHooks.ts v4 — Supabase Realtime (WAL trigger-based)
+ * realtimeHooks.ts v3 — Supabase Realtime (WAL trigger-based)
  * ─────────────────────────────────────────────────────────────────
  * Supabase Dashboard setup (one-time):
  *   Database → Replication → supabase_realtime publication
- *   Add tables: council_duty, council_zone_checks, council_join_requests,
- *             council_users, council_years
- *   Run 002_fix_realtime_rls_and_publication.sql to add RLS policies
- *
- * ─── สิ่งที่เปลี่ยนแปลงจาก v3 ─────────────────────────────────
- * 1. แก้ cleanup: removeChannel() → unsubscribe() (deprecated fix)
- * 2. เพิ่ม diagnostic logging เมื่อ subscribe สำเร็จ/ล้มเหลว
- * 3. เพิ่มการล็อก re-subscription เมื่อ channel ถูก close unexpectedly
- * 4. แก้ useMultiRealtime: ใช้ unsubscribe() แทน removeChannel()
+ *   Add tables: council_duty, council_zone_checks, council_join_requests
+ *   That's it — Supabase handles WAL replication automatically.
  *
  * Optimizations:
  *   • onData via ref — never re-subscribes when callback changes
@@ -43,7 +36,7 @@ export function useRealtime({
   enabled = true, debounceMs = 0,
 }: UseRealtimeOptions) {
   const onDataRef = useRef(onData);
-  const timerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   onDataRef.current = onData;
 
   // Stable handler — never changes reference, uses ref for callback
@@ -59,11 +52,12 @@ export function useRealtime({
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return;
 
-    const sb = getBrowserSupabase();
     const key = `rt_${table}_${event}_${filter ?? 'all'}`;
     let channel: RealtimeChannel | null = null;
+    let sb: ReturnType<typeof getBrowserSupabase> | null = null;
 
     try {
+      sb = getBrowserSupabase();
       channel = sb
         .channel(key)
         .on('postgres_changes' as any, {
@@ -73,16 +67,8 @@ export function useRealtime({
           ...(filter ? { filter } : {}),
         }, handler)
         .subscribe((status) => {
-          // ✅ v4: เพิ่ม diagnostic logging
-          if (status === 'SUBSCRIBED') {
-            // เชื่อมต่อสำเร็จ — พร้อมรับ real-time events
-            // console.log(`[realtime] subscribed: ${key}`);
-          } else if (status === 'CHANNEL_ERROR') {
-            console.warn(`[realtime] channel error: ${key} — check Supabase Realtime is enabled and RLS allows SELECT`);
-          } else if (status === 'TIMED_OUT') {
-            console.warn(`[realtime] channel timed out: ${key} — reconnecting...`);
-          } else if (status === 'CLOSED') {
-            console.warn(`[realtime] channel closed unexpectedly: ${key}`);
+          if (status === 'CHANNEL_ERROR') {
+            console.warn(`[realtime] channel error: ${key}`);
           }
         });
     } catch (e) {
@@ -91,8 +77,13 @@ export function useRealtime({
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
-      // ✅ v4: ใช้ unsubscribe() แทน removeChannel() (deprecated)
-      if (channel) try { channel.unsubscribe(); } catch {}
+      if (channel && sb) {
+        try {
+          void sb.removeChannel(channel);
+        } catch {
+          // ignore cleanup errors
+        }
+      }
     };
   }, [table, event, filter, enabled, handler]);
 }
@@ -119,13 +110,21 @@ interface MultiItem {
  */
 export function useMultiRealtime(subs: MultiItem[], enabled = true) {
   // Keep stable ref to avoid re-subscription
-  const subsRef  = useRef(subs);
+  const subsRef = useRef(subs);
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   useEffect(() => { subsRef.current = subs; });
 
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return;
-    const sb = getBrowserSupabase();
+
+    let sb: ReturnType<typeof getBrowserSupabase> | null = null;
+    try {
+      sb = getBrowserSupabase();
+    } catch (e) {
+      console.warn('[realtime] multi: getBrowserSupabase failed:', e);
+      return;
+    }
+
     const channels: RealtimeChannel[] = [];
 
     subsRef.current.forEach(({ table, event = '*', filter, onData, debounceMs = 0 }) => {
@@ -155,14 +154,17 @@ export function useMultiRealtime(subs: MultiItem[], enabled = true) {
             if (s === 'CHANNEL_ERROR') console.warn(`[realtime] multi error: ${key}`);
           });
         channels.push(ch);
-      } catch {}
+      } catch {
+        // ignore individual channel setup errors
+      }
     });
 
     return () => {
       timersRef.current.forEach(t => clearTimeout(t));
       timersRef.current.clear();
-      // ✅ v4: ใช้ unsubscribe() แทน removeChannel()
-      channels.forEach(ch => { try { ch.unsubscribe(); } catch {} });
+      channels.forEach(ch => {
+        try { void sb.removeChannel(ch); } catch { /* ignore */ }
+      });
     };
   }, [enabled]);
 }
