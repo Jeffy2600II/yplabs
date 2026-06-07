@@ -133,7 +133,26 @@ function ReportFormContent() {
 
   // ── Smart duplicate check ─────────────────────────────────────
   function getDuplicateStatus(): { blocked: boolean; reason: string; existing?: ExistingReport } {
-    if (!location || !alertLevel) return { blocked: false, reason: '' };
+    if (!location) return { blocked: false, reason: '' };
+
+    // ถ้า "หมดแล้ว" แจ้งแล้ว → ทุก level ถูกบล็อก
+    // ต้องบล็อกปุ่มส่ง + ช่องหมายเหตุ แม้ user ยังไม่ได้เลือก level
+    const hasEmpty = activeReports.some(
+      r => r.location === location && !r.resolved && r.alertLevel === 'empty'
+    );
+    if (hasEmpty) {
+      const existing = activeReports.find(
+        r => r.location === location && !r.resolved && r.alertLevel === 'empty'
+      );
+      return {
+        blocked: true,
+        reason: 'มีการแจ้ง "หมดแล้ว" สำหรับสถานที่นี้แล้ว ไม่ต้องส่งซ้ำ',
+        existing,
+      };
+    }
+
+    if (!alertLevel) return { blocked: false, reason: '' };
+
     const result = canSendReport(location, alertLevel, activeReports);
     return {
       blocked: !result.canSend,
