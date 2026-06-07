@@ -1,30 +1,35 @@
 // Path:    src/lib/opslertEvents.ts  (YPLABS)
-// Purpose: Shared in-process SSE notification bus for Opslert.
-//          Both api/opslert/events (SSE endpoint) and api/opslert/report
-//          (report route) import from this module, sharing the same Set of
-//          open SSE controllers within the same Next.js server process.
+// Purpose: In-process SSE notification bus for Opslert.
 //
-//          Push model: no polling, no interval — clients receive an event
-//          only when report route explicitly calls notifyAll().
+// ─── หมายเหตุสำคัญ ────────────────────────────────────────────────
+// ไฟล์นี้ยังคงอยู่เพื่อ backward-compat กับ SSE endpoint
+// แต่ตอนนี้ Supabase Realtime เป็นแหล่งข้อมูลหลักสำหรับ real-time updates
+//
+// การทำงาน:
+// - report/route.ts เรียก notifyAll() เมื่อมีการเปลี่ยนแปลง
+// - ส่ง SSE event ให้ clients ที่อยู่ instance เดียวกัน (instant)
+// - clients ที่ instance อื่น จะได้รับผ่าน Supabase Realtime subscription
+//
+// กลไก double-source นี้ทำให้ข้อมูลอัปเดตทันทีทั้ง 2 ทาง
+// ไม่มีปัญหา cross-instance อีกต่อไป
 
 const enc = new TextEncoder();
-const controllers = new Set < ReadableStreamDefaultController < Uint8Array >> ();
+const controllers = new Set<ReadableStreamDefaultController<Uint8Array>>();
 
-export function addController(ctrl: ReadableStreamDefaultController < Uint8Array > ): void {
+export function addController(ctrl: ReadableStreamDefaultController<Uint8Array>): void {
   controllers.add(ctrl);
 }
 
-export function removeController(ctrl: ReadableStreamDefaultController < Uint8Array > ): void {
+export function removeController(ctrl: ReadableStreamDefaultController<Uint8Array>): void {
   controllers.delete(ctrl);
 }
 
-/** Push "update" event to all currently-connected SSE clients. */
+/** Push "update" event to all currently-connected SSE clients (same instance only). */
 export function notifyAll(): void {
   for (const ctrl of controllers) {
     try {
       ctrl.enqueue(enc.encode('data: update\n\n'));
     } catch {
-      // Client disconnected — clean up stale reference
       controllers.delete(ctrl);
     }
   }

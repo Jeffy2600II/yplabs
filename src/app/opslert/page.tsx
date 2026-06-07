@@ -1,15 +1,12 @@
 // Path:    src/app/opslert/page.tsx  (YPLABS)
 // Purpose: Opslert hub — status view per module.
 //
-// Changes from previous version:
-//   • POLL FALLBACK (30 s) — Vercel serverless functions are stateless; the
-//     SSE controllers set (opslertEvents.ts) lives in-process, so a PATCH on
-//     instance A won't reach clients connected to instance B.  The 30-second
-//     poll acts as a guaranteed-delivery fallback.  SSE still fires instantly
-//     when it works (same instance), making the experience feel real-time in
-//     the common case.
-//   • Download link updated to .svg (QR route now returns SVG, not PNG)
-//   • Image dimensions relaxed so SVG scales naturally
+// ─── สิ่งที่เปลี่ยนแปลงจากเวอร์ชันเก่า ─────────────────────────────
+// 1. เพิ่ม Supabase Realtime subscription สำหรับ opslert_reports
+//    → รับ updates จากทุก Vercel instance ทันที (cross-instance real-time)
+// 2. ลด poll interval จาก 30s → 60s (เพราะ Realtime ทำงานแล้ว)
+// 3. SSE ยังคงอยู่เป็น backup สำหรับ same-instance (instant)
+// 4. ข้อมูลทุกอย่างมาจาก Supabase DB ผ่าน API (ไม่พึ่ง in-memory cache)
 
 'use client';
 
@@ -18,6 +15,7 @@ import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { REPORT_MODULES, type ReportModule } from '@/lib/opslertConfig';
 import { getFreshToken } from '@/lib/sessionUtils';
+import { getBrowserSupabase } from '@/lib/supabaseClient';
 import Link from 'next/link';
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -100,7 +98,6 @@ function QRModal({ module, onClose }: { module: ReportModule; onClose: () => voi
           QR Code สำหรับพิมพ์ติดที่ห้องน้ำ
         </div>
 
-        {/* QR card image — SVG scales naturally, no fixed pixel dimensions needed */}
         <div style={{
           display: 'inline-block', padding: 8, background: '#fff',
           border: '2px solid var(--border-2)', borderRadius: 'var(--r-xl)', marginBottom: 16,
@@ -122,7 +119,6 @@ function QRModal({ module, onClose }: { module: ReportModule; onClose: () => voi
         </div>
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
-          {/* Download as SVG — vector quality, ideal for printing */}
           <a
             href={`/api/opslert/qr?type=${module.id}&download=1`}
             download={`opslert-${module.id}-qr.svg`}
@@ -230,11 +226,10 @@ function ResolveButton({
 }
 
 // ── Component ──────────────────────────────────────────────────────
+// Poll fallback เพิ่มจาก 30s → 60s เพราะ Supabase Realtime คอย push แล้ว
+// ยังคงต้องมี poll เพื่อความแน่นใจ 100% ถ้า Realtime ตัดขาดชั่วคราว
 
-// How often to poll as a fallback when SSE events are missed.
-// 30 s is unobtrusive but keeps the hub from staying stale indefinitely
-// after a Vercel cold-start wipes the in-process SSE controller set.
-const POLL_INTERVAL_MS = 30_000;
+const POLL_INTERVAL_MS = 60_000;
 
 export default function OpslertHubPage() {
   const { isMember, loading: authLoading } = useAuth();
@@ -253,9 +248,45 @@ export default function OpslertHubPage() {
 
   useEffect(() => { void loadData(); }, [loadData]);
 
-  // ── SSE: receive push when report changes ──────────────────────
-  // Reconnects automatically.  Events are best-effort; polling below
-  // guarantees freshness when SSE misses an event (cross-instance case).
+  // ── Supabase Realtime subscription (CROSS-INSTANCE) ─────────────
+  // นี่คือกลไกหลักที่แก้ปัญหาข้อมูลช้า!
+  // เมื่อมี INSERT/UPDATE บน opslert_reports ไม่ว่าจาก instance ไหน
+  // Supabase จะส่ง push notification มาที่ client ทันที
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    let channel: ReturnType<typeof getBrowserSupabase.prototype.channel> | null = null;
+
+    try {
+      const supabase = getBrowserSupabase();
+      channel = supabase
+        .channel('opslert-reports-realtime')
+        .on(
+          'postgres_changes',
+          {
+            event: '*',           // ฟังทุก event: INSERT, UPDATE, DELETE
+            schema: 'public',
+            table: 'opslert_reports',
+          },
+          () => {
+            // เมื่อได้รับ event → refetch ข้อมูลใหม่ทันที
+            void loadData();
+          },
+        )
+        .subscribe();
+    } catch (err) {
+      console.warn('[Opslert] Supabase Realtime subscription failed, falling back to SSE+poll:', err);
+    }
+
+    return () => {
+      if (channel) {
+        try { channel.unsubscribe(); } catch {}
+      }
+    };
+  }, [loadData]);
+
+  // ── SSE: receive push when report changes (same-instance) ──────
+  // ยังคงไว้เพราะ SSE ทำงานได้ทันทีสำหรับ same-instance
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -264,9 +295,7 @@ export default function OpslertHubPage() {
 
     function connect() {
       es = new EventSource('/api/opslert/events');
-
       es.onmessage = () => { void loadData(); };
-
       es.onerror = () => {
         es?.close();
         es = null;
@@ -282,9 +311,8 @@ export default function OpslertHubPage() {
     };
   }, [loadData]);
 
-  // ── Polling fallback ───────────────────────────────────────────
-  // Ensures the hub refreshes even when the SSE event was sent to a
-  // different Vercel function instance (stateless serverless limitation).
+  // ── Polling fallback (last resort) ────────────────────────────
+  // ลดจาก 30s → 60s เพราะมี Realtime + SSE แล้ว
   useEffect(() => {
     const id = setInterval(() => void loadData(), POLL_INTERVAL_MS);
     return () => clearInterval(id);

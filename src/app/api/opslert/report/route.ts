@@ -1,69 +1,124 @@
 // Path:    src/app/api/opslert/report/route.ts  (YPLABS)
 // Purpose: Manages Opslert report lifecycle.
-//          GET   → current status per module
-//          POST  → new report: cache, forward to bot
-//          PATCH → resolve: update web status, call bot to PATCH LINE message
+//          GET   → current status per module (อ่านจาก Supabase DB)
+//          POST  → new report: insert to DB, forward to bot
+//          PATCH → resolve: update DB, call bot to PATCH LINE message
 //
-// ─── CDN / caching note ───────────────────────────────────────────
-// force-dynamic disables Vercel's automatic Edge Cache for this route.
-// Without it, GET responses could be served stale for minutes even after
-// a PATCH resolves a report — the exact symptom reported.
-// All responses also carry Cache-Control: no-store to prevent any
-// intermediate proxy from caching them.
+// ─── สิ่งที่เปลี่ยนแปลงจากเวอร์ชันเก่า ─────────────────────────────
+// - ข้อมูลเก็บใน Supabase DB แทน in-memory Map
+// - ไม่มีปัญหา cold start ทำให้ข้อมูลหาย
+// - Realtime ทำงานข้าม Vercel instance ได้ (Supabase เป็นตัวกลาง)
+// - ยังคง notifyAll() เพื่อ backward-compat กับ SSE ใน instance เดียวกัน
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
-import { VALID_MODULE_IDS, REPORT_MODULES } from '@/lib/opslertConfig';
+import { VALID_MODULE_IDS } from '@/lib/opslertConfig';
 import { verifyMember } from '@/lib/apiHelper';
+import { getSupabaseAdmin } from '@/lib/supabaseAdmin';
 import { notifyAll } from '@/lib/opslertEvents';
 import crypto from 'crypto';
 
-// ── In-memory report cache ─────────────────────────────────────────
+// ── Supabase helpers ────────────────────────────────────────────────
 
-type CachedReport = {
+type DbReport = {
+  id: string;
+  report_type: string;
+  alert_level: string;
+  location: string;
+  note: string | null;
+  line_message_id: string | null;
+  resolved: boolean;
+  resolved_at: string | null;
+  resolved_note: string | null;
+  resolved_by: string | null;
+  created_at: string;
+};
+
+function toApiReport(r: DbReport) {
+  return {
+    id: r.id,
+    reportType: r.report_type,
+    alertLevel: r.alert_level,
+    location: r.location,
+    note: r.note ?? undefined,
+    submittedAt: r.created_at,
+    lineMessageId: r.line_message_id,
+    resolved: r.resolved,
+    resolvedAt: r.resolved_at,
+    resolvedNote: r.resolved_note,
+    resolvedBy: r.resolved_by,
+  };
+}
+
+async function getActiveReports(): Promise<DbReport[]> {
+  const sb = getSupabaseAdmin();
+  const { data, error } = await sb
+    .from('opslert_reports')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(100);
+  if (error) throw error;
+  return (data ?? []) as DbReport[];
+}
+
+async function getLatestUnresolvedByType(reportType: string): Promise<DbReport | null> {
+  const sb = getSupabaseAdmin();
+  const { data, error } = await sb
+    .from('opslert_reports')
+    .select('*')
+    .eq('report_type', reportType)
+    .eq('resolved', false)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data as DbReport | null;
+}
+
+async function insertReport(report: {
   id: string;
   reportType: string;
   alertLevel: string;
   location: string;
-  note?: string;
-  submittedAt: string;
-  expiresAt: number;
+  note: string;
   lineMessageId: string | null;
-  resolved: boolean;
-  resolvedAt: string | null;
-  resolvedNote: string | null;
-  resolvedBy: string | null;
-};
-
-const REPORT_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
-const reportCache = new Map<string, CachedReport>();
-
-function pruneExpired(): void {
-  const now = Date.now();
-  for (const [k, r] of reportCache) {
-    if (r.expiresAt <= now) reportCache.delete(k);
-  }
+}): Promise<void> {
+  const sb = getSupabaseAdmin();
+  const { error } = await sb.from('opslert_reports').insert({
+    id: report.id,
+    report_type: report.reportType,
+    alert_level: report.alertLevel,
+    location: report.location,
+    note: report.note,
+    line_message_id: report.lineMessageId,
+    resolved: false,
+  });
+  if (error) throw error;
 }
 
-function getLatestByType(reportType: string): CachedReport | null {
-  pruneExpired();
-  let latest: CachedReport | null = null;
-  for (const r of reportCache.values()) {
-    if (r.reportType !== reportType) continue;
-    if (!latest || new Date(r.submittedAt) > new Date(latest.submittedAt)) latest = r;
-  }
-  return latest;
+async function resolveReport(id: string, resolvedBy: string, resolvedNote: string | null): Promise<DbReport | null> {
+  const sb = getSupabaseAdmin();
+  const { data, error } = await sb
+    .from('opslert_reports')
+    .update({
+      resolved: true,
+      resolved_at: new Date().toISOString(),
+      resolved_by: resolvedBy,
+      resolved_note: resolvedNote,
+    })
+    .eq('id', id)
+    .eq('resolved', false)
+    .select()
+    .maybeSingle();
+  if (error) throw error;
+  return data as DbReport | null;
 }
 
-function getActiveReports(): CachedReport[] {
-  pruneExpired();
-  return Array.from(reportCache.values())
-    .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
-}
-
-// ── Rate limiter ───────────────────────────────────────────────────
+// ── Rate limiter ────────────────────────────────────────────────────
+// Note: ยังคงเป็น in-memory เหมือนเดิม เพราะ rate limit ไม่ต้องถาวร
+// แต่หากต้องการความเป็นคงทนมากขึ้น สามารถย้ายไปใช้ Upstash Redis ได้
 
 const rlMap = new Map<string, { count: number; resetAt: number }>();
 
@@ -155,17 +210,41 @@ function verifyBotSecret(req: NextRequest): boolean {
 const NO_CACHE = { 'Cache-Control': 'no-store, no-cache, must-revalidate' };
 
 // ── Route: GET ─────────────────────────────────────────────────────
+// อ่านข้อมูลจาก Supabase DB โดยตรง ไม่พึ่ง in-memory cache
 
 export async function GET(_req: NextRequest): Promise<NextResponse> {
-  const reports  = getActiveReports();
-  const statuses = Array.from(VALID_MODULE_IDS).map(reportType => {
-    const last = getLatestByType(reportType);
-    return { reportType, isActive: last !== null && !last.resolved, lastReport: last };
-  });
-  return NextResponse.json({ reports, statuses }, { headers: NO_CACHE });
+  try {
+    const reports = await getActiveReports();
+    const statuses = Array.from(VALID_MODULE_IDS).map(reportType => {
+      const last = reports.find(r => r.report_type === reportType && !r.resolved)
+        ?? reports.reduce<DbReport | null>((acc, r) => {
+            if (r.report_type !== reportType) return acc;
+            if (!acc || new Date(r.created_at) > new Date(acc.created_at)) return r;
+            return acc;
+          }, null);
+      return {
+        reportType,
+        isActive: last !== null && !last.resolved,
+        lastReport: last ? toApiReport(last) : null,
+      };
+    });
+
+    return NextResponse.json(
+      { reports: reports.map(toApiReport), statuses },
+      { headers: NO_CACHE }
+    );
+  } catch (err: unknown) {
+    console.error('[opslert/report] GET error:', err instanceof Error ? err.message : err);
+    // กรณี DB ล้มเหลว ให้คืนค่าว่างแทนที่จะ crash
+    return NextResponse.json(
+      { reports: [], statuses: Array.from(VALID_MODULE_IDS).map(rt => ({ reportType: rt, isActive: false, lastReport: null })) },
+      { headers: NO_CACHE }
+    );
+  }
 }
 
 // ── Route: POST ────────────────────────────────────────────────────
+// สร้างรายงานใหม่ → บันทึกลง Supabase DB → ส่งไปยัง LINE bot
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
@@ -183,10 +262,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const payload = validatePayload(body);
   if (!payload) return NextResponse.json({ error: 'ข้อมูลไม่ครบ' }, { status: 400, headers: NO_CACHE });
 
-  const recent      = getLatestByType(payload.reportType);
-  const isDuplicate = recent !== null && !recent.resolved;
-  const reportId    = crypto.randomUUID();
+  // เช็กว่ามีรายงานล่าสุดที่ยังไม่ได้ดำเนินการหรือไม่ (duplicate detection)
+  const recent = await getLatestUnresolvedByType(payload.reportType);
+  const isDuplicate = recent !== null;
 
+  const reportId = crypto.randomUUID();
+
+  // ส่งไปยัง LINE bot ก่อน (เพื่อได้ messageId)
   let lineMessageId: string | null = null;
   try {
     lineMessageId = await forwardToBotAndGetMessageId(reportId, payload);
@@ -198,19 +280,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  reportCache.set(reportId, {
-    id: reportId, reportType: payload.reportType, alertLevel: payload.alertLevel,
-    location: payload.location, note: payload.note || undefined,
-    submittedAt: new Date().toISOString(), expiresAt: Date.now() + REPORT_CACHE_TTL_MS,
-    lineMessageId, resolved: false, resolvedAt: null, resolvedNote: null, resolvedBy: null,
-  });
+  // บันทึกลง Supabase DB (ข้อมูลถาวร — ไม่หายแม้ cold start)
+  try {
+    await insertReport({
+      id: reportId,
+      reportType: payload.reportType,
+      alertLevel: payload.alertLevel,
+      location: payload.location,
+      note: payload.note,
+      lineMessageId,
+    });
+  } catch (err: unknown) {
+    console.error('[opslert/report] DB insert failed:', err instanceof Error ? err.message : err);
+    // DB ล้มเหลวแต่ LINE ส่งแล้ว — ควรแจ้ง error
+    return NextResponse.json(
+      { error: 'บันทึกข้อมูลไม่สำเร็จ กรุณาลองใหม่' },
+      { status: 500, headers: NO_CACHE }
+    );
+  }
 
+  // ส่ง SSE event ให้ clients ที่เชื่อมต่ออยู่ instance เดียวกัน (instant)
+  // clients ที่ instance อื่นจะได้รับผ่าน Supabase Realtime แทน
   notifyAll();
 
   return NextResponse.json({ ok: true, isDuplicate }, { headers: NO_CACHE });
 }
 
 // ── Route: PATCH ───────────────────────────────────────────────────
+// ดำเนินการรายงาน → อัปเดต Supabase DB → แจ้ง LINE bot
 
 export async function PATCH(req: NextRequest): Promise<NextResponse> {
   const isBot  = verifyBotSecret(req);
@@ -233,63 +330,50 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
 
   if (!id) return NextResponse.json({ error: 'ต้องระบุ id' }, { status: 400, headers: NO_CACHE });
 
-  pruneExpired();
-  const report = reportCache.get(id);
+  const resolvedBy = resolvedByOver ?? (member as any)?.full_name ?? 'สมาชิกสภา';
 
-  // ─── Cold-start resilience ──────────────────────────────────────
-  // If the bot calls after a cold start (reportCache wiped), the report won't be
-  // in the map. We still push an SSE event so the hub page re-fetches and shows
-  // the current (now-empty) state, which correctly reflects "no active alerts".
-  if (!report) {
+  // อัปเดตใน Supabase DB (ทำงานข้าม instance ได้)
+  const updated = await resolveReport(id, resolvedBy, resolvedNote);
+
+  if (!updated) {
+    // ไม่พบรายงาน หรือดำเนินการแล้ว
     if (isBot) {
-      notifyAll(); // hub page will refetch and show no active alerts
-      const resolvedBy = resolvedByOver ?? 'สมาชิกสภา';
+      // Bot postback หลัง cold start — ยังคงส่ง SSE เพื่อให้ hub refresh
+      notifyAll();
       return NextResponse.json({
         ok: true,
-        report: {
-          id, resolved: true,
-          resolvedAt: new Date().toISOString(),
-          resolvedBy, resolvedNote,
-        },
+        report: { id, resolved: true, resolvedAt: new Date().toISOString(), resolvedBy, resolvedNote },
       }, { headers: NO_CACHE });
     }
     return NextResponse.json(
-      { error: 'ไม่พบรายงาน (อาจหมดอายุ)' },
+      { error: 'ไม่พบรายงาน (อาจดำเนินการแล้ว)' },
       { status: 404, headers: NO_CACHE }
     );
   }
 
-  if (report.resolved) {
-    return NextResponse.json(
-      { error: 'รายงานนี้ดำเนินการแล้ว' },
-      { status: 409, headers: NO_CACHE }
-    );
-  }
-
-  const resolvedBy = resolvedByOver ?? (member as any)?.full_name ?? 'สมาชิกสภา';
-
-  report.resolved     = true;
-  report.resolvedAt   = new Date().toISOString();
-  report.resolvedNote = resolvedNote;
-  report.resolvedBy   = resolvedBy;
-
-  // Call bot to PATCH LINE message (no quota) — only from web, not from bot postback
-  if (!isBot && report.lineMessageId) {
+  // แจ้ง LINE bot เพื่ออัปเดตข้อความ (เฉพาะจากเว็บ ไม่ใช่จาก bot postback)
+  if (!isBot && updated.line_message_id) {
     void callBotUpdate({
-      messageId: report.lineMessageId, reportId: report.id,
-      reportType: report.reportType, location: report.location,
-      resolvedBy, resolvedNote,
+      messageId: updated.line_message_id,
+      reportId: updated.id,
+      reportType: updated.report_type,
+      location: updated.location,
+      resolvedBy,
+      resolvedNote,
     });
   }
 
+  // ส่ง SSE event (instance เดียวกันได้ทันที, instance อื่นได้ผ่าน Supabase Realtime)
   notifyAll();
 
   return NextResponse.json({
     ok: true,
     report: {
-      id: report.id, resolved: true,
-      resolvedAt: report.resolvedAt,
-      resolvedBy, resolvedNote,
+      id: updated.id,
+      resolved: true,
+      resolvedAt: updated.resolved_at,
+      resolvedBy: updated.resolved_by,
+      resolvedNote: updated.resolved_note,
     },
   }, { headers: NO_CACHE });
 }

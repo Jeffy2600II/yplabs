@@ -1,3 +1,11 @@
+// Path:    src/app/api/data/route.ts  (YPLABS)
+// Purpose: Central data API (read-only GET).
+// ─── สิ่งที่เปลี่ยนแปลง: เพิ่ม force-dynamic ────────────────────
+// เพิ่ม export const dynamic = 'force-dynamic' เพื่อป้องกัน Vercel CDN
+// จากการ cache ข้อมูลเก่า ซึ่งเป็นสาเหตุหลักที่ refresh แล้วข้อมูลไม่เปลี่ยน
+
+export const dynamic = 'force-dynamic';
+
 import { NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabaseAdmin';
 import type { NextRequest } from 'next/server';
@@ -39,17 +47,17 @@ export async function GET(req: NextRequest) {
   const resource = url.searchParams.get('resource');
   const filtersRaw = url.searchParams.get('filters');
   const select = url.searchParams.get('select') || '*';
-  const cacheMode = (url.searchParams.get('cache') || 'no-store') as('no-store' | 'stale' | 'public');
-  
+  const cacheMode = (url.searchParams.get('cache') || 'no-store') as ('no-store' | 'stale' | 'public');
+
   if (!resource) return NextResponse.json({ error: 'resource required' }, { status: 400 });
-  
+
   // Whitelist check
   if (!PUBLIC_RESOURCES.has(resource) && !AUTH_LIMITED_RESOURCES.has(resource) && !ADMIN_ONLY.has(resource)) {
     return NextResponse.json({ error: 'resource not allowed' }, { status: 403 });
   }
-  
+
   const supabase = getSupabaseAdmin();
-  
+
   // Resolve caller UID if Authorization header present
   let callerUid: string | null = null;
   const authHeader = req.headers.get('authorization') ?? req.headers.get('Authorization');
@@ -64,7 +72,7 @@ export async function GET(req: NextRequest) {
       }
     }
   }
-  
+
   // Admin-only resource check
   if (ADMIN_ONLY.has(resource)) {
     if (!callerUid) return NextResponse.json({ error: 'authorization required' }, { status: 401 });
@@ -73,35 +81,32 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'admin required' }, { status: 403 });
     }
   }
-  
+
   // Build query
   let query = supabase.from(resource).select(select);
-  
+
   // Apply filters (simple equality)
   const filters = parseJSONSafe(filtersRaw);
   if (filters && typeof filters === 'object') {
-    for (const [k, v] of Object.entries(filters as Record < string, any > )) {
+    for (const [k, v] of Object.entries(filters as Record<string, any>)) {
       if (v === null) query = query.is(k, null);
       else query = query.eq(k, v as any);
     }
   }
-  
+
   // Auth-limited: restrict to caller's rows (if applicable)
   if (AUTH_LIMITED_RESOURCES.has(resource)) {
     if (!callerUid) {
-      // no auth -> return empty array to keep UI stable
       const emptyRes = NextResponse.json([], { status: 200 });
       emptyRes.headers.set('Cache-Control', 'no-store');
       return emptyRes;
     }
-    // Assume table has auth_uid column
     query = query.eq('auth_uid', callerUid);
   }
-  
+
   try {
     const { data, error } = await query;
     if (error) {
-      // For public endpoints, degrade to empty array (keeps UI from crashing)
       if (PUBLIC_RESOURCES.has(resource) || AUTH_LIMITED_RESOURCES.has(resource)) {
         const res = NextResponse.json([], { status: 200 });
         res.headers.set('Cache-Control', 'no-store');
@@ -109,8 +114,7 @@ export async function GET(req: NextRequest) {
       }
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-    
-    // Return raw rows (array or object depending on select/maybeSingle)
+
     const res = NextResponse.json(data ?? []);
     if (cacheMode === 'public') {
       res.headers.set('Cache-Control', 's-maxage=60, stale-while-revalidate=30');
