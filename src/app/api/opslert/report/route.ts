@@ -77,6 +77,45 @@ async function getLatestUnresolvedByType(reportType: string): Promise<DbReport |
   return data as DbReport | null;
 }
 
+/** หารายงานที่ยังไม่ดำเนินการ โดย report_type + location (ใช้ตรวจสถานะอัพเกรด) */
+async function findUnresolvedByTypeAndLocation(reportType: string, location: string): Promise<DbReport | null> {
+  const sb = getSupabaseAdmin();
+  const { data, error } = await sb
+    .from('opslert_reports')
+    .select('*')
+    .eq('report_type', reportType)
+    .eq('location', location)
+    .eq('resolved', false)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data as DbReport | null;
+}
+
+/** อัพเกรดรายงานเดิม — ปรับ alert_level + note (เป็นสถานะเดียวกัน เพียงอัพเดตสถานะใหม่) */
+async function upgradeReport(id: string, newAlertLevel: string, newNote: string): Promise<DbReport | null> {
+  const sb = getSupabaseAdmin();
+  const { data, error } = await sb
+    .from('opslert_reports')
+    .update({
+      alert_level: newAlertLevel,
+      note: newNote || null,
+    })
+    .eq('id', id)
+    .eq('resolved', false)
+    .select()
+    .maybeSingle();
+  if (error) throw error;
+  return data as DbReport | null;
+}
+
+// ระดับความรุนแรง (ยิ่งสูงยิ่งรุนแรง)
+const ALERT_PRIORITY: Record<string, number> = {
+  almost_empty: 1,
+  empty: 2,
+};
+
 async function insertReport(report: {
   id: string;
   reportType: string;
@@ -210,6 +249,26 @@ async function callBotUpdate(opts: {
   }
 }
 
+/** แจ้ง LINE bot ว่ารายงานถูกอัพเกรดสถานะ (ใกล้หมด → หมดแล้ว) */
+async function callBotUpgrade(opts: {
+  messageId: string; reportId: string; reportType: string;
+  alertLevel: string; location: string; note: string;
+  upgradedFrom: string; upgradedTo: string;
+}): Promise<void> {
+  const bot = getBotConfig();
+  if (!bot) return;
+  try {
+    await fetch(`${bot.url}/api/broadcast`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webhook-Secret': bot.secret },
+      body: JSON.stringify({ action: 'upgrade', ...opts }),
+      signal: AbortSignal.timeout(6_000),
+    });
+  } catch {
+    console.warn('[opslert/report] bot upgrade non-fatal failure');
+  }
+}
+
 // ── Bot-secret auth (postback resolve from webhook) ───────────────
 
 function verifyBotSecret(req: NextRequest): boolean {
@@ -280,10 +339,62 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const payload = validatePayload(body);
   if (!payload) return NextResponse.json({ error: 'ข้อมูลไม่ครบ' }, { status: 400, headers: NO_CACHE });
 
-  // เช็กว่ามีรายงานล่าสุดที่ยังไม่ได้ดำเนินการหรือไม่ (duplicate detection)
-  const recent = await getLatestUnresolvedByType(payload.reportType);
-  const isDuplicate = recent !== null;
+  // ── ตรวจสอบ: มีรายงานเดิมที่ report_type + location เดียวกันหรือไม่? ──
+  // ถ้ามี → อัพเกรดสถานะ (เช่น ใกล้หมด → หมดแล้ว) ไม่สร้างรายงานใหม่
+  const existing = await findUnresolvedByTypeAndLocation(payload.reportType, payload.location);
 
+  if (existing) {
+    const oldLevel = existing.alert_level;
+    const newPriority = ALERT_PRIORITY[payload.alertLevel] ?? 0;
+    const oldPriority = ALERT_PRIORITY[oldLevel] ?? 0;
+
+    // ปัจจุบันเป็นสถานะรุนแรงกว่าหรือเท่ากัน → อัพเกรด
+    if (newPriority >= oldPriority) {
+      try {
+        await upgradeReport(existing.id, payload.alertLevel, payload.note);
+
+        // แจ้ง LINE bot อัพเดตข้อความเดิม
+        if (existing.line_message_id) {
+          void callBotUpgrade({
+            messageId: existing.line_message_id,
+            reportId: existing.id,
+            reportType: payload.reportType,
+            alertLevel: payload.alertLevel,
+            location: payload.location,
+            note: payload.note,
+            upgradedFrom: oldLevel,
+            upgradedTo: payload.alertLevel,
+          });
+        }
+
+        notifyAll();
+
+        const changed = oldLevel !== payload.alertLevel;
+        return NextResponse.json({
+          ok: true,
+          isUpgrade: true,
+          upgradedFrom: oldLevel,
+          upgradedTo: payload.alertLevel,
+          alertChanged: changed,
+        }, { headers: NO_CACHE });
+      } catch (err: unknown) {
+        console.error('[opslert/report] upgrade failed:', err instanceof Error ? err.message : err);
+        // Upgrade ล้มเหลว → fallback สร้างใหม่ต่อไปด้านล่าง
+      }
+    }
+
+    // สถานะเดิมรุนแรงกว่า (เช่น มี "หมดแล้ว" อยู่ แล้วมาแจ้ง "ใกล้หมด") → ไม่ต้องทำอะไร
+    return NextResponse.json({
+      ok: true,
+      isUpgrade: true,
+      upgradedFrom: oldLevel,
+      upgradedTo: oldLevel,
+      alertChanged: false,
+      skipped: true,
+    }, { headers: NO_CACHE });
+  }
+
+  // ── ไม่มีรายงานเดิม → สร้างใหม่ (flow เดิม) ──
   const reportId = crypto.randomUUID();
 
   // ส่งไปยัง LINE bot ก่อน (เพื่อได้ messageId)
@@ -310,18 +421,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
   } catch (err: unknown) {
     console.error('[opslert/report] DB insert failed:', err instanceof Error ? err.message : err);
-    // DB ล้มเหลวแต่ LINE ส่งแล้ว — ควรแจ้ง error
     return NextResponse.json(
       { error: 'บันทึกข้อมูลไม่สำเร็จ กรุณาลองใหม่' },
       { status: 500, headers: NO_CACHE }
     );
   }
 
-  // ส่ง SSE event ให้ clients ที่เชื่อมต่ออยู่ instance เดียวกัน (instant)
-  // clients ที่ instance อื่นจะได้รับผ่าน Supabase Realtime แทน
   notifyAll();
 
-  return NextResponse.json({ ok: true, isDuplicate }, { headers: NO_CACHE });
+  return NextResponse.json({ ok: true, isDuplicate: false, isUpgrade: false }, { headers: NO_CACHE });
 }
 
 // ── Route: PATCH ───────────────────────────────────────────────────
