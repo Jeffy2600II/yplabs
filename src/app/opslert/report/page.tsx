@@ -1,12 +1,17 @@
 // Path:    src/app/opslert/report/page.tsx  (YPLABS)
 // Purpose: Public-facing report form — linked from QR code.
-// ─── สิ่งที่เปลี่ยนแปลง UX ──────────────────────────────────────────
-// Smart duplicate detection:
-//   - สถานที่เดียวกัน + สถานะเดียวกัน → บล็อก ไม่ให้ส่ง (แสดง "มีการแจ้งแล้ว")
-//   - "หมดแล้ว" แจ้งแล้ว → "ใกล้หมด" ส่งไม่ได้ (สถานะเดิมรุนแรงกว่า)
-//   - "ใกล้หมด" แจ้งแล้ว → "หมดแล้ว" ส่งได้ (escalation รุนแรงขึ้น)
+// ─── สิ่งที่เปลี่ยนแปลง UX (v3) ───────────────────────────────
+// 1. Smart duplicate detection (ต่อจาก v2):
+//    - สถานที่เดียวกัน + สถานะเดียวกัน → บล็อก ไม่ให้ส่ง
+//    - "หมดแล้ว" แจ้งแล้ว → "ใกล้หมด" ส่งไม่ได้
+//    - "ใกล้หมด" แจ้งแล้ว → "หมดแล้ว" ส่งได้ (escalation)
 //
-// เลือกสถานที่เดียวเดียว (ห้องน้ำหญิง) → auto-select ให้ ข้าม step นี้ได้เลย
+// 2. เลือกสถานที่เดียวเดียว (ห้องน้ำหญิง) → auto-select ให้
+//
+// 3. ⚡ ลบ cooldown ออกทั้งหมด — เพราะมีระบบชาญฉลาดอยู่แล้ว
+//    cooldown ยาวเกินไปจะทำให้คนที่ 2 ที่พบว่าหมดจริง แต่โดนบล็อก
+//
+// 4. ช่องหมายเหตุ disabled ด้วยเมื่อรายงานถูกบล็อก
 
 'use client';
 
@@ -72,32 +77,6 @@ function canSendReport(
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-const COOLDOWN_MS = 90 * 1000;
-
-function canSubmitCooldown(reportType: string): boolean {
-  try {
-    const key = `opslert_last_${reportType}`;
-    const last = sessionStorage.getItem(key);
-    if (!last) return true;
-    return Date.now() - Number(last) > COOLDOWN_MS;
-  } catch { return true; }
-}
-
-function recordSubmit(reportType: string): void {
-  try { sessionStorage.setItem(`opslert_last_${reportType}`, String(Date.now())); }
-  catch {}
-}
-
-function getCooldownSec(reportType: string): number {
-  try {
-    const key = `opslert_last_${reportType}`;
-    const last = sessionStorage.getItem(key);
-    if (!last) return 0;
-    const remaining = Math.ceil((COOLDOWN_MS - (Date.now() - Number(last))) / 1000);
-    return Math.max(0, remaining);
-  } catch { return 0; }
-}
-
 function timeSince(isoStr: string): string {
   const diff = Date.now() - new Date(isoStr).getTime();
   const min  = Math.floor(diff / 60_000);
@@ -124,7 +103,6 @@ function ReportFormContent() {
   const [note, setNote]             = useState('');
   const [submitState, setSubmitState] = useState<SubmitState>('idle');
   const [errorMsg, setErrorMsg]     = useState('');
-  const [cooldownSec, setCooldownSec] = useState(0);
 
   // Active reports from server
   const [activeReports, setActiveReports] = useState<ExistingReport[]>([]);
@@ -153,19 +131,6 @@ function ReportFormContent() {
     }
   }, [module.locations, location]);
 
-  // ── Cooldown countdown ─────────────────────────────────────────
-  useEffect(() => {
-    const remaining = getCooldownSec(module.id);
-    if (remaining <= 0) return;
-    setCooldownSec(remaining);
-    const id = setInterval(() => {
-      const sec = getCooldownSec(module.id);
-      setCooldownSec(sec);
-      if (sec <= 0) clearInterval(id);
-    }, 1000);
-    return () => clearInterval(id);
-  }, [module.id]);
-
   // ── Smart duplicate check ─────────────────────────────────────
   function getDuplicateStatus(): { blocked: boolean; reason: string; existing?: ExistingReport } {
     if (!location || !alertLevel) return { blocked: false, reason: '' };
@@ -192,7 +157,6 @@ function ReportFormContent() {
       const json = await res.json().catch(() => ({})) as { error?: string };
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
 
-      recordSubmit(module.id);
       setSubmitState('success');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด กรุณาลองใหม่';
@@ -205,14 +169,6 @@ function ReportFormContent() {
     e.preventDefault();
     if (!alertLevel) { setErrorMsg('กรุณาเลือกระดับความเร่งด่วน'); return; }
     if (!location)   { setErrorMsg('กรุณาเลือกตำแหน่ง'); return; }
-    if (cooldownSec > 0) {
-      setErrorMsg(`กรุณารอ ${cooldownSec} วินาทีก่อนส่งซ้ำ`);
-      return;
-    }
-    if (!canSubmitCooldown(module.id)) {
-      setErrorMsg('ส่งรายงานบ่อยเกินไป กรุณารอสักครู่');
-      return;
-    }
 
     // ✅ Smart duplicate check — บล็อกอัตโนมัติ ไม่ต้องกดยืนยัน
     if (dupStatus.blocked) {
@@ -330,7 +286,7 @@ function ReportFormContent() {
           </div>
         )}
 
-        {/* Note */}
+        {/* Note — disabled เมื่อรายงานถูกบล็อก */}
         <div className="form-group">
           <label className="form-label">หมายเหตุเพิ่มเติม (ไม่บังคับ)</label>
           <textarea
@@ -339,7 +295,11 @@ function ReportFormContent() {
             placeholder="เช่น ชั้น 2 ห้องซ้ายมือสุด..."
             maxLength={200}
             rows={3}
-            style={{ resize: 'none' }}
+            disabled={dupStatus.blocked}
+            style={{
+              resize: 'none',
+              opacity: dupStatus.blocked ? 0.5 : 1,
+            }}
           />
           <div style={{ fontSize: 11, color: 'var(--text-4)', textAlign: 'right', marginTop: 4 }}>
             {note.length}/200
@@ -358,17 +318,10 @@ function ReportFormContent() {
           </div>
         )}
 
-        {/* Cooldown warning */}
-        {cooldownSec > 0 && (
-          <div className="alert alert-warning" style={{ fontSize: 13 }}>
-            ⏱ รอ {cooldownSec} วินาทีก่อนส่งรายงานอีกครั้ง
-          </div>
-        )}
-
         {/* Submit */}
         <button
           type="submit"
-          disabled={submitState === 'submitting' || cooldownSec > 0 || dupStatus.blocked}
+          disabled={submitState === 'submitting' || dupStatus.blocked}
           className="btn btn-primary btn-full btn-lg"
           style={{ fontSize: 15, padding: '14px' }}
         >
