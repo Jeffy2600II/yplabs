@@ -376,15 +376,6 @@ export default function OpslertHubPage() {
                     <span style={{ animation: 'rtpulse 2.4s ease-in-out infinite' }}>🔔</span>
                     {alertLabel(report.alertLevel)} · {timeSince(report.submittedAt)}
                   </div>
-                ) : isResolved && report ? (
-                  <div style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 5,
-                    background: 'var(--surface-2)', border: '1px solid var(--border)',
-                    borderRadius: 'var(--r-pill)', padding: '3px 10px',
-                    fontSize: 11.5, fontWeight: 700, color: 'var(--text-3)',
-                  }}>
-                    ✅ ดำเนินการแล้ว{report.resolvedAt ? ` · ${timeSince(report.resolvedAt)}` : ''}
-                  </div>
                 ) : null}
               </div>
             </div>
@@ -414,17 +405,7 @@ export default function OpslertHubPage() {
               </div>
             )}
 
-            {/* Resolved detail */}
-            {!isPending && isResolved && report?.resolvedBy && (
-              <div style={{
-                padding: '8px 12px', fontSize: 12.5,
-                background: 'var(--surface-2)', border: '1px solid var(--border)',
-                borderRadius: 'var(--r-lg)', marginBottom: 10, color: 'var(--text-3)',
-              }}>
-                โดย <strong>{report.resolvedBy}</strong>
-                {report.resolvedNote && ` — ${report.resolvedNote}`}
-              </div>
-            )}
+
 
             {/* Actions */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
