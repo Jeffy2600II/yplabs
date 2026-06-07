@@ -1,7 +1,12 @@
-// Path:    src/app/opslert/report/page.tsx
+// Path:    src/app/opslert/report/page.tsx  (YPLABS)
 // Purpose: Public-facing report form — linked from QR code.
-//          No auth required. Shows "already reported" warning before submit.
-// Used by: Anyone who scans the QR code
+// ─── สิ่งที่เปลี่ยนแปลง UX ──────────────────────────────────────────
+// Smart duplicate detection:
+//   - สถานที่เดียวกัน + สถานะเดียวกัน → บล็อก ไม่ให้ส่ง (แสดง "มีการแจ้งแล้ว")
+//   - "หมดแล้ว" แจ้งแล้ว → "ใกล้หมด" ส่งไม่ได้ (สถานะเดิมรุนแรงกว่า)
+//   - "ใกล้หมด" แจ้งแล้ว → "หมดแล้ว" ส่งได้ (escalation รุนแรงขึ้น)
+//
+// เลือกสถานที่เดียวเดียว (ห้องน้ำหญิง) → auto-select ให้ ข้าม step นี้ได้เลย
 
 'use client';
 
@@ -13,22 +18,63 @@ import { getModule, REPORT_MODULES, type AlertLevelConfig } from '@/lib/opslertC
 
 type SubmitState = 'idle' | 'submitting' | 'success' | 'error';
 
-type ActiveStatus = {
-  isActive: boolean;
-  lastReport: {
-    location: string;
-    alertLevel: string;
-    note?: string;
-    submittedAt: string;
-  } | null;
+type ExistingReport = {
+  id: string;
+  location: string;
+  alertLevel: string;
+  note?: string;
+  submittedAt: string;
+  resolved: boolean;
 };
+
+// ── Duplicate detection logic ─────────────────────────────────────
+// ตรวจสอบว่าสถานที่ + สถานะนี้สามารถส่งได้หรือไม่
+// "empty" คือระดับรุนแรงกว่า "almost_empty"
+
+function canSendReport(
+  selectedLocation: string,
+  selectedLevel: string,
+  activeReports: ExistingReport[]
+): { canSend: boolean; reason: string; existing?: ExistingReport } {
+  // หา report ที่ยังไม่ดำเนินการ สำหรับสถานที่เดียวกัน
+  const sameLocationReports = activeReports.filter(
+    r => r.location === selectedLocation && !r.resolved
+  );
+
+  if (sameLocationReports.length === 0) {
+    return { canSend: true, reason: '' };
+  }
+
+  // ถ้ามีรายงาน "หมดแล้ว" อยู่ → ทุกอย่างส่งไม่ได้แล้ว (ใกล้หมดก็ไม่ต้องส่ง)
+  const hasEmpty = sameLocationReports.some(r => r.alertLevel === 'empty');
+  if (hasEmpty) {
+    const existing = sameLocationReports.find(r => r.alertLevel === 'empty');
+    return {
+      canSend: false,
+      reason: 'มีการแจ้ง "หมดแล้ว" สำหรับสถานที่นี้แล้ว ไม่ต้องส่งซ้ำ',
+      existing,
+    };
+  }
+
+  // ถ้ามีรายงาน "ใกล้หมด" อยู่ → "ใกล้หมด" ส่งไม่ได้ แต่ "หมดแล้ว" ส่งได้ (escalation)
+  const sameLevel = sameLocationReports.find(r => r.alertLevel === selectedLevel);
+  if (sameLevel) {
+    return {
+      canSend: false,
+      reason: `มีการแจ้ง "${selectedLevel === 'almost_empty' ? 'ใกล้หมด' : 'หมดแล้ว'}" สำหรับสถานที่นี้แล้ว ไม่ต้องส่งซ้ำ`,
+      existing: sameLevel,
+    };
+  }
+
+  // sameLocationReports มีแต่ "ใกล้หมด" และ selectedLevel คือ "หมดแล้ว" → ส่งได้ (escalation)
+  return { canSend: true, reason: '' };
+}
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-// Client-side cooldown (per device per tab session)
-const COOLDOWN_MS = 90 * 1000; // 90 seconds
+const COOLDOWN_MS = 90 * 1000;
 
-function canSubmit(reportType: string): boolean {
+function canSubmitCooldown(reportType: string): boolean {
   try {
     const key = `opslert_last_${reportType}`;
     const last = sessionStorage.getItem(key);
@@ -39,7 +85,7 @@ function canSubmit(reportType: string): boolean {
 
 function recordSubmit(reportType: string): void {
   try { sessionStorage.setItem(`opslert_last_${reportType}`, String(Date.now())); }
-  catch { /* ignore */ }
+  catch {}
 }
 
 function getCooldownSec(reportType: string): number {
@@ -66,7 +112,7 @@ function alertLabel(level: string): string {
   return level;
 }
 
-// ── Form content (needs useSearchParams) ──────────────────────────
+// ── Form content ────────────────────────────────────────────────────
 
 function ReportFormContent() {
   const searchParams = useSearchParams();
@@ -80,27 +126,34 @@ function ReportFormContent() {
   const [errorMsg, setErrorMsg]     = useState('');
   const [cooldownSec, setCooldownSec] = useState(0);
 
-  // Active report status from server
-  const [activeStatus, setActiveStatus]   = useState<ActiveStatus | null>(null);
+  // Active reports from server
+  const [activeReports, setActiveReports] = useState<ExistingReport[]>([]);
   const [statusLoading, setStatusLoading] = useState(true);
-  const [showConfirmDup, setShowConfirmDup] = useState(false);
 
-  // Load current status from server
+  // ── Load current status from server ────────────────────────────
   useEffect(() => {
     void (async () => {
       try {
         const res = await fetch('/api/opslert/report', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
-          const st = (data.statuses ?? []).find((s: any) => s.reportType === module.id);
-          setActiveStatus(st ?? { isActive: false, lastReport: null });
+          // เก็บเฉพาะรายงานที่ยังไม่ดำเนินการ
+          const active = (data.reports ?? []).filter((r: any) => !r.resolved);
+          setActiveReports(active);
         }
-      } catch { /* non-fatal */ }
+      } catch {}
       finally { setStatusLoading(false); }
     })();
   }, [module.id]);
 
-  // Cooldown countdown
+  // Auto-select location ถ้ามีตัวเลือกเดียว
+  useEffect(() => {
+    if (module.locations.length === 1 && !location) {
+      setLocation(module.locations[0]);
+    }
+  }, [module.locations, location]);
+
+  // ── Cooldown countdown ─────────────────────────────────────────
   useEffect(() => {
     const remaining = getCooldownSec(module.id);
     if (remaining <= 0) return;
@@ -113,10 +166,22 @@ function ReportFormContent() {
     return () => clearInterval(id);
   }, [module.id]);
 
+  // ── Smart duplicate check ─────────────────────────────────────
+  function getDuplicateStatus(): { blocked: boolean; reason: string; existing?: ExistingReport } {
+    if (!location || !alertLevel) return { blocked: false, reason: '' };
+    const result = canSendReport(location, alertLevel, activeReports);
+    return {
+      blocked: !result.canSend,
+      reason: result.reason,
+      existing: result.existing,
+    };
+  }
+
+  const dupStatus = getDuplicateStatus();
+
   async function doSubmit(): Promise<void> {
     setSubmitState('submitting');
     setErrorMsg('');
-    setShowConfirmDup(false);
 
     try {
       const res = await fetch('/api/opslert/report', {
@@ -144,14 +209,14 @@ function ReportFormContent() {
       setErrorMsg(`กรุณารอ ${cooldownSec} วินาทีก่อนส่งซ้ำ`);
       return;
     }
-    if (!canSubmit(module.id)) {
+    if (!canSubmitCooldown(module.id)) {
       setErrorMsg('ส่งรายงานบ่อยเกินไป กรุณารอสักครู่');
       return;
     }
 
-    // If already reported, show confirmation before submitting
-    if (activeStatus?.isActive && !showConfirmDup) {
-      setShowConfirmDup(true);
+    // ✅ Smart duplicate check — บล็อกอัตโนมัติ ไม่ต้องกดยืนยัน
+    if (dupStatus.blocked) {
+      setErrorMsg(dupStatus.reason);
       return;
     }
 
@@ -163,20 +228,20 @@ function ReportFormContent() {
     return (
       <div style={{ textAlign: 'center', padding: '40px 20px' }}>
         <div style={{ fontSize: 64, marginBottom: 16 }}>✅</div>
-        <div style={{ fontWeight: 800, fontSize: 20, color: 'var(--green)', marginBottom: 8 }}>
+        <div style={{ fontWeight: 800, fontSize: 20, marginBottom: 8 }}>
           ส่งรายงานสำเร็จ!
         </div>
         <div style={{ fontSize: 14, color: 'var(--text-3)', lineHeight: 1.7, marginBottom: 24 }}>
           สภานักเรียนได้รับแจ้งแล้ว<br />
-          จะดำเนินการโดยเร็ว ขอบคุณที่ช่วยแจ้งนะคะ 🙏
+          จะดำเนินการโดยเร็ว ขอบคุณที่ช่วยแจ้ง 🙏
         </div>
         <div style={{
           display: 'inline-flex', alignItems: 'center', gap: 8,
-          background: 'var(--green-bg)', border: '1px solid var(--green-border)',
+          background: 'var(--surface-2)', border: '1px solid var(--border)',
           borderRadius: 'var(--r-lg)', padding: '10px 18px',
-          fontSize: 13, color: 'var(--green)', fontWeight: 600,
+          fontSize: 13, color: 'var(--text-2)', fontWeight: 600,
         }}>
-          {module.emoji} {module.label} · {location} · {alertLabel(alertLevel ?? '')}
+          {module.emoji} {location} · {alertLabel(alertLevel ?? '')}
         </div>
         <div style={{ marginTop: 24, fontSize: 12, color: 'var(--text-4)' }}>
           ปิดหน้านี้ได้เลย
@@ -187,73 +252,6 @@ function ReportFormContent() {
 
   return (
     <>
-      {/* ── Already reported warning ──────────────────────────── */}
-      {!statusLoading && activeStatus?.isActive && activeStatus.lastReport && !showConfirmDup && (
-        <div style={{
-          padding: '14px 16px', marginBottom: 20,
-          background: 'var(--amber-bg)', border: '1.5px solid var(--amber-border)',
-          borderRadius: 'var(--r-xl)', borderLeft: '4px solid var(--amber)',
-        }}>
-          <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--amber)', marginBottom: 8 }}>
-            ⚠️ มีการแจ้งปัญหานี้แล้ว
-          </div>
-          <div style={{ fontSize: 12.5, color: 'var(--text-2)', marginBottom: 4 }}>
-            📍 {activeStatus.lastReport.location}
-          </div>
-          <div style={{ fontSize: 12.5, color: 'var(--text-2)', marginBottom: 4 }}>
-            สถานะ: <strong>{alertLabel(activeStatus.lastReport.alertLevel)}</strong>
-            <span style={{ color: 'var(--text-3)', marginLeft: 6 }}>
-              · {timeSince(activeStatus.lastReport.submittedAt)}
-            </span>
-          </div>
-          {activeStatus.lastReport.note && (
-            <div style={{ fontSize: 12, color: 'var(--text-3)', fontStyle: 'italic' }}>
-              💬 {activeStatus.lastReport.note}
-            </div>
-          )}
-          <div style={{
-            marginTop: 10, padding: '8px 12px',
-            background: 'rgba(224,124,18,0.08)', borderRadius: 'var(--r-md)',
-            fontSize: 12, color: 'var(--amber)',
-          }}>
-            สภาฯ รับทราบแล้ว กำลังดำเนินการ — ไม่ต้องส่งซ้ำหากสถานที่เดียวกัน
-          </div>
-        </div>
-      )}
-
-      {/* ── Confirm duplicate dialog ───────────────────────────── */}
-      {showConfirmDup && (
-        <div style={{
-          padding: '16px', marginBottom: 20,
-          background: 'var(--red-bg)', border: '1.5px solid var(--red-border)',
-          borderRadius: 'var(--r-xl)', borderLeft: '4px solid var(--red)',
-        }}>
-          <div style={{ fontWeight: 700, fontSize: 13.5, color: 'var(--red)', marginBottom: 8 }}>
-            ยืนยันการส่งซ้ำ?
-          </div>
-          <div style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 14, lineHeight: 1.55 }}>
-            มีการแจ้งปัญหานี้อยู่แล้ว ถ้าเป็นคนละสถานที่หรือสถานการณ์เร่งด่วนขึ้น
-            สามารถส่งซ้ำได้
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              onClick={() => void doSubmit()}
-              disabled={submitState === 'submitting'}
-              className="btn btn-danger btn-sm"
-            >
-              {submitState === 'submitting' ? '🔄 กำลังส่ง...' : 'ส่งซ้ำ — เร่งด่วน'}
-            </button>
-            <button
-              onClick={() => setShowConfirmDup(false)}
-              className="btn btn-ghost btn-sm"
-            >
-              ยกเลิก
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Form ──────────────────────────────────────────────── */}
       <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
         {/* Alert level */}
@@ -262,58 +260,75 @@ function ReportFormContent() {
             ระดับความเร่งด่วน <span style={{ color: 'var(--red)' }}>*</span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {module.alertLevels.map((level: AlertLevelConfig) => (
-              <button
-                key={level.value}
-                type="button"
-                onClick={() => { setAlertLevel(level.value); setErrorMsg(''); setShowConfirmDup(false); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 14,
-                  padding: '14px 16px', borderRadius: 'var(--r-lg)',
-                  border: `2px solid ${alertLevel === level.value ? level.color : 'var(--border-2)'}`,
-                  background: alertLevel === level.value ? level.bg : 'var(--surface)',
-                  cursor: 'pointer', transition: 'all 150ms',
-                  textAlign: 'left', width: '100%', fontFamily: 'var(--font)',
-                }}
-              >
-                {/* Radio */}
-                <div style={{
-                  width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
-                  border: `2.5px solid ${alertLevel === level.value ? level.color : 'var(--border-3)'}`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  transition: 'all 150ms',
-                }}>
-                  {alertLevel === level.value && (
-                    <div style={{ width: 10, height: 10, borderRadius: '50%', background: level.color }} />
-                  )}
-                </div>
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 15, color: alertLevel === level.value ? level.color : 'var(--text)' }}>
-                    {level.label}
+            {module.alertLevels.map((level: AlertLevelConfig) => {
+              // เช็คว่า level นี้สามารถเลือกได้หรือไม่ (เมื่อเลือกสถานที่แล้ว)
+              const levelDup = location ? canSendReport(location, level.value, activeReports) : null;
+              const isDisabled = levelDup && !levelDup.canSend;
+
+              return (
+                <button
+                  key={level.value}
+                  type="button"
+                  onClick={() => { setAlertLevel(level.value); setErrorMsg(''); }}
+                  disabled={isDisabled}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 14,
+                    padding: '14px 16px', borderRadius: 'var(--r-lg)',
+                    border: `2px solid ${alertLevel === level.value ? level.color : isDisabled ? 'var(--border)' : 'var(--border-2)'}`,
+                    background: alertLevel === level.value ? level.bg : isDisabled ? 'var(--surface-2)' : 'var(--surface)',
+                    cursor: isDisabled ? 'not-allowed' : 'pointer',
+                    transition: 'all 150ms',
+                    textAlign: 'left', width: '100%', fontFamily: 'var(--font)',
+                    opacity: isDisabled ? 0.5 : 1,
+                  }}
+                >
+                  <div style={{
+                    width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
+                    border: `2.5px solid ${alertLevel === level.value ? level.color : 'var(--border-3)'}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    transition: 'all 150ms',
+                  }}>
+                    {alertLevel === level.value && (
+                      <div style={{ width: 10, height: 10, borderRadius: '50%', background: level.color }} />
+                    )}
                   </div>
-                  <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginTop: 2 }}>{level.desc}</div>
-                </div>
-              </button>
-            ))}
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: alertLevel === level.value ? level.color : 'var(--text)' }}>
+                      {level.label}
+                    </div>
+                    <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginTop: 2 }}>
+                      {level.desc}
+                      {isDisabled && (
+                        <span style={{ color: 'var(--text-4)', marginLeft: 6 }}>
+                          — แจ้งแล้ว
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        {/* Location */}
-        <div className="form-group">
-          <label className="form-label">
-            ตำแหน่ง <span className="form-req">*</span>
-          </label>
-          <select
-            value={location}
-            onChange={e => { setLocation(e.target.value); setErrorMsg(''); setShowConfirmDup(false); }}
-            required
-          >
-            <option value="">— เลือกตำแหน่ง —</option>
-            {module.locations.map(loc => (
-              <option key={loc} value={loc}>{loc}</option>
-            ))}
-          </select>
-        </div>
+        {/* Location — ซ่อนถ้ามีตัวเลือกเดียว (auto-select แล้ว) */}
+        {module.locations.length > 1 && (
+          <div className="form-group">
+            <label className="form-label">
+              ตำแหน่ง <span className="form-req">*</span>
+            </label>
+            <select
+              value={location}
+              onChange={e => { setLocation(e.target.value); setErrorMsg(''); }}
+              required
+            >
+              <option value="">— เลือกตำแหน่ง —</option>
+              {module.locations.map(loc => (
+                <option key={loc} value={loc}>{loc}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Note */}
         <div className="form-group">
@@ -321,7 +336,7 @@ function ReportFormContent() {
           <textarea
             value={note}
             onChange={e => setNote(e.target.value)}
-            placeholder="เช่น ห้องซ้ายมือสุด, มีแค่ชั้น 2..."
+            placeholder="เช่น ชั้น 2 ห้องซ้ายมือสุด..."
             maxLength={200}
             rows={3}
             style={{ resize: 'none' }}
@@ -331,9 +346,16 @@ function ReportFormContent() {
           </div>
         </div>
 
-        {/* Error */}
+        {/* Error / Blocked message */}
         {errorMsg && (
-          <div className="alert alert-error" style={{ fontSize: 13 }}>{errorMsg}</div>
+          <div className="alert alert-warning" style={{ fontSize: 13, lineHeight: 1.5 }}>
+            {errorMsg}
+            {dupStatus.existing && (
+              <div style={{ marginTop: 6, fontSize: 12, color: 'var(--text-3)' }}>
+                แจ้งเมื่อ {timeSince(dupStatus.existing.submittedAt)}
+              </div>
+            )}
+          </div>
         )}
 
         {/* Cooldown warning */}
@@ -346,7 +368,7 @@ function ReportFormContent() {
         {/* Submit */}
         <button
           type="submit"
-          disabled={submitState === 'submitting' || cooldownSec > 0 || showConfirmDup}
+          disabled={submitState === 'submitting' || cooldownSec > 0 || dupStatus.blocked}
           className="btn btn-primary btn-full btn-lg"
           style={{ fontSize: 15, padding: '14px' }}
         >
@@ -366,7 +388,6 @@ function ReportFormContent() {
 // ── Main page ──────────────────────────────────────────────────────
 
 export default function ReportPage() {
-  // Detect module from URL for header display (before Suspense resolves)
   const [moduleLabel, setModuleLabel] = useState('แจ้งปัญหา');
   const [moduleEmoji, setModuleEmoji] = useState('🔔');
 
@@ -424,7 +445,7 @@ export default function ReportPage() {
 
         {/* Footer */}
         <div style={{ textAlign: 'center', marginTop: 16, fontSize: 11.5, color: 'var(--text-4)' }}>
-          ระบบแจ้งเตือน Opslert · สภานักเรียน ร.ร. คำยางพิทยา
+          ระบบแจ้งเตือน Opslert
         </div>
       </div>
     </div>
