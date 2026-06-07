@@ -318,7 +318,7 @@ function ReportFormContent() {
                     </div>
                     <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginTop: 2 }}>
                       {level.desc}
-                      {isDisabled && (
+                      {!statusLoading && isDisabled && (
                         <span style={{ color: 'var(--text-4)', marginLeft: 6 }}>
                           — แจ้งแล้ว
                         </span>
