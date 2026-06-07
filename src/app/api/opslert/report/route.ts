@@ -98,9 +98,22 @@ async function insertReport(report: {
   if (error) throw error;
 }
 
-async function resolveReport(id: string, resolvedBy: string, resolvedNote: string | null): Promise<DbReport | null> {
+async function resolveReport(id: string, resolvedBy: string, resolvedNote: string | null): Promise<{ primary: DbReport | null; related: DbReport[] }> {
   const sb = getSupabaseAdmin();
-  const { data, error } = await sb
+
+  // 1) หา report หลักก่อน เพื่อเอา report_type + location
+  const { data: primary, error: priErr } = await sb
+    .from('opslert_reports')
+    .select('*')
+    .eq('id', id)
+    .eq('resolved', false)
+    .maybeSingle();
+  if (priErr) throw priErr;
+
+  if (!primary) return { primary: null, related: [] };
+
+  // 2) Resolve ทุก report ที่ report_type + location เดียวกัน (รวมตัวหลักด้วย)
+  const { data: resolvedAll, error: batchErr } = await sb
     .from('opslert_reports')
     .update({
       resolved: true,
@@ -108,12 +121,17 @@ async function resolveReport(id: string, resolvedBy: string, resolvedNote: strin
       resolved_by: resolvedBy,
       resolved_note: resolvedNote,
     })
-    .eq('id', id)
+    .eq('report_type', primary.report_type)
+    .eq('location', primary.location)
     .eq('resolved', false)
-    .select()
-    .maybeSingle();
-  if (error) throw error;
-  return data as DbReport | null;
+    .select();
+  if (batchErr) throw batchErr;
+
+  const resolvedList = (resolvedAll ?? []) as DbReport[];
+  const main = resolvedList.find(r => r.id === id) ?? resolvedList[0] ?? null;
+  const related = resolvedList.filter(r => r.id !== id);
+
+  return { primary: main, related };
 }
 
 // ── Rate limiter ────────────────────────────────────────────────────
@@ -332,8 +350,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
 
   const resolvedBy = resolvedByOver ?? (member as any)?.full_name ?? 'สมาชิกสภา';
 
-  // อัปเดตใน Supabase DB (ทำงานข้าม instance ได้)
-  const updated = await resolveReport(id, resolvedBy, resolvedNote);
+  // อัปเดตใน Supabase DB — resolve ทุกรายงานที่ report_type + location เดียวกัน
+  const { primary: updated, related } = await resolveReport(id, resolvedBy, resolvedNote);
 
   if (!updated) {
     // ไม่พบรายงาน หรือดำเนินการแล้ว
@@ -351,16 +369,22 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // แจ้ง LINE bot เพื่ออัปเดตข้อความ (เฉพาะจากเว็บ ไม่ใช่จาก bot postback)
-  if (!isBot && updated.line_message_id) {
-    void callBotUpdate({
-      messageId: updated.line_message_id,
-      reportId: updated.id,
-      reportType: updated.report_type,
-      location: updated.location,
-      resolvedBy,
-      resolvedNote,
-    });
+  // แจ้ง LINE bot เพื่ออัปเดตข้อความทุกรายงานที่ resolve
+  // (รวมตัวหลัก + related reports)
+  if (!isBot) {
+    const allResolved = [updated, ...related];
+    for (const r of allResolved) {
+      if (r.line_message_id) {
+        void callBotUpdate({
+          messageId: r.line_message_id,
+          reportId: r.id,
+          reportType: r.report_type,
+          location: r.location,
+          resolvedBy,
+          resolvedNote,
+        });
+      }
+    }
   }
 
   // ส่ง SSE event (instance เดียวกันได้ทันที, instance อื่นได้ผ่าน Supabase Realtime)
