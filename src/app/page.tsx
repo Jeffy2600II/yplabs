@@ -4,21 +4,18 @@
 // Purpose: Home page — greeting card + duty roster + zone check feed + landing section
 // Used by: AppShell navigation (/)
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import AppShell from '@/components/AppShell';
 import GreetingCard from '@/components/GreetingCard';
 import HomeLanding from '@/components/HomeLanding';
 import { useAuth } from '@/context/AuthContext';
-import { useData, invalidate } from '@/lib/dataCore';
-import { useRealtime } from '@/lib/realtimeHooks';
+import { useCouncilData } from '@/lib/useCouncilData';
 import { remoteLog } from '@/lib/remoteLogger';
 import { getTodayTH } from '@/lib/clientDateUtils';
 import PhotoModal from '@/components/PhotoModal';
 
 const TODAY = getTodayTH();
-const ZONES_URL = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector:inspector_name,note,photo_url,recorded_at:created_at')}`;
-const DUTY_URL  = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,auth_uid')}`;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -44,37 +41,29 @@ function timeSince(iso: string) {
 
 export default function HomePage() {
   const { user, isMember, loading: authLoading } = useAuth();
-  const [zonesTick, setZonesTick] = useState(0);
-  const [dutyTick,  setDutyTick]  = useState(0);
   const [photoSrc,  setPhotoSrc]  = useState<string | null>(null);
 
-  const {
-    data: zonesRaw, loading: loadingZones,
-    error: errorZones, refresh: refreshZones,
-  } = useData<any[]>(ZONES_URL, { realtimeTick: zonesTick, pollIntervalMs: 30_000 });
+  // ── ดึงข้อมูลจาก Supabase โดยตรง + auto-update via Realtime ──
+  const { data: zonesRaw, loading: loadingZones, error: errorZones, refetch: refreshZones } =
+    useCouncilData({
+      table: 'council_zone_checks',
+      filters: { check_date: TODAY },
+      select: 'zone,status,inspector:inspector_name,note,photo_url,recorded_at:created_at',
+    });
 
-  const {
-    data: duties, loading: loadingDuties,
-    error: errorDuties, refresh: refreshDuties,
-  } = useData<any[]>(DUTY_URL, { realtimeTick: dutyTick, pollIntervalMs: 30_000 });
+  const { data: duties, loading: loadingDuties, error: errorDuties, refetch: refreshDuties } =
+    useCouncilData({
+      table: 'council_duty',
+      filters: { duty_date: TODAY },
+      select: 'id,student_name,student_id,checked_in,checked_in_at,auth_uid',
+    });
 
   useEffect(() => {
-    if (errorZones)  void remoteLog('error', '[home] zones fetch failed',  { error: errorZones });
+    if (errorZones) void remoteLog('error', '[home] zones fetch failed', { error: errorZones });
   }, [errorZones]);
   useEffect(() => {
     if (errorDuties) void remoteLog('error', '[home] duties fetch failed', { error: errorDuties });
   }, [errorDuties]);
-
-  useRealtime({
-    table: 'council_duty',
-    onData: useCallback(() => { invalidate(DUTY_URL); setDutyTick(n => n + 1); }, []),
-    debounceMs: 500,
-  });
-  useRealtime({
-    table: 'council_zone_checks',
-    onData: useCallback(() => { invalidate(ZONES_URL); setZonesTick(n => n + 1); }, []),
-    debounceMs: 500,
-  });
 
   const zoneList  = zonesRaw ?? [];
   const dutyList  = duties   ?? [];

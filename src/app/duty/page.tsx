@@ -12,8 +12,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { getFreshToken } from '@/lib/sessionUtils';
-import { useRealtime } from '@/lib/realtimeHooks';
-import { useData, invalidate } from '@/lib/dataCore';
+import { useCouncilData } from '@/lib/useCouncilData';
 import { remoteLog } from '@/lib/remoteLogger';
 import { getTodayTH } from '@/lib/clientDateUtils';
 
@@ -30,9 +29,7 @@ type DutyEntry = {
 
 // ── Constants ─────────────────────────────────────────────────────
 const TODAY          = getTodayTH();
-const DUTY_URL       = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: TODAY }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
 const CHECKIN_URL    = '/api/council/duty/checkin';
-const POLL_INTERVAL_MS = 30_000;
 
 // ── Helpers ───────────────────────────────────────────────────────
 function getInitials(name: string): string {
@@ -46,26 +43,21 @@ function formatTime(iso: string): string {
 // ── Component ─────────────────────────────────────────────────────
 export default function DutyPage() {
   const { user, isMember, loading: authLoading } = useAuth();
-  const [dutyTick, setDutyTick] = useState(0);
 
-  const { data: duties, loading, error: fetchError, refresh } = useData<DutyEntry[]>(DUTY_URL, {
-    realtimeTick: dutyTick,
-    pollIntervalMs: POLL_INTERVAL_MS,
-  });
+  // ── ดึงข้อมูลจาก Supabase โดยตรง + auto-update via Realtime ──
+  const { data: duties, loading, error: fetchError, refetch: refresh } =
+    useCouncilData<DutyEntry>({
+      table: 'council_duty',
+      filters: { duty_date: TODAY },
+      select: 'id,student_name,student_id,checked_in,checked_in_at,note,auth_uid',
+    });
   const dutyList = duties ?? [];
 
   useEffect(() => {
     if (fetchError) {
-      void remoteLog('error', '[duty] fetch failed', { error: fetchError, url: DUTY_URL });
+      void remoteLog('error', '[duty] fetch failed', { error: fetchError });
     }
   }, [fetchError]);
-
-  const handleRealtimeUpdate = useCallback(() => {
-    invalidate(DUTY_URL);
-    setDutyTick(n => n + 1);
-  }, []);
-
-  useRealtime({ table: 'council_duty', onData: handleRealtimeUpdate, debounceMs: 500 });
 
   const [note, setNote]                     = useState('');
   const [checkingIn, setCheckingIn]         = useState(false);
@@ -105,8 +97,7 @@ export default function DutyPage() {
       setSuccess(`เช็คอินสำเร็จแล้ว ✅${json.is_walkin ? ' (Walk-in)' : ''}`);
       setNote('');
       setCheckinExpanded(false);
-      invalidate(DUTY_URL);
-      setDutyTick(n => n + 1);
+      void refresh();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
       setCheckInError(msg);

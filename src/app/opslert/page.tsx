@@ -17,7 +17,7 @@ import AppShell from '@/components/AppShell';
 import { useAuth } from '@/context/AuthContext';
 import { REPORT_MODULES, type ReportModule } from '@/lib/opslertConfig';
 import { getFreshToken } from '@/lib/sessionUtils';
-import { useSupabaseRealtime } from '@/lib/useSupabaseRealtime';
+import { useRealtime } from '@/lib/realtimeHooks';
 import Link from 'next/link';
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -252,7 +252,7 @@ export default function OpslertHubPage() {
   // กลไกเดียวที่รับข้อมูล real-time — เมื่อมีการเปลี่ยนแปลงบน opslert_reports
   // Supabase จะ push มาทันที ไม่ว่าจาก Vercel instance ไหน
   // ไม่ต้อง polling ไม่ต้อง SSE — ประหยัดทรัพยากร 100%
-  useSupabaseRealtime('opslert_reports', loadData);
+  useRealtime({ table: 'opslert_reports', onData: loadData });
 
   // ── Optimistic update after web resolve ────────────────────────
   function handleResolved(

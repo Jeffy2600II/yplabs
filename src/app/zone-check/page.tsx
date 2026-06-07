@@ -12,8 +12,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
 import { fetchWithAuth } from '@/lib/sessionUtils';
-import { useData, invalidate } from '@/lib/dataCore';
-import { useRealtime } from '@/lib/realtimeHooks';
+import { useCouncilData } from '@/lib/useCouncilData';
 import { remoteLog } from '@/lib/remoteLogger';
 import { getTodayTH } from '@/lib/clientDateUtils';
 
@@ -37,10 +36,8 @@ type ComposeState = {
 // ── Constants ─────────────────────────────────────────────────────
 const ZONES = ['ม.1/1', 'ม.1/2', 'ม.2/1', 'ม.2/2', 'ม.3/1', 'ม.3/2', 'ม.4', 'ม.5', 'ม.6'] as const;
 const TODAY           = getTodayTH();
-const ZONES_URL       = `/api/data?resource=council_zone_checks&filters=${encodeURIComponent(JSON.stringify({ check_date: TODAY }))}&select=${encodeURIComponent('zone,status,inspector:inspector_name,note,recorded_at:created_at')}`;
 const ZONE_CHECK_API  = '/api/council/zone-check';
 const MAX_PHOTO_MB    = 8;
-const POLL_INTERVAL_MS = 30_000;
 
 function initCompose(): ComposeState {
   return { zone: null, status: null, note: '', file: null, preview: null };
@@ -57,25 +54,19 @@ function getInitials(name: string): string {
 // ── Component ─────────────────────────────────────────────────────
 export default function ZoneCheckPage() {
   const { isMember, loading: authLoading } = useAuth();
-  const [zonesTick, setZonesTick]           = useState(0);
   const [compose, setCompose]               = useState<ComposeState>(initCompose);
   const [showConfirm, setShowConfirm]       = useState(false);
   const [submitting, setSubmitting]         = useState(false);
   const [submitError, setSubmitError]       = useState<string | null>(null);
   const fileInputRef                        = useRef<HTMLInputElement>(null);
 
-  const handleRealtimeUpdate = useCallback(() => {
-    invalidate(ZONES_URL);
-    setZonesTick(n => n + 1);
-  }, []);
-
-  useRealtime({ table: 'council_zone_checks', onData: handleRealtimeUpdate, debounceMs: 500 });
-
-  const { data: serverZones, loading: serverLoading, error: fetchError } =
-    useData<ServerZone[]>(ZONES_URL, {
+  // ── ดึงข้อมูลจาก Supabase โดยตรง + auto-update via Realtime ──
+  const { data: serverZones, loading: serverLoading, error: fetchError, refetch } =
+    useCouncilData<ServerZone>({
+      table: 'council_zone_checks',
+      filters: { check_date: TODAY },
+      select: 'zone,status,inspector:inspector_name,note,recorded_at:created_at',
       enabled: !authLoading,
-      realtimeTick: zonesTick,
-      pollIntervalMs: POLL_INTERVAL_MS,
     });
 
   useEffect(() => {
@@ -156,11 +147,10 @@ export default function ZoneCheckPage() {
       // Free preview URL after successful upload
       if (compose.preview) URL.revokeObjectURL(compose.preview);
 
-      // Reset composer and refresh feed
+      // Reset composer and refresh feed (Realtime จะ update อัตโนมัติ แต่ refetch ด้วยเผื่อช้า)
       setCompose(initCompose());
       if (fileInputRef.current) fileInputRef.current.value = '';
-      invalidate(ZONES_URL);
-      setZonesTick(n => n + 1);
+      void refetch();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
       setSubmitError(msg);
