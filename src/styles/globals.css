@@ -28,12 +28,12 @@
   --brand-glow: rgba(91,91,214,0.22);
   --gold:       #F59F00;
 
-  /* Backgrounds — cool blue-tinted */
-  --bg:        #ECEFF8;
+  /* Backgrounds — clean pure white / soft neutral */
+  --bg:        #FAFBFC;
   --surface:   #FFFFFF;
-  --surface-2: #F3F5FD;
-  --surface-3: #E8EBF6;
-  --surface-4: #DDE1F0;
+  --surface-2: #F5F6F8;
+  --surface-3: #EEEEF2;
+  --surface-4: #E4E5EB;
 
   /* Sidebar */
   --sb-bg:      #09090F;
@@ -44,19 +44,19 @@
   --sb-active:  rgba(160,165,255,0.12);
   --sb-hover:   rgba(160,165,255,0.05);
 
-  /* Borders — blue-tinted so they harmonize with the cool bg */
-  --border:   rgba(80,90,200,0.08);
-  --border-2: rgba(80,90,200,0.14);
-  --border-3: rgba(80,90,200,0.22);
+  /* Borders — soft neutral gray */
+  --border:   rgba(0,0,0,0.06);
+  --border-2: rgba(0,0,0,0.10);
+  --border-3: rgba(0,0,0,0.16);
 
-  /* Text — slight blue cast keeps them from reading warm/yellow */
-  --text:   #0A0C1C;
-  --text-2: #272A48;
-  --text-3: #626899;
-  --text-4: #9DA2C4;
+  /* Text — pure neutral, no color cast */
+  --text:   #111111;
+  --text-2: #3A3A3A;
+  --text-3: #7A7A7A;
+  --text-4: #A8A8A8;
   /* Legacy aliases kept for backward compat with existing components */
-  --t3: #626899;
-  --t4: #9DA2C4;
+  --t3: #7A7A7A;
+  --t4: #A8A8A8;
 
   /* Status */
   --green:  #0EA158; --green-bg:  #E6F9EF; --green-border:  rgba(14,161,88,0.18);
@@ -77,11 +77,11 @@
   --r-card: 40px;
 
   /* Shadows — blue-tinted so they don't look brown/warm */
-  --shadow-xs:   0 1px 2px rgba(10,12,40,0.04);
-  --shadow-sm:   0 1px 4px rgba(10,12,40,0.06), 0 0 0 1px rgba(80,90,200,0.06);
-  --shadow-md:   0 4px 20px rgba(10,12,40,0.08), 0 0 0 1px rgba(80,90,200,0.07);
-  --shadow-card: 0 0 0 1px var(--border), 0 2px 10px rgba(10,12,40,0.04);
-  --shadow-lg:   0 8px 32px rgba(10,12,40,0.12), 0 0 0 1px rgba(80,90,200,0.07);
+  --shadow-xs:   0 1px 2px rgba(0,0,0,0.04);
+  --shadow-sm:   0 1px 4px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.04);
+  --shadow-md:   0 4px 20px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04);
+  --shadow-card: 0 0 0 1px var(--border), 0 2px 10px rgba(0,0,0,0.03);
+  --shadow-lg:   0 8px 32px rgba(0,0,0,0.10), 0 0 0 1px rgba(0,0,0,0.04);
 
   /* Layout */
   --sw: 240px; /* sidebar width */
@@ -223,7 +223,7 @@ img { max-width: 100%; display: block; }
 
 .app-topbar {
   height: var(--th);
-  background: rgba(236,239,248,0.92);
+  background: rgba(255,255,255,0.92);
   backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
