@@ -14,7 +14,9 @@ import { useRouter } from 'next/navigation';
 import { useRealtime } from '@/lib/realtimeHooks';
 import { useAuthData, invalidate } from '@/lib/dataCore';
 import { getFreshToken } from '@/lib/sessionUtils';
-import { getTodayTH } from '@/lib/clientDateUtils';
+
+const TODAY = typeof window !== 'undefined' ? getTodayTH() : '';
+const TH_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 // ── Types ─────────────────────────────────────────────────────────
 type DutyEntry = {
@@ -44,13 +46,7 @@ type ConfirmState = {
 
 const CLOSED_CONFIRM: ConfirmState = { open: false, action: null, id: '', name: '' };
 
-const TODAY          = typeof window !== 'undefined' ? getTodayTH() : new Date().toISOString().split('T')[0];
 const USERS_URL      = '/api/data?resource=council_users&select=auth_uid,full_name,student_id,year';
-const PUBLIC_DUTY_URL = `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: getTodayTH() }))}&select=${encodeURIComponent('id,student_name,student_id,checked_in,checked_in_at,note,auth_uid')}`;
-
-function adminDutyUrl(date: string): string {
-  return `/api/data?resource=council_duty&filters=${encodeURIComponent(JSON.stringify({ duty_date: date }))}&select=${encodeURIComponent('id,student_name,student_id,auth_uid,checked_in,checked_in_at,note,duty_date')}`;
-}
 
 function getInitials(name: string): string {
   return name.trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
@@ -66,7 +62,6 @@ export default function AdminDutyPage() {
   const router = useRouter();
 
   const [rtTick, setRtTick]               = useState(0);
-  const [selectedDate, setSelectedDate]   = useState(TODAY);
   const [showAddModal, setShowAddModal]   = useState(false);
   const [users, setUsers]                 = useState<UserRow[]>([]);
   const [usersLoading, setUsersLoading]   = useState(false);
@@ -80,27 +75,29 @@ export default function AdminDutyPage() {
     if (!authLoading && !isAdmin) router.replace('/');
   }, [authLoading, isAdmin, router]);
 
-  const dutyUrl = adminDutyUrl(selectedDate);
+  const DUTY_URL = `/api/data?resource=council_duty&select=${encodeURIComponent('id,student_name,student_id,auth_uid,checked_in,checked_in_at,note')}`;
 
-  const { data: duties, loading } = useAuthData<DutyEntry[]>(dutyUrl, {
+  const { data: duties, loading } = useAuthData<DutyEntry[]>(DUTY_URL, {
     realtimeTick: rtTick,
     enabled: isAdmin,
   });
   const dutyList     = duties ?? [];
-  const checkedCount = dutyList.filter(d => d.checked_in).length;
+  const checkedCount = dutyList.filter(d => {
+    if (!d.checked_in_at) return false;
+    const thaiDate = new Date(new Date(d.checked_in_at).getTime() + TH_OFFSET_MS).toISOString().split('T')[0];
+    return thaiDate === TODAY;
+  }).length;
   const pendingCount = dutyList.length - checkedCount;
 
   const handleRealtimeUpdate = useCallback(() => {
-    invalidate(dutyUrl);
-    invalidate(PUBLIC_DUTY_URL);
+    invalidate(DUTY_URL);
     setRtTick(n => n + 1);
-  }, [dutyUrl]);
+  }, []);
 
   useRealtime({ table: 'council_duty', onData: handleRealtimeUpdate, debounceMs: 500 });
 
   function refreshDuty(): void {
-    invalidate(dutyUrl);
-    invalidate(PUBLIC_DUTY_URL);
+    invalidate(DUTY_URL);
     setRtTick(n => n + 1);
   }
 
@@ -137,7 +134,6 @@ export default function AdminDutyPage() {
           auth_uid:     user.auth_uid,
           student_name: user.full_name,
           student_id:   user.student_id ?? '',
-          duty_date:    selectedDate,
         }),
       });
       const json = await res.json();
@@ -253,39 +249,6 @@ export default function AdminDutyPage() {
         </div>
       </div>
 
-      {/* How duty works — brief explanation */}
-      <div className="card fade-up" style={{
-        marginBottom: 16,
-        background: 'var(--amber-bg)',
-        border: '1.5px solid var(--amber-border)',
-        padding: '12px 16px',
-      }}>
-        <div style={{ fontSize: 13, color: 'var(--amber)', fontWeight: 700, marginBottom: 4 }}>
-          💡 รายชื่อเวรทำงานยังไง?
-        </div>
-        <div style={{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.6 }}>
-          รายชื่อเวรถูกตั้งไว้ครั้งเดียวและใช้ซ้ำทุกวัน — สมาชิกแค่มาเช็คอินเอง
-          ถ้าใครมาแทนหรือไม่ได้อยู่ในรายชื่อ ก็สามารถ <strong>walk-in</strong> และเช็คอินได้เลย
-          โดยไม่ต้องแก้รายชื่อเวร
-        </div>
-      </div>
-
-      {/* Date filter + Add button */}
-      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
-        <div className="form-group" style={{ marginBottom: 0 }}>
-          <label className="form-label">ดูเช็คอินของวันที่</label>
-          <input
-            type="date"
-            value={selectedDate}
-            onChange={e => { setSelectedDate(e.target.value); invalidate(adminDutyUrl(e.target.value)); }}
-            style={{ width: 'auto' }}
-          />
-        </div>
-        <button onClick={openAddModal} className="btn btn-primary" style={{ alignSelf: 'flex-end' }}>
-          ＋ เพิ่มรายชื่อเวร
-        </button>
-      </div>
-
       {/* Stats */}
       <div className="grid-3" style={{ marginBottom: 16 }}>
         {[
@@ -298,6 +261,11 @@ export default function AdminDutyPage() {
             <div className="stat-value" style={{ color: s.color, fontSize: 24 }}>{s.value}</div>
           </div>
         ))}
+      </div>
+
+      {/* Add button */}
+      <div style={{ marginBottom: 16 }}>
+        <button onClick={openAddModal} className="btn btn-primary">＋ เพิ่มรายชื่อเวร</button>
       </div>
 
       {/* Alerts */}
@@ -318,7 +286,7 @@ export default function AdminDutyPage() {
       <div className="data-list">
         <div className="data-list-header">
           <span className="data-list-title">
-            เวร — {new Date(selectedDate + 'T00:00:00').toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' })}
+            รายชื่อเวร
           </span>
           <span className="badge badge-blue">{dutyList.length} คน</span>
         </div>

@@ -16,6 +16,14 @@ import { getTodayTH } from '@/lib/clientDateUtils';
 import PhotoModal from '@/components/PhotoModal';
 
 const TODAY = getTodayTH();
+const TH_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+// ตรวจสอบว่า checked_in_at เป็นวันนี้ (ไทย UTC+7) หรือยัง
+function isCheckedInToday(checkedInAt: string | null): boolean {
+  if (!checkedInAt) return false;
+  const thaiDate = new Date(new Date(checkedInAt).getTime() + TH_OFFSET_MS).toISOString().split('T')[0];
+  return thaiDate === TODAY;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -54,7 +62,6 @@ export default function HomePage() {
   const { data: duties, loading: loadingDuties, error: errorDuties, refetch: refreshDuties } =
     useCouncilData({
       table: 'council_duty',
-      filters: { duty_date: TODAY },
       select: 'id,student_name,student_id,checked_in,checked_in_at,auth_uid',
     });
 
@@ -67,7 +74,7 @@ export default function HomePage() {
 
   const zoneList  = zonesRaw ?? [];
   const dutyList  = duties   ?? [];
-  const checkedIn = dutyList.filter((d: any) => d.checked_in).length;
+  const checkedIn = dutyList.filter((d: any) => isCheckedInToday(d.checked_in_at)).length;
 
   const todayLabel = new Date().toLocaleDateString('th-TH', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
@@ -129,7 +136,7 @@ export default function HomePage() {
             <div className="duty-feed">
               {dutyList.map((d: any) => (
                 <div key={d.id} className="duty-row">
-                  <div className={`duty-indicator ${d.checked_in ? 'on' : 'off'}`} />
+                  <div className={`duty-indicator ${isCheckedInToday(d.checked_in_at) ? 'on' : 'off'}`} />
                   <div className="duty-row-name">
                     {d.student_name}
                     {d.auth_uid === user?.auth_uid && (
@@ -137,7 +144,7 @@ export default function HomePage() {
                     )}
                   </div>
                   <span className="duty-row-id">{d.student_id}</span>
-                  {d.checked_in && d.checked_in_at
+                  {isCheckedInToday(d.checked_in_at) && d.checked_in_at
                     ? <span className="duty-row-time">{formatTime(d.checked_in_at)}</span>
                     : <span className="duty-row-wait">รอ</span>
                   }

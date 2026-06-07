@@ -331,22 +331,6 @@ export default function OpslertHubPage() {
         </div>
       )}
 
-      {/* ── All clear ──────────────────────────────────────────── */}
-      {!loading && pendingCount === 0 && (data?.reports.length ?? 0) === 0 && (
-        <div className="card fade-up" style={{
-          marginBottom: 16,
-          background: 'var(--green-bg)',
-          border: '1.5px solid var(--green-border)',
-          borderLeft: '4px solid var(--green)',
-          display: 'flex', alignItems: 'center', gap: 10,
-        }}>
-          <span style={{ fontSize: 20, flexShrink: 0 }}>✅</span>
-          <span style={{ fontWeight: 700, fontSize: 13.5, color: 'var(--green)' }}>
-            ทุกอย่างปกติ
-          </span>
-        </div>
-      )}
-
       {/* ── Module cards ───────────────────────────────────────── */}
       {REPORT_MODULES.map((module, idx) => {
         const status     = getStatus(module.id);
@@ -360,12 +344,12 @@ export default function OpslertHubPage() {
             className="card fade-up"
             style={{
               marginBottom: 12,
-              borderLeft: `4px solid ${isPending ? 'var(--amber)' : isResolved ? 'var(--green)' : 'var(--border-2)'}`,
+              borderLeft: `4px solid ${isPending ? 'var(--amber)' : 'var(--border-2)'}`,
               animationDelay: `${idx * 50}ms`,
               transition: 'border-color .25s var(--ease)',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: isPending || isResolved ? 12 : 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: isPending ? 12 : 0 }}>
               <div style={{
                 width: 42, height: 42, borderRadius: 'var(--r-lg)',
                 background: module.bg, border: `1.5px solid ${module.border}`,
@@ -395,17 +379,13 @@ export default function OpslertHubPage() {
                 ) : isResolved && report ? (
                   <div style={{
                     display: 'inline-flex', alignItems: 'center', gap: 5,
-                    background: 'var(--green-bg)', border: '1px solid var(--green-border)',
+                    background: 'var(--surface-2)', border: '1px solid var(--border)',
                     borderRadius: 'var(--r-pill)', padding: '3px 10px',
-                    fontSize: 11.5, fontWeight: 700, color: 'var(--green)',
+                    fontSize: 11.5, fontWeight: 700, color: 'var(--text-3)',
                   }}>
                     ✅ ดำเนินการแล้ว{report.resolvedAt ? ` · ${timeSince(report.resolvedAt)}` : ''}
                   </div>
-                ) : (
-                  <div style={{ fontSize: 11.5, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <span className="rt-dot" />ปกติ
-                  </div>
-                )}
+                ) : null}
               </div>
             </div>
 
@@ -438,8 +418,8 @@ export default function OpslertHubPage() {
             {!isPending && isResolved && report?.resolvedBy && (
               <div style={{
                 padding: '8px 12px', fontSize: 12.5,
-                background: 'var(--green-bg)', border: '1px solid var(--green-border)',
-                borderRadius: 'var(--r-lg)', marginBottom: 10, color: 'var(--green)',
+                background: 'var(--surface-2)', border: '1px solid var(--border)',
+                borderRadius: 'var(--r-lg)', marginBottom: 10, color: 'var(--text-3)',
               }}>
                 โดย <strong>{report.resolvedBy}</strong>
                 {report.resolvedNote && ` — ${report.resolvedNote}`}

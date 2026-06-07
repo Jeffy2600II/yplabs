@@ -30,6 +30,13 @@ type DutyEntry = {
 // ── Constants ─────────────────────────────────────────────────────
 const TODAY          = getTodayTH();
 const CHECKIN_URL    = '/api/council/duty/checkin';
+const TH_OFFSET_MS    = 7 * 60 * 60 * 1000;
+
+function isCheckedInToday(checkedInAt: string | null): boolean {
+  if (!checkedInAt) return false;
+  const thaiDate = new Date(new Date(checkedInAt).getTime() + TH_OFFSET_MS).toISOString().split('T')[0];
+  return thaiDate === TODAY;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────
 function getInitials(name: string): string {
@@ -48,7 +55,6 @@ export default function DutyPage() {
   const { data: duties, loading, error: fetchError, refetch: refresh } =
     useCouncilData<DutyEntry>({
       table: 'council_duty',
-      filters: { duty_date: TODAY },
       select: 'id,student_name,student_id,checked_in,checked_in_at,note,auth_uid',
     });
   const dutyList = duties ?? [];
@@ -69,7 +75,7 @@ export default function DutyPage() {
   const [showCheckinConfirm, setShowCheckinConfirm] = useState(false);
 
   const myEntry      = user ? dutyList.find(d => d.auth_uid === user.auth_uid) : null;
-  const checkedCount = dutyList.filter(d => d.checked_in).length;
+  const checkedCount = dutyList.filter(d => isCheckedInToday(d.checked_in_at)).length;
   const pendingCount = dutyList.length - checkedCount;
   const progress     = dutyList.length ? Math.round((checkedCount / dutyList.length) * 100) : 0;
   const isWalkin     = isMember && !myEntry;
@@ -178,7 +184,7 @@ export default function DutyPage() {
       )}
 
       {/* ── Check-in card — collapsed by default (safety design) ── */}
-      {isMember && !myEntry?.checked_in && !authLoading && (
+      {isMember && !isCheckedInToday(myEntry?.checked_in_at) && !authLoading && (
         <div
           className="card fade-up"
           style={{
@@ -194,7 +200,7 @@ export default function DutyPage() {
           >
             <div>
               <div style={{ fontWeight: 700, fontSize: 13.5 }}>
-                {isWalkin ? '🚶 Walk-in เข้าร่วมวันนี้' : '🏫 คุณมีรายชื่อในเวรวันนี้'}
+                {isWalkin ? '🚶 Walk-in เข้าร่วม' : '🏫 คุณมีรายชื่อในเวร'}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
                 {isWalkin
@@ -240,7 +246,7 @@ export default function DutyPage() {
       )}
 
       {/* Already checked-in */}
-      {isMember && myEntry?.checked_in && (
+      {isMember && isCheckedInToday(myEntry?.checked_in_at) && (
         <div className="alert alert-success fade-up" style={{ marginBottom: 16 }}>
           ✅ คุณเช็คอินแล้วเมื่อ{' '}
           {myEntry.checked_in_at ? formatTime(myEntry.checked_in_at) : ''}
@@ -259,7 +265,7 @@ export default function DutyPage() {
       {/* Duty feed */}
       <div className="feed-list fade-up">
         <div className="section-head">
-          <span className="section-head-title">รายชื่อผู้ปฏิบัติหน้าที่วันนี้</span>
+          <span className="section-head-title">รายชื่อผู้ปฏิบัติหน้าที่</span>
           <span className="badge badge-blue">{dutyList.length} คน</span>
         </div>
 
@@ -278,7 +284,7 @@ export default function DutyPage() {
         ) : dutyList.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">📋</div>
-            <div>ยังไม่มีรายชื่อเวรสำหรับวันนี้</div>
+            <div>ยังไม่มีรายชื่อเวร</div>
           </div>
         ) : (
           dutyList.map((d, idx) => (
@@ -294,8 +300,8 @@ export default function DutyPage() {
                 <div
                   className="post-avatar"
                   style={{
-                    background: d.checked_in ? 'linear-gradient(135deg,#6EE7B7,#059669)' : 'var(--surface-3)',
-                    color: d.checked_in ? '#fff' : 'var(--text-3)',
+                    background: isCheckedInToday(d.checked_in_at) ? 'linear-gradient(135deg,#6EE7B7,#059669)' : 'var(--surface-3)',
+                    color: isCheckedInToday(d.checked_in_at) ? '#fff' : 'var(--text-3)',
                     border: d.auth_uid === user?.auth_uid ? '2px solid var(--brand)' : undefined,
                   }}
                 >
@@ -304,7 +310,7 @@ export default function DutyPage() {
                 <div style={{
                   position: 'absolute', bottom: -1, right: -1,
                   width: 10, height: 10, borderRadius: '50%',
-                  background: d.checked_in ? 'var(--green)' : 'var(--border-2)',
+                  background: isCheckedInToday(d.checked_in_at) ? 'var(--green)' : 'var(--border-2)',
                   border: '2px solid white',
                 }} />
               </div>
@@ -317,16 +323,16 @@ export default function DutyPage() {
                       <span className="badge badge-blue" style={{ marginLeft: 6, fontSize: 9 }}>คุณ</span>
                     )}
                   </span>
-                  {d.checked_in && d.checked_in_at && (
+                  {isCheckedInToday(d.checked_in_at) && d.checked_in_at && (
                     <span style={{ fontSize: 11, color: 'var(--green)', fontWeight: 700 }}>{formatTime(d.checked_in_at)}</span>
                   )}
                 </div>
                 <div className="post-meta">
                   <span style={{ fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'var(--text-3)' }}>{d.student_id}</span>
                   <span className="post-sep">·</span>
-                  <span className={`status-pill ${d.checked_in ? 'clean' : 'pending'}`}>
+                  <span className={`status-pill ${isCheckedInToday(d.checked_in_at) ? 'clean' : 'pending'}`}>
                     <span className="dot" />
-                    {d.checked_in ? 'มาแล้ว' : 'รอ'}
+                    {isCheckedInToday(d.checked_in_at) ? 'มาแล้ว' : 'รอ'}
                   </span>
                 </div>
                 {d.note && <div className="post-note">"{d.note}"</div>}
