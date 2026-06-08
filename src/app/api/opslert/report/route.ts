@@ -249,23 +249,37 @@ async function callBotUpdate(opts: {
   }
 }
 
-/** แจ้ง LINE bot ว่ารายงานถูกอัพเกรดสถานะ (ใกล้หมด → หมดแล้ว) */
-async function callBotUpgrade(opts: {
-  messageId: string; reportId: string; reportType: string;
-  alertLevel: string; location: string; note: string;
-  upgradedFrom: string; upgradedTo: string;
-}): Promise<void> {
+/** ลบข้อความเก่า + ส่งข้อความใหม่ (สำหรับ Free Plan — ไม่มี edit message)
+ *  คืน messageId ของข้อความใหม่ เพื่ออัพเดต DB */
+async function replaceBotMessage(opts: {
+  oldMessageId: string;
+  reportId: string;
+  payload: ValidatedPayload;
+}): Promise<string | null> {
   const bot = getBotConfig();
-  if (!bot) return;
+  if (!bot) return null;
   try {
+    // 1) ลบข้อความเดิม
     await fetch(`${bot.url}/api/broadcast`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webhook-Secret': bot.secret },
-      body: JSON.stringify({ action: 'upgrade', ...opts }),
+      body: JSON.stringify({ action: 'delete', messageId: opts.oldMessageId, reportId: opts.reportId }),
       signal: AbortSignal.timeout(6_000),
     });
+
+    // 2) ส่งข้อความใหม่ด้วยสถานะล่าสุด
+    const newMsgRes = await fetch(`${bot.url}/api/receive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webhook-Secret': bot.secret },
+      body: JSON.stringify({ reportId: opts.reportId, ...opts.payload }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!newMsgRes.ok) return null;
+    const json = await newMsgRes.json();
+    return (json?.messageId as string) ?? null;
   } catch {
-    console.warn('[opslert/report] bot upgrade non-fatal failure');
+    console.warn('[opslert/report] replace message non-fatal failure');
+    return null;
   }
 }
 
@@ -353,18 +367,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       try {
         await upgradeReport(existing.id, payload.alertLevel, payload.note);
 
-        // แจ้ง LINE bot อัพเดตข้อความเดิม
+        // LINE: ลบข้อความเก่า + ส่งข้อความใหม่ (Free Plan)
         if (existing.line_message_id) {
-          void callBotUpgrade({
-            messageId: existing.line_message_id,
+          const newMessageId = await replaceBotMessage({
+            oldMessageId: existing.line_message_id,
             reportId: existing.id,
-            reportType: payload.reportType,
-            alertLevel: payload.alertLevel,
-            location: payload.location,
-            note: payload.note,
-            upgradedFrom: oldLevel,
-            upgradedTo: payload.alertLevel,
+            payload,
           });
+          // อัพเดต line_message_id ใน DB เป็นข้อความใหม่
+          if (newMessageId) {
+            const sb = getSupabaseAdmin();
+            await sb.from('opslert_reports')
+              .update({ line_message_id: newMessageId })
+              .eq('id', existing.id);
+          }
         }
 
         notifyAll();
