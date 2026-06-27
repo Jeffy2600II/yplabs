@@ -21,12 +21,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'ข้อมูลไม่ถูกต้อง' }, { status: 400 });
   }
   
-  const { full_name, account_type, student_id, year, email, password } = body;
+  const { full_name, account_type, student_id, national_id, year, email, password } = body;
   
   logger.info('register attempt', {
     account_type,
     hasName: !!full_name?.trim(),
     studentId: account_type === 'student' ? student_id : undefined,
+    nationalId: account_type === 'student' ? national_id : undefined,
     year: year ?? null,
   });
   
@@ -36,6 +37,10 @@ export async function POST(req: NextRequest) {
     }
     
     if (account_type === 'student') {
+      if (!/^\d{13}$/.test(national_id)) {
+        logger.warn('invalid national_id format', { national_id });
+        return NextResponse.json({ error: 'เลขบัตรประชาชนต้องเป็นตัวเลข 13 หลัก' }, { status: 400 });
+      }
       if (!/^\d{5}$/.test(student_id)) {
         logger.warn('invalid student_id format', { student_id });
         return NextResponse.json({ error: 'รหัสนักเรียนต้องเป็นตัวเลข 5 หลัก' }, { status: 400 });
@@ -60,12 +65,29 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'รหัสนักเรียนนี้มีคำขออยู่แล้ว' }, { status: 400 });
       }
       
+      // ตรวจสอบซ้ำด้วย national_id
+      const { data: existingNid, error: dupNidErr } = await supabase
+        .from('council_join_requests')
+        .select('id')
+        .eq('national_id', national_id)
+        .limit(1);
+      
+      if (dupNidErr) {
+        logger.supabaseError('check duplicate national_id', dupNidErr, { national_id });
+      }
+      
+      if (existingNid && existingNid.length > 0) {
+        logger.warn('duplicate national_id register attempt', { national_id });
+        return NextResponse.json({ error: 'เลขบัตรประชาชนนี้มีคำขออยู่แล้ว' }, { status: 400 });
+      }
+      
       const synthesized = synthesizeEmail(student_id);
-      logger.debug('inserting student join request', { student_id, year, synEmail: synthesized });
+      logger.debug('inserting student join request', { student_id, national_id, year, synEmail: synthesized });
       
       const { error } = await supabase.from('council_join_requests').insert({
         full_name: full_name.trim(),
         student_id,
+        national_id,
         year: Number(year),
         account_type: 'student',
         email: synthesized,

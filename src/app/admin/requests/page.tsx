@@ -20,6 +20,7 @@ type RequestRow = {
   id: string;
   full_name: string;
   student_id: string | null;
+  national_id: string | null;
   year: number | null;
   email: string | null;
   message: string | null;
@@ -28,7 +29,7 @@ type RequestRow = {
 };
 
 // ── Constants ─────────────────────────────────────────────────────
-const REQUESTS_URL = '/api/data?resource=council_join_requests&select=id,full_name,student_id,year,email,message,account_type,created_at';
+const REQUESTS_URL = '/api/data?resource=council_join_requests&select=id,full_name,student_id,national_id,year,email,message,account_type,created_at';
 
 const TYPE_CONFIG: Record < string, { label: string;icon: string;gradient: string } > = {
   student: { label: 'นักเรียน', icon: '👩‍🎓', gradient: 'linear-gradient(135deg,#8A8EF8,#5B5BD6)' },
@@ -209,6 +210,7 @@ export default function AdminRequestsPage() {
                     </div>
                     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--text-3)' }}>
                       {r.student_id && <span>🎓 <strong style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>{r.student_id}</strong></span>}
+                      {r.national_id && <span>🪪 <strong style={{ color: 'var(--text-2)', fontFamily: 'var(--font-mono)' }}>{r.national_id.slice(0, 3)}-XXXX-XXXXX-{r.national_id.slice(-2)}</strong></span>}
                       {r.email      && <span>📧 {r.email}</span>}
                       {r.year       && <span>📅 ปี {r.year}</span>}
                     </div>

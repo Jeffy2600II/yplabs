@@ -7,6 +7,7 @@ export default function RegisterPage() {
   const [type, setType] = useState<'student'|'teacher'|'other'>('student');
   const [fullName, setFullName] = useState('');
   const [studentId, setStudentId] = useState('');
+  const [nationalId, setNationalId] = useState('');
   const [year, setYear] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -27,6 +28,7 @@ export default function RegisterPage() {
     try {
       if (!fullName.trim()) throw new Error('กรุณากรอกชื่อ-นามสกุล');
       if (type === 'student') {
+        if (!/^\d{13}$/.test(nationalId)) throw new Error('เลขบัตรประชาชนต้องเป็นตัวเลข 13 หลัก');
         if (!/^\d{5}$/.test(studentId)) throw new Error('รหัสนักเรียนต้องเป็นตัวเลข 5 หลัก');
         if (!year) throw new Error('กรุณาเลือกปีการศึกษา');
       } else {
@@ -34,7 +36,7 @@ export default function RegisterPage() {
         if (!password || password.length < 6) throw new Error('รหัสผ่านต้องไม่น้อยกว่า 6 ตัว');
       }
       const payload: any = { full_name: fullName.trim(), account_type: type };
-      if (type === 'student') { payload.student_id = studentId; payload.year = Number(year); }
+      if (type === 'student') { payload.student_id = studentId; payload.national_id = nationalId; payload.year = Number(year); }
       else { payload.email = email.trim(); payload.password = password; payload.year = year ? Number(year) : null; }
       const res = await fetch('/api/auth/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
       const json = await res.json();
@@ -95,6 +97,10 @@ export default function RegisterPage() {
                 </div>
                 {type === 'student' ? (
                   <>
+                    <div className="form-group">
+                      <label className="form-label">เลขบัตรประชาชน (13 หลัก) <span className="form-req">*</span></label>
+                      <input value={nationalId} onChange={e => setNationalId(e.target.value.replace(/\D/g, '').slice(0, 13))} placeholder="1234567890123" inputMode="numeric" maxLength={13} required />
+                    </div>
                     <div className="form-group">
                       <label className="form-label">รหัสนักเรียน (5 หลัก) <span className="form-req">*</span></label>
                       <input value={studentId} onChange={e => setStudentId(e.target.value)} placeholder="12345" inputMode="numeric" maxLength={5} required />

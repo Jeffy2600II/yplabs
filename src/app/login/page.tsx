@@ -64,7 +64,7 @@ export default function LoginPage() {
 
   // ── Login form state ───────────────────────────────────────────
   const [mode, setMode]         = useState<'student' | 'other'>('student');
-  const [fullName, setFullName] = useState('');
+  const [nationalId, setNationalId] = useState('');
   const [studentId, setStudentId] = useState('');
   const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
@@ -89,7 +89,7 @@ export default function LoginPage() {
   // ── Button click handler (counts clicks for trigger) ───────────
   function handleBtnClick() {
     // ถ้า field ถูกกรอก → ไม่นับ click (ปล่อยให้ form submit ตามปกติ)
-    const hasInput = fullName.trim() || studentId.trim() || email.trim() || password;
+    const hasInput = nationalId.trim() || studentId.trim() || email.trim() || password;
     if (hasInput) {
       btnTapCount.current = 0;
       return; // form submit จะจัดการเอง
@@ -153,7 +153,7 @@ export default function LoginPage() {
   async function handleStudentLogin(e: React.FormEvent) {
     e.preventDefault();
     setError(null); setLogs([]);
-    if (!fullName.trim()) return setError('กรุณากรอกชื่อ-นามสกุล');
+    if (!/^\d{13}$/.test(nationalId)) return setError('เลขบัตรประชาชนต้องเป็นตัวเลข 13 หลัก');
     if (!/^\d{5}$/.test(studentId)) return setError('รหัสนักเรียนต้องเป็นตัวเลข 5 หลัก');
 
     setLoading(true);
@@ -177,7 +177,7 @@ export default function LoginPage() {
 
       const { data: row, error: rowErr } = await supabase
         .from('council_users')
-        .select('auth_uid,full_name,student_id,year,role,account_type,approved,disabled')
+        .select('auth_uid,full_name,student_id,national_id,year,role,account_type,approved,disabled')
         .eq('auth_uid', signInData.user.id)
         .limit(1)
         .maybeSingle();
@@ -199,10 +199,10 @@ export default function LoginPage() {
       if (!row.approved) { await supabase.auth.signOut(); throw new Error('บัญชียังไม่ได้รับการอนุมัติ'); }
       if (row.disabled)  { await supabase.auth.signOut(); throw new Error('บัญชีถูกปิดใช้งาน'); }
 
-      if (row.full_name.trim().toLowerCase() !== fullName.trim().toLowerCase()) {
-        addLog(`❌ ชื่อไม่ตรง: DB="${row.full_name}" input="${fullName}"`);
+      if (!row.national_id || row.national_id.trim() !== nationalId.trim()) {
+        addLog(`❌ เลขบัตรประชาชนไม่ตรง: DB="${row.national_id}" input="${nationalId}"`);
         await supabase.auth.signOut();
-        throw new Error('ชื่อ-นามสกุลไม่ตรงกับข้อมูลในระบบ');
+        throw new Error('เลขบัตรประชาชนไม่ตรงกับข้อมูลในระบบ');
       }
 
       setCachedProfile(row as any);
@@ -468,11 +468,13 @@ export default function LoginPage() {
             {mode === 'student' ? (
               <form onSubmit={handleStudentLogin} style={{ display: 'flex', flexDirection: 'column', gap: 15 }}>
                 <div className="form-group">
-                  <label className="form-label">ชื่อ-นามสกุล (ตามที่สมัคร)</label>
+                  <label className="form-label">เลขบัตรประชาชน (13 หลัก)</label>
                   <input
-                    value={fullName}
-                    onChange={e => { setFullName(e.target.value); setError(null); btnTapCount.current = 0; }}
-                    placeholder="เช่น สมชาย ใจดี"
+                    value={nationalId}
+                    onChange={e => { setNationalId(e.target.value.replace(/\D/g, '').slice(0, 13)); setError(null); btnTapCount.current = 0; }}
+                    placeholder="1234567890123"
+                    inputMode="numeric"
+                    maxLength={13}
                     required
                     autoFocus
                     disabled={loading}
@@ -489,15 +491,16 @@ export default function LoginPage() {
                     required
                     disabled={loading}
                   />
+                  <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4 }}>รหัสนักเรียนใช้เป็นรหัสผ่านในการล็อกอิน</div>
                 </div>
 
                 {error && (
                   <div className="alert alert-error" style={{ fontSize: 13 }}>
                     <div>
                       <div>{error}</div>
-                      {error.includes('ชื่อ') && (
+                      {error.includes('บัตรประชาชน') && (
                         <div style={{ marginTop: 5, fontSize: 12, opacity: 0.85 }}>
-                          💡 กรอกชื่อตามที่สมัครไว้ทุกตัวอักษร
+                          💡 กรอกเลขบัตรประชาชนตามที่สมัครไว้ให้ครบ 13 หลัก
                         </div>
                       )}
                       {(error.includes('ไม่ถูกต้อง') || error.includes('ไม่พบ')) && (

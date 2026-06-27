@@ -90,6 +90,7 @@ export async function POST(req: NextRequest) {
     auth_uid: authData.user.id,
     full_name: req_row.full_name,
     student_id: req_row.student_id ?? null,
+    national_id: req_row.national_id ?? null,
     email: req_row.email ?? null,
     year: req_row.year,
     role: 'member',

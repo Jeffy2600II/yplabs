@@ -12,6 +12,7 @@ type CardRow = {
   full_name: string;
   account_type: 'student' | 'teacher' | 'other';
   student_id?: string | null;
+  national_id?: string | null;
   email?: string | null;
   password?: string | null;
   role?: string;
@@ -19,7 +20,7 @@ type CardRow = {
 };
 
 function newRow(): CardRow {
-  return { id: Math.random().toString(36).slice(2, 9), full_name: '', account_type: 'student', student_id: '', email: '', password: '', role: 'member', error: null };
+  return { id: Math.random().toString(36).slice(2, 9), full_name: '', account_type: 'student', student_id: '', national_id: '', email: '', password: '', role: 'member', error: null };
 }
 
 export default function AdminUsersNewPage() {
@@ -64,6 +65,7 @@ export default function AdminUsersNewPage() {
     if (!r.full_name?.trim()) return 'กรุณากรอกชื่อ-นามสกุล';
     if (r.account_type === 'student') {
       if (!r.student_id || !/^\d{5}$/.test(String(r.student_id))) return 'รหัสนักเรียนต้องเป็นตัวเลข 5 หลัก';
+      if (!r.national_id || !/^\d{13}$/.test(String(r.national_id))) return 'เลขบัตรประชาชนต้องเป็นตัวเลข 13 หลัก';
     } else {
       if (!r.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(r.email))) return 'กรุณากรอกอีเมลที่ถูกต้อง';
       if (!r.password || r.password.length < 6) return 'รหัสผ่านต้องไม่น้อยกว่า 6 ตัว';
@@ -81,7 +83,7 @@ export default function AdminUsersNewPage() {
       const token = await getToken();
       const users = validated.map(r => {
         const base: any = { full_name: r.full_name.trim(), account_type: r.account_type, year: selectedYear, role: r.role ?? 'member' };
-        if (r.account_type === 'student') base.student_id = String(r.student_id);
+        if (r.account_type === 'student') { base.student_id = String(r.student_id); base.national_id = String(r.national_id); }
         else { base.email = r.email?.trim(); base.password = r.password; }
         return base;
       });
@@ -159,7 +161,7 @@ export default function AdminUsersNewPage() {
                   </div>
                   <div className="form-group">
                     <label className="form-label">ประเภทบัญชี</label>
-                    <select value={r.account_type} onChange={e => update(r.id, { account_type: e.target.value as any, student_id: '', email: '', password: '' })}>
+                    <select value={r.account_type} onChange={e => update(r.id, { account_type: e.target.value as any, student_id: '', national_id: '', email: '', password: '' })}>
                       <option value="student">👩‍🎓 นักเรียน</option>
                       <option value="teacher">👨‍🏫 ครู</option>
                       <option value="other">👤 อื่นๆ</option>
@@ -168,11 +170,17 @@ export default function AdminUsersNewPage() {
                 </div>
 
                 {r.account_type === 'student' ? (
-                  <div className="grid-2" style={{ gap: 12 }}>
-                    <div className="form-group">
-                      <label className="form-label">รหัสนักเรียน (5 หลัก)</label>
-                      <input value={r.student_id ?? ''} onChange={e => update(r.id, { student_id: e.target.value })} placeholder="12345" inputMode="numeric" maxLength={5} />
-                      <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4 }}>ใช้เป็นรหัสผ่านเริ่มต้น</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div className="grid-2" style={{ gap: 12 }}>
+                      <div className="form-group">
+                        <label className="form-label">เลขบัตรประชาชน (13 หลัก)</label>
+                        <input value={r.national_id ?? ''} onChange={e => update(r.id, { national_id: e.target.value.replace(/\D/g, '').slice(0, 13) })} placeholder="1234567890123" inputMode="numeric" maxLength={13} />
+                      </div>
+                      <div className="form-group">
+                        <label className="form-label">รหัสนักเรียน (5 หลัก)</label>
+                        <input value={r.student_id ?? ''} onChange={e => update(r.id, { student_id: e.target.value })} placeholder="12345" inputMode="numeric" maxLength={5} />
+                        <div style={{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 4 }}>ใช้เป็นรหัสผ่านเริ่มต้น</div>
+                      </div>
                     </div>
                     <div className="form-group">
                       <label className="form-label">Role</label>

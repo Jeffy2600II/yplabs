@@ -57,6 +57,7 @@ export async function POST(req: NextRequest) {
         auth_uid: authData.user.id,
         full_name: u.full_name,
         student_id: u.student_id ?? null,
+        national_id: u.national_id ?? null,
         email: u.account_type !== 'student' ? u.email : null,
         year: u.year,
         role: u.role ?? 'member',

@@ -44,7 +44,7 @@ export async function GET(req: NextRequest) {
   
   let query = supabase
     .from('council_users')
-    .select('id, auth_uid, full_name, student_id, email, year, role, approved, disabled, account_type, created_at')
+    .select('id, auth_uid, full_name, student_id, national_id, email, year, role, approved, disabled, account_type, created_at')
     .order('full_name');
   
   if (targetYear !== null) query = query.eq('year', targetYear);
